@@ -362,10 +362,7 @@ CONFIG_INSTALLS = _visual(_column("Config", "Serial_Number"), _column("Installs"
 
 
 def test_a_field_bound_to_the_wrong_table_of_the_same_name_is_caught(tmp_path, capsys) -> None:
-    """THE #258 reproduction: every field resolves, Desktop says InvalidUnconstrainedJoin.
-
-    The "did you mean" list names only tables that would render: Scrap is as stranded as Config.
-    """
+    """THE #258 reproduction: every field resolves, Desktop says InvalidUnconstrainedJoin."""
     bundle = _write_star(tmp_path, visuals=[CONFIG_INSTALLS])
     result = cfb.scan(bundle)
     assert (result["status"], result["missing"], result["near_misses"]) == ("INCOHERENT", 0, 0)

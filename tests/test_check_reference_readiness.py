@@ -129,16 +129,7 @@ def workbook_package(root: Path, **kwargs: Any) -> Path:
 
 
 def write_png(path: Path, width: int = 320, height: int = 240) -> Path:
-    """A genuine, parseable PNG - not a signature stub, and distinct per file.
-
-    The round-1 fixtures wrote 8 bytes and asserted READY, so they encoded the very assumption the
-    gate was supposed to refuse. Anything claiming to be evidence in this file is a real image.
-
-    ⚠️ The pixels are seeded from the file NAME so two fixture renders are never byte-identical.
-    Round 5 keys exclusivity on the verified content digest, and real captures of two different
-    worksheets do not collide - a fixture that emitted identical bytes for every page would trip
-    exclusivity everywhere and model a situation that does not occur.
-    """
+    """A genuine, parseable PNG - not a signature stub, and distinct per file."""
 
     def chunk(tag: bytes, data: bytes) -> bytes:
         body = tag + data
@@ -173,12 +164,7 @@ def write_workbook(path: Path, *, worksheets: list[str], dashboards: dict[str, l
 
 
 def write_report(root: Path, unit: str, page_ids: list[str], *, base: str = "pbip") -> Path:
-    """A PBIR report shipping the given page ids under ``<root>/<base>/<unit>.Report``.
-
-    ``base`` is ``pbip`` for an engine bundle and ``fabric`` for a handover package - the packager
-    copies `pbip/<Unit>/` to `fabric/`, and `bundle_corpus.shipping_reports` scans `pbip/` in
-    preference when it exists, so a fixture carrying both would be a shape nothing produces.
-    """
+    """A PBIR report shipping the given page ids under ``<root>/<base>/<unit>.Report``."""
     report = root / base / unit / f"{unit}.Report" if base == "pbip" else root / base / f"{unit}.Report"
     pages = report / "definition" / "pages"
     pages.mkdir(parents=True, exist_ok=True)
@@ -212,12 +198,7 @@ def write_handover(
     viz_fidelity: list[dict] | None = None,
     pbip_warnings: list[str] | None = None,
 ) -> None:
-    """The engine's per-workbook handover slice.
-
-    `pbip_warnings` is populated by the routing tests on purpose: round-1 review found that the test
-    claiming to pin the `viz_fidelity[]`-over-`pbip_warnings[]` routing never supplied
-    `pbip_warnings` at all, so a mutation adding a flat-warning fallback survived the whole suite.
-    """
+    """The engine's per-workbook handover slice."""
     handover = root / "handover"
     handover.mkdir(parents=True, exist_ok=True)
     (handover / f"{unit}.json").write_text(
@@ -247,25 +228,7 @@ def write_reference(  # pylint: disable=too-many-arguments,too-many-locals
     entry_luid: str | None = None,
     state_luid: str | None = None,
 ) -> Path:
-    """A `reference/manifest.json`. Each entry is ``(name, provider, capabilities)``.
-
-    Mirrors the real producer, which records `sha256` and `dimensions` per state
-    (`capture_tableau_reference.py:246-257`). Round-2 review measured the gate ignoring both, so a
-    captured image could be swapped wholesale and readiness survived; a fixture that omitted them
-    could not have caught it. `record_integrity=False` exists to test that omission is a rejection.
-
-    Note the manifest's top-level key is `dashboards`, but `capture_tableau_reference.py:199` files
-    WORKSHEET thumbnails there too - which is why the key cannot be evidence of scope.
-
-    ``workbook_luid`` writes the manifest-level LUID key `check_unit._declared_workbook` already
-    reads. The producer does not write it today; a manifest carrying one is enriched or hand-edited,
-    which is exactly the shape the round-N contradiction finding used.
-
-    ``entry_luid`` and ``state_luid`` write the SAME key at the two narrower scopes both gates also
-    read. They exist because round 2 of PR #454 found the readers selecting one scope's claim by
-    precedence and discarding the others - a fixture that could only write one scope cannot express
-    a multi-scope contradiction, and so could not have caught it.
-    """
+    """A `reference/manifest.json`. Each entry is ``(name, provider, capabilities)``."""
     reference = root / "reference"
     reference.mkdir(parents=True, exist_ok=True)
     dashboards = []
@@ -310,11 +273,7 @@ OTHER_LUID = "007f70ac-bf40-4838-9d73-134d40f504db"
 
 
 def write_oracle(root: Path, views: list[dict], *, size: tuple[int, int] = (320, 240)) -> Path:
-    """An `_oracle/oracle-manifest.json`. Each view dict may carry `view_type` (PR #422).
-
-    Records `sha256`, `bytes` and `dimensions_px` per leg, as the real producer does
-    (`capture_tableau_oracle.py:687-705`).
-    """
+    """An `_oracle/oracle-manifest.json`. Each view dict may carry `view_type` (PR #422)."""
     oracle = root / "_oracle"
     (oracle / "images").mkdir(parents=True, exist_ok=True)
     records = []
@@ -350,18 +309,7 @@ def bundle_fixture(tmp_path: Path) -> Path:
 
 
 def write_package_manifest(package: Path, *, files: dict[str, str] | None = None, **manifest: Any) -> Path:
-    """Give a package the truthful `contents.files` map its producer would have written.
-
-    The entry gate now verifies that map before it reads any evidence (issue #562 S1), so a package
-    fixture whose marker is an empty `{}` is a DAMAGED package rather than a shorthand for "this is a
-    package". Every fixture below that must reach the current behaviour therefore declares its own
-    bytes. The manifest excludes itself, exactly as `package_unit.py` does.
-
-    ``manifest`` carries the rest of the producer's record - `unit`, `kind`, `artifacts`,
-    `model_binding` - which S2 reads as this package's ROLE declarations. A fixture that omits them
-    is a package that declares no roles, which is a legitimate (and blocked) shape rather than a
-    shorthand for a complete one.
-    """
+    """Give a package the truthful `contents.files` map its producer would have written."""
     if files is None:
         files = {
             str(path.relative_to(package).as_posix()): hashlib.sha256(path.read_bytes()).hexdigest()
@@ -383,16 +331,7 @@ def build_package(  # pylint: disable=too-many-locals
     oracle_views: list[dict] | None = None,
     luid: str | None = UNIT_LUID,
 ) -> str:
-    """A ROLE-COMPLETE package: `build_unit`'s bundle content plus every role #562 S2 requires.
-
-    Returns the source sha256, exactly as :func:`build_unit` does.
-
-    ⚠️ Written as one builder rather than sprinkled through the fixtures on purpose. The entry gate
-    now composes three questions - boundary, bytes, roles - and a fixture that answers only the
-    first two is not "a package"; it is a package that would be refused, which makes it useless as
-    the positive control the tests below need. Each negative control turns exactly ONE of these
-    knobs off, so what it proves stays legible.
-    """
+    """A ROLE-COMPLETE package: `build_unit`'s bundle content plus every role #562 S2 requires."""
     package.mkdir(parents=True, exist_ok=True)
     (package.parent / "assets").mkdir(parents=True, exist_ok=True)
     sha = build_unit(package, unit, worksheets=worksheets, dashboards=dashboards, luid=luid, base="fabric")
@@ -524,18 +463,7 @@ def build_unit(  # pylint: disable=too-many-arguments
 
 
 def test_the_status_and_exit_vocabulary_is_pinned_to_its_literal_values() -> None:
-    """Pin every constant the rest of this file compares against.
-
-    Without this the suite is vacuous in one direction: `main(...) == crr.EXIT_CANNOT_ESTABLISH`
-    compares the code's answer against the code's own constant, so redefining the constant to 0
-    changes BOTH sides and the assertion still holds.
-
-    ⚠️ Round-1 review found this pin INCOMPLETE: `GRADE_ORACLE` was omitted, and the oracle test
-    compared against that same mutable constant, so `GRADE_ORACLE = GRADE_VALIDATION` survived the
-    whole suite. Every grade string is pinned now, for exactly that reason.
-
-    The 0/1/2/3 values are `check_connection_fidelity.py:160-163`'s, deliberately shared across gates.
-    """
+    """Pin every constant the rest of this file compares against."""
     assert (crr.EXIT_OK, crr.EXIT_FINDINGS, crr.EXIT_USAGE, crr.EXIT_CANNOT_ESTABLISH) == (0, 1, 2, 3)
     assert (crr.READY, crr.BLIND, crr.UNVERIFIABLE) == ("ready", "blind", "unverifiable")
     assert crr.INSUFFICIENT_GRADE == "insufficient-grade"
@@ -566,11 +494,7 @@ def test_the_status_and_exit_vocabulary_is_pinned_to_its_literal_values() -> Non
 
 
 def test_there_is_no_flag_that_can_soften_the_verdict(tmp_path: Path) -> None:
-    """Round-1 finding 1: `--warn-only` returned exit 0 on a CANNOT_ESTABLISH bundle.
-
-    An entry gate that can be asked to say yes is not an entry gate, so the flag is gone rather than
-    fixed. Argparse must reject it - otherwise a caller's muscle memory silently re-opens the hole.
-    """
+    """Round-1 finding 1: `--warn-only` returned exit 0 on a CANNOT_ESTABLISH bundle."""
     with pytest.raises(SystemExit) as excinfo:
         crr.main(["--warn-only", str(tmp_path)])
     assert excinfo.value.code == 2
@@ -596,12 +520,7 @@ def test_a_dashboard_and_a_same_named_worksheet_get_different_page_ids() -> None
 
 
 def test_colliding_page_ids_cannot_be_attributed(bundle: Path) -> None:
-    """Round-1 finding 6b: the identity join is strong but NOT collision-free.
-
-    Only 8 md5 hex digits survive `_sanitize`, and these two names collide. One physical page must
-    never satisfy two expected pages, so this is `CANNOT_ESTABLISH` rather than a silent double
-    count.
-    """
+    """Round-1 finding 6b: the identity join is strong but NOT collision-free."""
     first, second = COLLIDING_NAMES
     assert crr.engine_page_id(f"page-ws-{first}") == crr.engine_page_id(f"page-ws-{second}")
     build_unit(bundle, "WB", worksheets=list(COLLIDING_NAMES))
@@ -642,12 +561,7 @@ def test_an_unreadable_source_is_none_not_an_empty_expectation(tmp_path: Path) -
 
 
 def test_an_unreadable_page_definition_is_not_a_page(bundle: Path) -> None:
-    """Round-1 finding 6a: completeness passed with no readable page mapping at all.
-
-    The old `actual_page_ids` fell back to the containing directory's name, so corrupting every
-    `page.json` still yielded three pages and READY. A page whose definition cannot be read is a
-    problem, not a page.
-    """
+    """Round-1 finding 6a: completeness passed with no readable page mapping at all."""
     sha = build_unit(bundle, "WB", worksheets=list(MERIDIAN_PAGE_IDS))
     write_reference(bundle, [(n, "embedded_thumbnail", ["layout_grade"]) for n in MERIDIAN_PAGE_IDS], source_sha=sha)
     assert crr.scan(bundle)["status"] == "READY"
@@ -702,13 +616,7 @@ def test_a_page_the_engine_dropped_silently_is_a_finding(bundle: Path) -> None:
 
 
 def test_a_worksheet_warning_cannot_excuse_a_missing_dashboard(bundle: Path) -> None:
-    """Round-1 finding 5: the `pbip_warnings[]` defect, one level down.
-
-    `drop_explanations` keyed on the normalized name alone, so a WORKSHEET warning for `Ops` made a
-    genuinely missing DASHBOARD named `Ops` read as `dropped_explained` and the unit went READY.
-    Sharing a name between a dashboard and its principal worksheet is the normal Tableau case, so
-    this is not an edge case.
-    """
+    """Round-1 finding 5: the `pbip_warnings[]` defect, one level down."""
     build_unit(
         bundle,
         "WB",
@@ -730,12 +638,7 @@ def test_a_worksheet_warning_cannot_excuse_a_missing_dashboard(bundle: Path) -> 
 
 
 def test_a_dashboard_scope_warning_does_explain_a_missing_dashboard(bundle: Path) -> None:
-    """Discriminating twin: the kind-aware key must still ACCEPT a correctly scoped explanation.
-
-    `migrate_estate.py:1201-1204` writes dashboard-scope warnings with `visual_type` set to the scope
-    string `"dashboard"`. Without this test the previous one would also pass if explanations never
-    matched anything.
-    """
+    """Discriminating twin: the kind-aware key must still ACCEPT a correctly scoped explanation."""
     build_unit(
         bundle,
         "WB",
@@ -756,13 +659,7 @@ def test_a_dashboard_scope_warning_does_explain_a_missing_dashboard(bundle: Path
 
 
 def test_a_flat_pbip_warning_cannot_explain_any_drop(bundle: Path) -> None:
-    """Why `viz_fidelity[]` is the channel and `pbip_warnings[]` is not.
-
-    ⚠️ Round-1 review found the previous version of this test supplied no `pbip_warnings` at all, so
-    a mutation adding a flat-warning fallback SURVIVED - the test claiming to pin the routing did not
-    pin it. The warnings below are real, nameless ones the engine emits
-    (`_warn("dashboard", name, ...)` drops the name), and they must not account for anything.
-    """
+    """Why `viz_fidelity[]` is the channel and `pbip_warnings[]` is not."""
     build_unit(
         bundle,
         "WB",
@@ -830,12 +727,7 @@ def test_a_worksheet_scope_can_never_satisfy_a_dashboard_page() -> None:
 
 
 def test_a_worksheet_render_does_not_make_a_dashboard_page_ready(bundle: Path) -> None:
-    """THE regression test (issue #421).
-
-    A Tableau `<thumbnail>` is a WORKSHEET render, yet `capture_tableau_reference.py:199` files it
-    under the manifest's `dashboards` key, where `check_unit.py`'s `_slug` match then lets it satisfy
-    a same-named DASHBOARD page.
-    """
+    """THE regression test (issue #421)."""
     sha = build_unit(bundle, "WB", worksheets=["Regional Share"], dashboards={"Regional Share": ["Regional Share"]})
     write_reference(bundle, [("Regional Share", "embedded_thumbnail", ["layout_grade"])], source_sha=sha)
 
@@ -898,14 +790,7 @@ def test_a_page_with_no_evidence_at_all_is_blind_not_unverifiable(bundle: Path) 
 
 
 def test_validation_grade_is_reported_when_present(bundle: Path) -> None:
-    """The one route to `validation_grade`, and it must declare its object TYPE to be usable.
-
-    WARNING: round-3 finding 1. Making this route work by promoting a validation-grade `manual`
-    record to a kind matching BOTH dashboards and worksheets re-created the founding defect - one
-    image made a dashboard `Ops` and a worksheet `Ops` ready at once. The flag asserts GRADE;
-    `capture_tableau_reference.py:264-266` says the tool cannot know "even that it is a screenshot of
-    this dashboard". So the manifest must DECLARE `view_type`, and the grade never touches kind.
-    """
+    """The one route to `validation_grade`, and it must declare its object TYPE to be usable."""
     sha = build_unit(bundle, "WB", worksheets=["Revenue Trend"])
     write_reference(
         bundle,
@@ -922,11 +807,7 @@ def test_validation_grade_is_reported_when_present(bundle: Path) -> None:
 
 
 def test_a_grade_can_never_widen_an_evidence_kind(bundle: Path) -> None:
-    """Round-3 finding 1: the same manual record, WITHOUT a declared type, satisfies nothing.
-
-    Grade and kind are independent axes. If the only difference between "satisfies nothing" and
-    "satisfies everything" is a quality flag, the flag has become an identity claim.
-    """
+    """Round-3 finding 1: the same manual record, WITHOUT a declared type, satisfies nothing."""
     sha = build_unit(bundle, "WB", worksheets=["Revenue Trend"])
     write_reference(
         bundle,
@@ -956,12 +837,7 @@ def test_a_validation_grade_manual_record_cannot_satisfy_both_kinds(bundle: Path
 
 
 def test_one_render_cannot_make_two_pages_ready(bundle: Path) -> None:
-    """Round-3 finding 1, second half: the prefix alias created a name with no uniqueness check.
-
-    One genuine image made two DISTINCT worksheets (`Ops` and `tableau-Ops`) ready. Identity is not
-    enough on its own - evidence must be EXCLUSIVE, so a render claimed twice invalidates both
-    claims rather than satisfying both.
-    """
+    """Round-3 finding 1, second half: the prefix alias created a name with no uniqueness check."""
     sha = build_unit(bundle, "WB", worksheets=["Ops", "tableau-Ops"])
     write_reference(
         bundle,
@@ -977,12 +853,7 @@ def test_one_render_cannot_make_two_pages_ready(bundle: Path) -> None:
 
 
 def test_a_low_grade_provider_cannot_promote_itself(bundle: Path) -> None:
-    """Round-2 finding 2: grade came from the self-reported list, with no provider ceiling.
-
-    An `embedded_thumbnail` record is a 192x192 worksheet render by construction. Claiming
-    `validation_grade` made it READY under `--require-validation-grade` AND suppressed the ceiling
-    warning - the weakest-provenance producer outranking every honest one.
-    """
+    """Round-2 finding 2: grade came from the self-reported list, with no provider ceiling."""
     sha = build_unit(bundle, "WB", worksheets=["Revenue Trend"])
     write_reference(
         bundle, [("Revenue Trend", "embedded_thumbnail", ["layout_grade", "validation_grade"])], source_sha=sha
@@ -1006,11 +877,7 @@ def test_an_unrecognised_provider_can_claim_nothing(bundle: Path) -> None:
 
 
 def test_one_validation_grade_page_does_not_silence_the_ceiling_for_the_rest(bundle: Path) -> None:
-    """Round-1 finding 7b: the warning keyed on `any`, so one good capture hid every other page.
-
-    `Good` is a genuine validation-grade record - declared type, manual provider - so this test
-    discriminates: it would pass vacuously if NO page reached validation grade.
-    """
+    """Round-1 finding 7b: the warning keyed on `any`, so one good capture hid every other page."""
     sha = build_unit(bundle, "WB", worksheets=["Good", "Weak"])
     reference = write_reference(
         bundle,
@@ -1036,10 +903,7 @@ def test_one_validation_grade_page_does_not_silence_the_ceiling_for_the_rest(bun
 
 
 def test_require_validation_grade_changes_page_readiness_not_just_the_unit(bundle: Path) -> None:
-    """Round-1 finding 7a: the unit said 1/2 while the top level said 2/2 ready.
-
-    The bar now lands on the PAGE, so every count agrees.
-    """
+    """Round-1 finding 7a: the unit said 1/2 while the top level said 2/2 ready."""
     sha = build_unit(bundle, "WB", worksheets=["Revenue Trend"])
     write_reference(bundle, [("Revenue Trend", "embedded_thumbnail", ["layout_grade"])], source_sha=sha)
 
@@ -1053,11 +917,7 @@ def test_require_validation_grade_changes_page_readiness_not_just_the_unit(bundl
 
 
 def test_oracle_grade_is_below_the_validation_bar(bundle: Path) -> None:
-    """Round-1 finding 8a: `GRADE_ORACLE = GRADE_VALIDATION` survived the entire suite.
-
-    Nothing exercised the oracle grade against the bar, and the only oracle assertion compared it to
-    that same mutable constant.
-    """
+    """Round-1 finding 8a: `GRADE_ORACLE = GRADE_VALIDATION` survived the entire suite."""
     build_unit(bundle, "WB", worksheets=["Revenue Trend"])
     write_oracle(bundle, [{"view_name": "Revenue Trend", "view_type": "worksheet", "workbook_luid": UNIT_LUID}])
 
@@ -1103,11 +963,7 @@ def test_a_datasource_only_unit_is_not_applicable(bundle: Path) -> None:
 
 
 def test_a_workbook_whose_report_never_shipped_is_a_finding(bundle: Path) -> None:
-    """Round-1 finding 2: any semantic model anywhere granted NOT_APPLICABLE and exit 0.
-
-    A workbook whose report generation FAILED is the loudest possible signal that work cannot start,
-    and it read as legitimately reference-free.
-    """
+    """Round-1 finding 2: any semantic model anywhere granted NOT_APPLICABLE and exit 0."""
     write_engine_report(bundle, workbooks=["WB"], datasources=["Shared DS"])
     (bundle / "pbip" / "WB" / "Model.SemanticModel" / "definition").mkdir(parents=True)
 
@@ -1204,12 +1060,7 @@ def test_a_non_list_page_order_is_not_a_valid_mapping(bundle: Path) -> None:
 
 
 def test_names_differing_only_by_whitespace_cannot_be_attributed(bundle: Path) -> None:
-    """`Ops  Summary` and `Ops Summary` take DIFFERENT page ids but collapsed to one key.
-
-    One evidence record marked both ready, and one deliberate-drop warning classified the other as
-    `dropped_explained`. This is the same "one object's excuse covering another" defect that was
-    fixed at the routing level, then the matching level; ambiguity is now a refusal.
-    """
+    """`Ops  Summary` and `Ops Summary` take DIFFERENT page ids but collapsed to one key."""
     doubled, single = "Ops  Summary", "Ops Summary"
     assert crr.engine_page_id(f"page-ws-{doubled}") != crr.engine_page_id(f"page-ws-{single}")
     build_unit(bundle, "WB", worksheets=[doubled, single])
@@ -1293,14 +1144,7 @@ def test_a_single_differently_spelled_evidence_record_still_matches(bundle: Path
 
 
 def test_the_same_render_under_two_names_is_still_one_render(bundle: Path) -> None:
-    """Exclusivity keys on the VERIFIED CONTENT DIGEST, so it needs no path and no filesystem trick.
-
-    Round 4 keyed on `evidence_path` text and left both pages ready when one physical PNG was named
-    two ways. Round 5 found the replacement fell back to a resolved path whenever `st_ino` was
-    unavailable - which cannot see a hard link or a drive alias - and, worse, that the covering test
-    SKIPPED on exactly the filesystems where the fallback ran. Content identity has no fallback and
-    no skip: it is the same everywhere.
-    """
+    """Exclusivity keys on the VERIFIED CONTENT DIGEST, so it needs no path and no filesystem trick."""
     sha = build_unit(bundle, "WB", worksheets=["Alpha", "Beta"])
     reference = write_reference(
         bundle,
@@ -1324,12 +1168,7 @@ def test_the_same_render_under_two_names_is_still_one_render(bundle: Path) -> No
 
 
 def test_exclusivity_never_falls_back_to_comparing_paths(bundle: Path) -> None:
-    """The render key must be content, not a path - measured as a property, not read from the code.
-
-    `C:\\Windows\\System32\\notepad.exe` and `C:\\Windows\\notepad.exe` are hard links whose resolved,
-    case-folded paths DIFFER, so any path-derived key splits one physical file into two. The key this
-    gate uses does not contain a path at all.
-    """
+    """The render key must be content, not a path - measured as a property, not read from the code."""
     sha = build_unit(bundle, "WB", worksheets=["Solo"])
     reference = write_reference(bundle, [("Solo", "embedded_thumbnail", ["layout_grade"])], source_sha=sha)
     page = crr.scan(bundle)["units"][0]["pages"][0]
@@ -1373,10 +1212,6 @@ def write_manifest_for(directory: Path, name: str, render: Path, source_sha: str
 def test_one_render_cannot_satisfy_a_page_in_each_of_two_units(bundle: Path) -> None:
     """Measured: exclusivity ran independently INSIDE each unit, so the same render satisfied one
     page in each of two units and the bundle reported `READY 2/2`.
-
-    Both manifests are individually valid - correct source sha, honest hash, real image - and each is
-    legitimately attributable to its own unit. Only the CROSS-UNIT view shows one render credited
-    twice, which is why the check runs once over every row.
     """
     first = write_workbook(bundle.parent / "assets" / "One.twb", worksheets=["Shared"])
     second = write_workbook(bundle.parent / "assets" / "Two.twb", worksheets=["Shared"])
@@ -1414,13 +1249,7 @@ def test_one_render_cannot_satisfy_a_page_in_each_of_two_units(bundle: Path) -> 
 
 
 def test_a_non_packaged_target_still_finds_an_ancestors_oracle(tmp_path: Path) -> None:
-    """The control that makes the package test below meaningful rather than a deletion.
-
-    `_default_dirs` looks beside the target, beside its parent AND beside its grandparent, because an
-    un-packaged unit under `<bundle>/pbip/<Unit>/` finds the run's flat capture that way. Removing
-    the walk-up would break the ordinary case, so it has to keep working IN THE SAME RUN as the
-    package that must not inherit.
-    """
+    """The control that makes the package test below meaningful rather than a deletion."""
     target = tmp_path / "run" / "bundle" / "unit"
     target.mkdir(parents=True)
     (tmp_path / "run" / "_oracle").mkdir()
@@ -1429,14 +1258,7 @@ def test_a_non_packaged_target_still_finds_an_ancestors_oracle(tmp_path: Path) -
 
 
 def test_a_self_contained_package_does_not_inherit_an_ancestors_oracle(tmp_path: Path) -> None:
-    """A `package-manifest.json` beside the target stops the walk (issue #451).
-
-    `package_unit.py` writes a unit-scoped `oracle/oracle-manifest.json` holding THIS unit's views
-    with rewritten paths. A package assembled INSIDE a run directory therefore saw its own copy AND
-    the run's flat capture two levels up, every view matched twice, and the gate refused the pair as
-    "2 records share this name once normalized" - taking every page from ready to unverifiable,
-    silently, so packaging was strictly worse than not packaging.
-    """
+    """A `package-manifest.json` beside the target stops the walk (issue #451)."""
     target = tmp_path / "run" / "packages" / "unit"
     (target / "oracle").mkdir(parents=True)
     (target / "package-manifest.json").write_text("{}", encoding="utf-8")
@@ -1446,12 +1268,7 @@ def test_a_self_contained_package_does_not_inherit_an_ancestors_oracle(tmp_path:
 
 
 def test_a_package_with_no_evidence_of_its_own_still_inherits_nothing(tmp_path: Path) -> None:
-    """Kills: "stop only when the package has its own copy", which re-opens the union by accident.
-
-    A package that omitted a render because it could not attribute it must NOT then pick that render
-    up from the ancestor - that is the omission being undone by the consumer, which is how a
-    fail-closed packaging decision would turn back into a fail-open one.
-    """
+    """Kills: "stop only when the package has its own copy", which re-opens the union by accident."""
     target = tmp_path / "run" / "packages" / "unit"
     target.mkdir(parents=True)
     (target / "package-manifest.json").write_text("{}", encoding="utf-8")
@@ -1461,11 +1278,7 @@ def test_a_package_with_no_evidence_of_its_own_still_inherits_nothing(tmp_path: 
 
 
 def test_a_packaged_unit_reads_only_its_own_manifest_end_to_end(tmp_path: Path) -> None:
-    """The same defect at gate level: the doubled record must not reach the readiness verdict.
-
-    Both manifests describe the SAME view of the SAME workbook, which is what a package inside a run
-    directory produces; the ancestor copy is the one that must be ignored.
-    """
+    """The same defect at gate level: the doubled record must not reach the readiness verdict."""
     package = tmp_path / "run" / "unit"
     sha = build_package(
         package,
@@ -1486,13 +1299,7 @@ def test_a_packaged_unit_reads_only_its_own_manifest_end_to_end(tmp_path: Path) 
 
 
 def test_a_unit_three_levels_below_the_run_still_inherits_the_flat_capture(tmp_path: Path) -> None:
-    """MEDIUM 1 from round-1 review of PR #454, at the canonical depth.
-
-    `capture_tableau_oracle.py` writes `_runs/<NNN>-<slug>/oracle/` while an un-packaged unit sits at
-    `_runs/<NNN>-<slug>/bundle/pbip/<Unit>/` - THREE ancestors below it. Stopping at one (the exit
-    gate) or two (this one) makes a real capture invisible for the ordinary engine-bundle shape, so
-    the depth is part of the shared rule rather than each gate's guess.
-    """
+    """MEDIUM 1 from round-1 review of PR #454, at the canonical depth."""
     unit = tmp_path / "run" / "bundle" / "pbip" / "Unit"
     unit.mkdir(parents=True)
     (tmp_path / "run" / "oracle").mkdir()
@@ -1501,12 +1308,7 @@ def test_a_unit_three_levels_below_the_run_still_inherits_the_flat_capture(tmp_p
 
 
 def test_the_attribution_census_survives_a_multi_path_scan(tmp_path: Path) -> None:
-    """MEDIUM 2: `_merge_scans` inherits `dict(reports[0])`, so later refusals used to vanish.
-
-    Measured on two bundles: the second refused 7 records as another workbook's, and the merged
-    report said `foreign=0`. A refusal counter that silently zeroes is worse than none, because it
-    reads as "nothing was refused" exactly where the guard did the most work.
-    """
+    """MEDIUM 2: `_merge_scans` inherits `dict(reports[0])`, so later refusals used to vanish."""
     clean, dirty = tmp_path / "clean", tmp_path / "dirty"
     for root in (clean, dirty):
         (root / "bundle").mkdir(parents=True)
@@ -1527,14 +1329,7 @@ def test_the_attribution_census_survives_a_multi_path_scan(tmp_path: Path) -> No
 
 
 def test_every_integer_counter_survives_a_merge_by_construction(tmp_path: Path) -> None:
-    """B-C, fixed as a CLASS: the merge must not carry a hand-written list of keys to sum.
-
-    ⚠️ This is the third instance of one shape in PR #454 - `evidence_attributed` zeroed on merge
-    (round-1 MEDIUM 2), then `pages_revision_unconfirmed` did the same because it was added after the
-    list was written. Patching a third key by name would guarantee a fourth, so this asserts the
-    PROPERTY rather than any key: every integer counter in a single scan is summed, whatever it is
-    called and whenever it was added.
-    """
+    """B-C, fixed as a CLASS: the merge must not carry a hand-written list of keys to sum."""
     first, second = tmp_path / "one", tmp_path / "two"
     for root, unit in ((first, "One"), (second, "Two")):
         (root / "bundle").mkdir(parents=True)
@@ -1567,11 +1362,7 @@ def test_every_integer_counter_survives_a_merge_by_construction(tmp_path: Path) 
 
 
 class _Continued(Exception):
-    """Raised at the exact call site where `scan` continued past an unsafe classification.
-
-    Deliberately not `AssertionError`: it is caught inside the patched window so the patches are
-    undone before pytest formats anything (see :func:`_scan_forbidding_discovery`).
-    """
+    """Raised at the exact call site where `scan` continued past an unsafe classification."""
 
 
 def _link_directory(link: Path, target: Path) -> None:
@@ -1591,12 +1382,7 @@ def _link_directory(link: Path, target: Path) -> None:
 
 
 def _forbid_discovery(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Explode on every step `scan` must not reach for an unsafe target.
-
-    `Path.resolve` is included deliberately: the ORDER is the invariant. `resolve()` follows a
-    junction, so classifying after it would already have answered the boundary question about a
-    directory the caller never named.
-    """
+    """Explode on every step `scan` must not reach for an unsafe target."""
 
     def boom(*_args: object, **_kwargs: object) -> object:
         raise _Continued("scan continued past an unsafe package classification")
@@ -1618,13 +1404,7 @@ def _forbid_discovery(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _scan_forbidding_discovery(unit: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[dict | None, str]:
-    """Scan with every downstream step armed, then disarm before any assertion can escape.
-
-    ⚠️ `Path.resolve` is patched globally and **pytest uses it while formatting a failure
-    traceback**, so a kill that escaped the patched window would surface as an `INTERNALERROR` -
-    infrastructure breakage rather than this test failing. Measured while mutation-testing these
-    controls; the sentinel is caught here and the patches are undone before anything is asserted.
-    """
+    """Scan with every downstream step armed, then disarm before any assertion can escape."""
     _forbid_discovery(monkeypatch)
     try:
         return crr.scan(unit), ""
@@ -1635,13 +1415,7 @@ def _scan_forbidding_discovery(unit: Path, monkeypatch: pytest.MonkeyPatch) -> t
 
 
 def _main_forbidding_following(argv: list[str], monkeypatch: pytest.MonkeyPatch) -> tuple[int | None, str]:
-    """Run the CLI with every FOLLOWING pre-check armed, disarming before anything is asserted.
-
-    ⚠️ `is_dir()` and `is_file()` are the CLI's own pre-checks and both dereference, so arming them
-    is what proves the ORDER: a refusal that comes back while they are still armed cannot have
-    consulted them. Same sentinel discipline as :func:`_scan_forbidding_discovery` - pytest formats
-    tracebacks with these very primitives.
-    """
+    """Run the CLI with every FOLLOWING pre-check armed, disarming before anything is asserted."""
 
     def boom(*_args: object, **_kwargs: object) -> object:
         raise _Continued("main ran a following pre-check before classifying the target")
@@ -1663,11 +1437,7 @@ def _main_forbidding_following(argv: list[str], monkeypatch: pytest.MonkeyPatch)
 def test_main_refuses_a_missing_package_shaped_root_with_the_typed_exit_instead_of_argparse(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, spelling: tuple[str, ...]
 ) -> None:
-    """Kills: pre-checking with `is_dir()` before classifying.
-
-    The CLI used to reach `path.is_dir()` first, so a package-shaped root with no boundary left via
-    `parser.error` - **exit 2, with the supplied path echoed** - instead of the typed exit 3.
-    """
+    """Kills: pre-checking with `is_dir()` before classifying."""
     unit = tmp_path.joinpath("run", *spelling)
 
     code, followed = _main_forbidding_following([str(unit), "--quiet"], monkeypatch)
@@ -1729,11 +1499,7 @@ def test_main_prints_the_stable_code_and_no_supplied_path_for_a_refused_target(
 
 
 def test_main_keeps_argparses_verdict_for_an_ORDINARY_missing_path(tmp_path: Path) -> None:
-    """Compatibility control: only a package-shaped or unsafe target is diverted.
-
-    ⚠️ Without this, classifying everything as refusable would satisfy the controls above while
-    silently swallowing the ordinary typo case that argparse is right to reject.
-    """
+    """Compatibility control: only a package-shaped or unsafe target is diverted."""
     with pytest.raises(SystemExit) as exit_info:
         crr.main([str(tmp_path / "run" / "bundle" / "NeverBuilt"), "--quiet"])
 
@@ -1806,11 +1572,7 @@ def test_a_linked_root_blocks_even_when_its_destination_is_a_valid_package(
 
 
 def test_an_aliased_ORDINARY_bundle_fails_closed_and_the_real_path_still_works(tmp_path: Path) -> None:
-    """The documented compatibility cost of refusing a caller-supplied root alias.
-
-    Fail-closed by choice: the operator passes the real path, which is loud and recoverable. The
-    fail-open alternative decides a boundary about a directory nobody named.
-    """
+    """The documented compatibility cost of refusing a caller-supplied root alias."""
     bundle = tmp_path / "run" / "bundle"
     bundle.mkdir(parents=True)
     (tmp_path / "run" / "assets").mkdir()
@@ -1859,13 +1621,7 @@ def test_the_refusal_detail_carries_a_stable_code_and_no_host_path(tmp_path: Pat
 
 
 def test_a_SAFE_package_continues_into_the_current_behaviour_unchanged(tmp_path: Path) -> None:
-    """The classifier is a precondition, not a new verdict: an intact package still reports READY.
-
-    ⚠️ This is the vacuity control for every block above. Without it, classifying EVERYTHING as
-    unsafe would satisfy them all - and, since #562, refusing every package on integrity or
-    role/identity grounds would too. This package is TRUTHFUL and role-complete, so all three
-    preconditions are satisfied and the gate must behave exactly as it did before any were added.
-    """
+    """The classifier is a precondition, not a new verdict: an intact package still reports READY."""
     unit = tmp_path / "run" / "packages" / "Minimal"
     build_package(
         unit,
@@ -1897,12 +1653,7 @@ def test_a_SAFE_package_continues_into_the_current_behaviour_unchanged(tmp_path:
 
 
 def _packaged_unit(tmp_path: Path) -> Path:
-    """An intact, ROLE-COMPLETE, evidence-carrying package describing exactly its own bytes.
-
-    Role-complete since #562 S2: the entry gate now refuses a package whose roles or identity do not
-    hold, so a fixture that only satisfied S1 would be refused for a reason these tests are not
-    about - and every S1 assertion below would then be vacuous.
-    """
+    """An intact, ROLE-COMPLETE, evidence-carrying package describing exactly its own bytes."""
     unit = tmp_path / "run" / "packages" / "Minimal"
     build_package(
         unit,
@@ -1917,12 +1668,7 @@ def _packaged_unit(tmp_path: Path) -> Path:
 def test_an_extra_file_in_a_package_blocks_before_resolve_and_discovery(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The ORDER claim, at the integrity hook: nothing downstream may fire for a damaged package.
-
-    A file nobody declared means this composition is not the one the producer described, so evidence
-    found inside it cannot be attributed - and source resolution must never get the chance to find
-    the undeclared asset and call the package usable.
-    """
+    """The ORDER claim, at the integrity hook: nothing downstream may fire for a damaged package."""
     unit = _packaged_unit(tmp_path)
     (unit / "_oracle" / "stray.png").write_bytes(b"\x89PNG\r\n\x1a\n")
 
@@ -1974,11 +1720,7 @@ def test_the_integrity_refusal_carries_stable_codes_and_no_host_path(tmp_path: P
 def test_the_package_verifier_runs_exactly_once_for_a_safe_package(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Once, before evidence - not once per unit, not again inside a later rescue path.
-
-    A second invocation would mean a second place where the answer could differ from the one the
-    gate acted on, which is the shape the classifier slice was written to remove.
-    """
+    """Once, before evidence - not once per unit, not again inside a later rescue path."""
     unit = _packaged_unit(tmp_path)
     calls: list[str] = []
     real = crr.verify_package
@@ -2012,11 +1754,7 @@ def test_an_ORDINARY_bundle_never_reaches_the_package_verifier(tmp_path: Path, m
 def test_a_DAMAGED_boundary_is_refused_by_the_classifier_and_never_reinterpreted(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A missing marker is the classifier's verdict, and the integrity slice must not restate it.
-
-    ⚠️ Two guards that can both answer "refuse" for the same target are one guard too many: whichever
-    reason reaches the operator first becomes the one they act on, and the other quietly rots.
-    """
+    """A missing marker is the classifier's verdict, and the integrity slice must not restate it."""
     unit = tmp_path / "run" / "packages" / "Minimal"
     (unit / "fabric").mkdir(parents=True)
 
@@ -2031,13 +1769,7 @@ def test_a_DAMAGED_boundary_is_refused_by_the_classifier_and_never_reinterpreted
 
 
 def test_a_package_whose_manifest_omits_ROLES_is_still_CLEAN_to_the_bytes_verifier(tmp_path: Path) -> None:
-    """The slice boundary, made observable: S1 judges BYTES, S2 judges the role graph.
-
-    Both answers are taken on the same package, in one test, because that is what makes them
-    distinguishable: the manifest below describes its bytes perfectly (S1 clean) and declares no
-    roles at all (S2 blocked). A reviewer can therefore tell which invariant a future failure
-    belongs to, which a single merged verdict would hide.
-    """
+    """The slice boundary, made observable: S1 judges BYTES, S2 judges the role graph."""
     unit = _packaged_unit(tmp_path)
     files = json.loads((unit / bundle_corpus.PACKAGE_MARKER).read_text(encoding="utf-8"))["contents"]["files"]
     (unit / bundle_corpus.PACKAGE_MARKER).write_text(
@@ -2071,11 +1803,7 @@ def test_a_package_whose_manifest_omits_ROLES_is_still_CLEAN_to_the_bytes_verifi
 def test_a_role_blocked_package_stops_before_resolve_and_discovery(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The ORDER claim at the S2 hook: nothing downstream may fire for a package whose roles fail.
-
-    Evidence discovery and source resolution are exactly the steps that would otherwise "rescue" a
-    package by attributing renders to a unit it cannot prove it is.
-    """
+    """The ORDER claim at the S2 hook: nothing downstream may fire for a package whose roles fail."""
     unit = _packaged_unit(tmp_path)
     manifest = json.loads((unit / bundle_corpus.PACKAGE_MARKER).read_text(encoding="utf-8"))
     manifest["artifacts"]["asset"] = None
@@ -2152,12 +1880,7 @@ def test_invalid_datasource_topology_stops_before_reference_assessment(
 
 
 def test_the_role_verdict_is_reported_as_FINDINGS_not_CANNOT_ESTABLISH(tmp_path: Path) -> None:
-    """The two refusals are different answers and must keep different exits.
-
-    S1 refuses because the package cannot be described at all (exit 3, "I have no opinion"). S2
-    refuses because it describes itself perfectly well and what it describes is wrong (exit 1, "here
-    is the defect"). Collapsing them would tell an operator to investigate when they should fix.
-    """
+    """The two refusals are different answers and must keep different exits."""
     unit = _packaged_unit(tmp_path)
     manifest = json.loads((unit / bundle_corpus.PACKAGE_MARKER).read_text(encoding="utf-8"))
     manifest["artifacts"]["migration_brief"] = None
@@ -2169,12 +1892,7 @@ def test_the_role_verdict_is_reported_as_FINDINGS_not_CANNOT_ESTABLISH(tmp_path:
 
 
 def test_the_role_verifier_runs_ONCE_over_the_whole_cohort(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A published consumer cannot prove its provider alone, so the SET is what gets verified.
-
-    One invocation, every clean package in it. Verifying per target would make
-    `<provider> <consumer>` mean the same as two separate commands, which is precisely the shape
-    that cannot resolve a shared datasource.
-    """
+    """A published consumer cannot prove its provider alone, so the SET is what gets verified."""
     first = _packaged_unit(tmp_path / "a")
     second = _packaged_unit(tmp_path / "b")
     cohorts: list[list[str]] = []
@@ -2396,12 +2114,7 @@ def test_a_clean_first_target_does_not_hide_a_damaged_SECOND_one(tmp_path: Path)
 
 
 def test_two_damaged_targets_each_keep_their_OWN_codes_and_relative_evidence(tmp_path: Path) -> None:
-    """Two blocks and two reasons remain distinct without publishing package-relative names.
-
-    The damage differs on purpose: an extra file and a changed byte produce different codes, so a
-    merge that kept one block twice, or kept the first twice, is distinguishable from one that kept
-    both.
-    """
+    """Two blocks and two reasons remain distinct without publishing package-relative names."""
     first = _damaged_package_at(tmp_path, "first", damage="extra")
     second = _damaged_package_at(tmp_path, "second", damage="changed")
 
@@ -2418,11 +2131,7 @@ def test_two_damaged_targets_each_keep_their_OWN_codes_and_relative_evidence(tmp
 
 
 def test_an_ORDINARY_target_contributes_no_integrity_block(tmp_path: Path) -> None:
-    """Absence is meaningful: a non-package target was never assessed, so it claims nothing.
-
-    Paired with the clean-package assertion above, this is what makes the field unambiguous - empty
-    means "not assessed", a `clean` block means "assessed and correct".
-    """
+    """Absence is meaningful: a non-package target was never assessed, so it claims nothing."""
     bundle = tmp_path / "run" / "bundle"
     bundle.mkdir(parents=True)
     (tmp_path / "run" / "assets").mkdir()
@@ -2463,11 +2172,7 @@ def test_the_integrity_blocks_carry_no_target_path_in_either_shape(tmp_path: Pat
 
 
 def test_the_merged_integrity_evidence_is_deterministic(tmp_path: Path) -> None:
-    """Same inputs, same bytes - twice, and in both the single and the merged shape.
-
-    A field a consumer diffs has to be stable, and the walk that produces it uses a stack, so ordering
-    is a property that must be asserted rather than assumed.
-    """
+    """Same inputs, same bytes - twice, and in both the single and the merged shape."""
     first = _damaged_package_at(tmp_path, "first", damage="extra")
     second = _damaged_package_at(tmp_path, "second", damage="changed")
 
