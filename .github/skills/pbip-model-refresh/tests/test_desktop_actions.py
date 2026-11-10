@@ -1194,7 +1194,7 @@ def test_ui_settle_wait_is_capped_by_the_held_deadline_and_judges_what_remains(
         refresh_pbip_model.DesktopUnreadyError,
         refresh_pbip_model.CredentialUnknownError,
     ) as exc:
-        detail = exc.finding.verdict if isinstance(exc, refresh_pbip_model.DialogFoundError) else exc.reason
+        detail = "DIALOG_NEEDS_HUMAN" if isinstance(exc, refresh_pbip_model.DialogFoundError) else exc.reason
         outcome = f"{type(exc).__name__}:{detail}"
 
     assert outcome == expected
@@ -2623,10 +2623,10 @@ def test_o23_completion_wait_reports_elapsed_every_thirty_seconds(monkeypatch, c
         None,
     )
     assert capsys.readouterr().out.splitlines() == [
-        f"REFRESH_STATUS started tool_pid={os.getpid()} desktop_pid=123 backstop=61s",
-        "REFRESH_STATUS elapsed=0s backstop=61s partitions=?/1 dialog=none",
-        "REFRESH_STATUS elapsed=30s backstop=61s partitions=?/1 dialog=none",
-        "REFRESH_STATUS elapsed=60s backstop=61s partitions=?/1 dialog=none",
+        f"REFRESH_STATUS started tool_pid={os.getpid()}",
+        "REFRESH_STATUS elapsed=0s partitions=?/1 dialog=none",
+        "REFRESH_STATUS elapsed=30s partitions=?/1 dialog=none",
+        "REFRESH_STATUS elapsed=60s partitions=?/1 dialog=none",
     ]
 
 
@@ -2650,7 +2650,7 @@ def test_completion_wait_streams_status_and_waits_out_a_dialog_until_the_backsto
     assert time.monotonic() - started >= 1.5, "a dialog must not end the --ui-refresh wait before the backstop"
     assert stop.value.title == "Refresh"
     lines = capsys.readouterr().out.splitlines()
-    assert lines[0] == f"REFRESH_STATUS started tool_pid={os.getpid()} desktop_pid=123 backstop=1s"
+    assert lines[0] == f"REFRESH_STATUS started tool_pid={os.getpid()}"
     status = [line.split(" partitions=", 1)[1] for line in lines[1:]]
     assert status[0] == "?/1 dialog=none"
     assert '0/1 dialog="Refresh"' in status or '?/1 dialog="Refresh"' in status

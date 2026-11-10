@@ -357,11 +357,10 @@ def test_desktop_refusal_precedes_open_and_keeps_startup_silent(desktop_executor
     result = dos.make_oracle(execute)('EVALUATE ROW("v", 1)')
     output = capsys.readouterr()
     assert set(result) == {"error"}, "a detected modal must return an error, never fabricated rows or zero"
-    assert "DIALOG_NEEDS_HUMAN" in result["error"]
-    assert f'a Power BI Desktop dialog is open: "{SAFE_TITLE}". A human must act in Desktop.' in result["error"]
-    assert not any(char in result["error"] for char in "\x1b\u202e\u200b\u2028")
+    assert result["error"] == "RuntimeError: Desktop query refused (DIALOG_NEEDS_HUMAN); inspect this Desktop locally"
     assert events == ["check"], "Open must not run behind a detected modal"
-    assert output == ("", ""), "the refusal travels in the error reply only"
+    assert output.out == "", "startup stays silent on stdout"
+    assert output.err == f'a Power BI Desktop dialog is open: "{SAFE_TITLE}". A human must act in Desktop.\n'
 
 
 def test_desktop_refusal_rechecks_after_open_before_execute_reader(desktop_executor: tuple) -> None:
@@ -396,7 +395,7 @@ def test_desktop_persistent_requests_are_each_checked(desktop_executor: tuple, c
     assert replies[0] == replies[2] == {"rows": [{"v": 7}]}
     assert set(replies[1]) == {"error"}, "each persistent request must refuse a newly detected modal"
     assert events.count("open") == 1 and events.count("read") == 2
-    assert capsys.readouterr().err == ""
+    assert capsys.readouterr().err.count("a Power BI Desktop dialog is open") == 1
     execute.close()
     assert events[-1] == "close"
 
@@ -419,7 +418,8 @@ def test_desktop_one_shot_keeps_error_json_and_exit_zero(desktop_executor: tuple
     output = capsys.readouterr()
     assert code == 0, "oracle one-shot errors retain the existing exit-zero JSON contract"
     assert set(json.loads(output.out)) == {"error"}
-    assert SAFE_TITLE in json.loads(output.out)["error"] and output.err == ""
+    assert SAFE_TITLE not in output.out, "the persisted error reply keeps only the token"
+    assert SAFE_TITLE in output.err
 
 
 def test_desktop_port_only_and_offline_never_infer_a_pid(desktop_executor: tuple, monkeypatch, capsys) -> None:

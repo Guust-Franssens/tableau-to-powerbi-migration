@@ -175,6 +175,7 @@ from _desktop_observer import (
     CredentialUnknownError,
     DesktopGoneError,
     DesktopUnreadyError,
+    DIALOG_NEEDS_HUMAN,
     DialogFinding,
     DialogFoundError,
     observe,
@@ -183,7 +184,6 @@ from _desktop_observer import (
     print_refresh_banner,
     print_refresh_heartbeat,
     print_refresh_unknown_banner,
-    sanitize_title,
     raise_terminal_detection,
     print_operation_refusal,
     dialog_stop_detail,
@@ -323,7 +323,7 @@ def _raise_if_blocked(pid: int, state: Observation) -> None:
 
 def _emit_dialog_finding(pid: int, finding: DialogFinding) -> None:
     """Name the open dialog for the human who must act (#831); the title is never persisted."""
-    print_operation_refusal("REFRESH", pid, finding.verdict, finding=finding)
+    print_operation_refusal("REFRESH", pid, DIALOG_NEEDS_HUMAN, finding=finding)
 
 
 def _emit_credential_unknown(pid: int, reason: str) -> None:
@@ -1561,7 +1561,7 @@ def _is_benign_imagesave_response_error(exc: BaseException) -> bool:
     failure (disk full, permission denied, the stream closing mid-write) MUST propagate, or a partial
     write is mistaken for success and destroys the existing cache - the precise #113 defect. Matching
     only the known message fails SAFE if the wording ever changes: a real write is treated as failed
-    (the pipeline falls back to the UI save), never a partial write treated as a success.
+    (reported NOT_PERSISTED), never a partial write treated as a success.
     """
     return "unrecognizable response" in str(exc).lower()
 
@@ -1683,7 +1683,7 @@ def _persist_image_locked(  # pylint: disable=too-many-arguments
     if write_error is not None:
         # A real write/replace failure OR an interrupt, WITH a clean rollback: the project is
         # consistent again, so re-raise. For an interrupt this honours the Ctrl+C; for an ordinary
-        # ImageSave failure the caller falls back to the UI save.
+        # ImageSave failure the caller reports NOT_PERSISTED; there is no UI fallback.
         raise write_error
     if return_observation:
         raise ObservationUnavailable("TOOL_UNAVAILABLE")
@@ -2397,11 +2397,11 @@ def _read_completion_snapshot(context: UIRefreshContext, deadline: float) -> Par
         return None
 
 
-def _status_line(elapsed: float, backstop: float, count: int | None, total: int, title: str | None) -> str:
+def _status_line(elapsed: float, count: int | None, total: int, title: str | None) -> str:
     """One REFRESH_STATUS line for an agent to relay; it carries no token and changes no exit code."""
     partitions = f"{'?' if count is None else count}/{total}"
-    dialog = "dialog=none" if title is None else f'dialog="{sanitize_title(title)}"'
-    return f"REFRESH_STATUS elapsed={int(elapsed)}s backstop={int(backstop)}s partitions={partitions} {dialog}"
+    dialog = "dialog=none" if title is None else f'dialog="{title}"'
+    return f"REFRESH_STATUS elapsed={int(elapsed)}s partitions={partitions} {dialog}"
 
 
 def _wait_for_engine_completion(
@@ -2421,12 +2421,8 @@ def _wait_for_engine_completion(
     cancelled = threading.Event()
     outcome: dict[str, object] = {"count": None}
     started = time.monotonic()
-    backstop = deadline - started
     total = len(baseline.partitions)
-    print(
-        f"REFRESH_STATUS started tool_pid={os.getpid()} desktop_pid={context.pid} backstop={int(backstop)}s",
-        flush=True,
-    )
+    print(f"REFRESH_STATUS started tool_pid={os.getpid()}", flush=True)
 
     def watch_ui() -> Observation:
         remaining = deadline - time.monotonic()
@@ -2464,7 +2460,7 @@ def _wait_for_engine_completion(
         now = time.monotonic()
         shown = (outcome["count"], state.dialog.title if state.dialog is not None else None)
         if shown != printed or now >= due:
-            print(_status_line(now - started, backstop, shown[0], total, shown[1]), flush=True)
+            print(_status_line(now - started, shown[0], total, shown[1]), flush=True)
             return shown, now + REFRESH_HEARTBEAT_SECONDS
         return printed, due
 
@@ -2777,12 +2773,6 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         type=int,
         help="Power BI Desktop process id - required when several instances are open "
         "(`powerbi-desktop status` maps pid -> open file)",
-    )
-    parser.add_argument(
-        "--evidence-dir",
-        type=Path,
-        # Accepted and ignored for one release (#831): dialog images are gone; the title is relayed instead.
-        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--port",

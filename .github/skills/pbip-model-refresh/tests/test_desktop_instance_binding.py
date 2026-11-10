@@ -1913,11 +1913,12 @@ def test_failed_save_reports_only_the_observed_failure(
         assert "ImageSave unavailable; rolled back" in verdicts[0] and "UNESTABLISHED" not in verdicts[0]
 
 
-def test_ui_save_flag_is_rejected_before_any_desktop_contact(monkeypatch, capsys) -> None:
-    """T16: the retired --ui-save flag is an argparse error (exit 2) before any bridge, port or XMLA call."""
+@pytest.mark.parametrize("retired", [["--ui-save"], ["--evidence-dir", "evidence"]])
+def test_retired_flags_are_rejected_before_any_desktop_contact(monkeypatch, capsys, retired: list[str]) -> None:
+    """T16: a retired flag is an argparse error (exit 2) before any bridge, port or XMLA call."""
     for never in ("_instance", "discover_port", "refresh", "image_save", "row_counts", "cache_file"):
         monkeypatch.setattr(refresh_pbip_model, never, _explode(never))
     with pytest.raises(SystemExit) as stop:
-        refresh_pbip_model.main(["--pid", "111", "--ui-save"])
+        refresh_pbip_model.main(["--pid", "111", *retired])
     assert stop.value.code == 2
-    assert "unrecognized arguments: --ui-save" in capsys.readouterr().err
+    assert f"unrecognized arguments: {retired[0]}" in capsys.readouterr().err

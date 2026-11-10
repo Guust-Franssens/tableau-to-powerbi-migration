@@ -49,6 +49,7 @@ from typing import Callable, Iterator, NoReturn, TypeVar
 from _verdict import derive_data_verdict
 
 from _desktop_observer import (
+    DIALOG_NEEDS_HUMAN,
     Observation,
     CredentialUnknownError,
     DesktopGoneError,
@@ -117,7 +118,7 @@ def _fresh_observation_error(error: BaseException) -> BaseException:
     if type(error) is ObservationUnavailable and len(error.args) == 1:  # pylint: disable=unidiomatic-typecheck
         code = error.args[0]
     elif type(error) is DialogFoundError and type(error.finding) is DialogFinding:  # pylint: disable=unidiomatic-typecheck
-        code = error.finding.verdict
+        code = DIALOG_NEEDS_HUMAN
     else:
         code = {
             CredentialUnknownError: "CREDENTIAL_UNKNOWN",
@@ -840,7 +841,7 @@ def _credential_state(
 
 def _emit_dialog_finding(pid: int, finding: DialogFinding) -> None:
     """Any blocking dialog is a human stop; the line names its sanitized title (#831 D1)."""
-    print_operation_refusal("PREFLIGHT", pid, finding.verdict, finding=finding)
+    print_operation_refusal("PREFLIGHT", pid, DIALOG_NEEDS_HUMAN, finding=finding)
 
 
 def _emit_desktop_gone(pid: int, reason: str) -> None:

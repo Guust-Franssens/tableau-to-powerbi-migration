@@ -78,10 +78,9 @@ class DialogFinding:
     window: DesktopWindow
     title: str = ""
 
-    @property
-    def verdict(self) -> str:
-        """Any blocking window is the single human-stop token."""
-        return DIALOG_NEEDS_HUMAN
+    def __post_init__(self) -> None:
+        # The one place a title is sanitized: every printer reads this already-safe field.
+        object.__setattr__(self, "title", sanitize_title(self.title))
 
 
 @dataclass(frozen=True)
@@ -357,7 +356,7 @@ class DialogFoundError(RuntimeError):
     def __init__(self, pid: int, finding: DialogFinding) -> None:
         self.pid = pid
         self.finding = finding
-        self.title = sanitize_title(finding.title)
+        self.title = finding.title
         super().__init__(f"{DIALOG_NEEDS_HUMAN} pid={pid}; title withheld from the exception text")
 
 
@@ -402,18 +401,21 @@ def sanitize_title(raw: object) -> str:
 
     Drops control, format (bidi overrides, zero-width) and line/paragraph separators, turns ``"``
     into ``'`` so the quoted field cannot be closed early, collapses whitespace and caps the length.
+    Characters stdout cannot encode (a Polish, Chinese or emoji title on a cp1252 pipe, a lone surrogate)
+    are backslash-escaped, so printing the stop can never raise and lose it.
     """
     if not isinstance(raw, str):
         return ""
     kept = "".join(char for char in raw if unicodedata.category(char) not in _TITLE_DROPPED_CATEGORIES)
     text = " ".join(kept.replace('"', "'").split())
+    encoding = getattr(sys.stdout, "encoding", None) or "ascii"
+    text = text.encode(encoding, "backslashreplace").decode(encoding)
     return text[:TITLE_MAX_CHARS] + "..." if len(text) > TITLE_MAX_CHARS else text
 
 
-def describe_open_dialog(title: object) -> str:
-    """The D1 sentence naming an open dialog, without a trailing full stop."""
-    safe = sanitize_title(title)
-    return f'a Power BI Desktop dialog is open: "{safe}"' if safe else "a Power BI Desktop dialog is open (no title)"
+def describe_open_dialog(title: str) -> str:
+    """The D1 sentence naming an open dialog by its (already sanitized) title, without a full stop."""
+    return f'a Power BI Desktop dialog is open: "{title}"' if title else "a Power BI Desktop dialog is open (no title)"
 
 
 def _ownership_root(window: DesktopWindow, by_hwnd: dict[int, DesktopWindow]) -> DesktopWindow | None:
@@ -558,10 +560,9 @@ def inspect_desktop_observer(
 def _safe_title(window: DesktopWindow, read_title: TitleReader | None) -> str:
     """A title read can never fail or widen an observation; it only names the window."""
     try:
-        raw = read_title(window.hwnd) if read_title is not None else window.title
+        return read_title(window.hwnd) if read_title is not None else window.title
     except Exception:  # pylint: disable=broad-exception-caught
-        raw = ""
-    return sanitize_title(raw)
+        return ""
 
 
 def _hwnd_value(hwnd) -> int:

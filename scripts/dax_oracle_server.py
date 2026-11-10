@@ -183,7 +183,8 @@ def adomd_executor(port: int, pid: int | None = None) -> Callable[[str], list[di
         token = legacy_token(state)
         if token is not None:
             if state.dialog is not None:
-                raise RuntimeError(f"Desktop query refused ({token}); {dialog_stop_detail(state.dialog)}")
+                # The title is for the human only; the error reply is persisted, so it keeps the token.
+                print(dialog_stop_detail(state.dialog), file=sys.stderr, flush=True)
             raise RuntimeError(f"Desktop query refused ({token}); inspect this Desktop locally")
 
     def execute(dax: str) -> list[dict]:

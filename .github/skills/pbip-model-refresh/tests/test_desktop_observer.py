@@ -10,12 +10,15 @@ from __future__ import annotations
 # dependency is required.
 # pylint: disable=protected-access,too-few-public-methods,invalid-name
 
+import io
 import json
 import os
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import _desktop_observer
@@ -315,9 +318,30 @@ def test_an_owned_dialog_with_an_empty_title_is_still_a_human_stop() -> None:
     healthy = inspect_desktop_observer(46256, lambda pid: windows_by_pid[pid])
 
     assert blocked.dialog is not None
-    assert blocked.dialog.verdict == "DIALOG_NEEDS_HUMAN"
+    assert blocked.state == "HUMAN_ACTION_REQUIRED"
     assert blocked.dialog.window.width == 702
     assert healthy.dialog is None
+
+
+def test_a_disabled_frame_with_nothing_else_to_name_is_a_human_stop() -> None:
+    """Another process's sign-in modal disables the frame without a same-PID window; minimized is not proof."""
+    frame = DesktopWindow("Report", "WindowsForms10.Window.8.app.0.x", 2011, 1298, hwnd=MAIN_HWND, enabled=False)
+    blocked = inspect_desktop_observer(111, lambda _pid: [frame])
+    assert _desktop_observer.legacy_token(blocked) == "DIALOG_NEEDS_HUMAN" and blocked.dialog.window is frame
+    minimized = DesktopWindow(
+        "Report", "WindowsForms10.Window.8.app.0.x", 159, 27, hwnd=MAIN_HWND, enabled=False, minimized=True
+    )
+    assert inspect_desktop_observer(111, lambda _pid: [minimized]).dialog is None
+
+
+def test_the_named_window_is_the_one_whose_owner_is_disabled() -> None:
+    """D1 names the modal, not an earlier unproven popup, with or without an identified frame."""
+    popup = owned_dialog(owner_enabled=None, hwnd=0x7003)
+    modal = owned_dialog()
+    assert _desktop_observer.blocking_window([popup, modal, main_window()]) is modal
+    left = DesktopWindow("", "Cls", 800, 600, hwnd=0x9001)
+    owned = DesktopWindow("", "#32770", 702, 355, hwnd=0xC002, owner_hwnd=MAIN_HWND, owner_enabled=False)
+    assert _desktop_observer.blocking_window([left, main_window(), owned]) is owned
 
 
 def test_an_unowned_zero_area_helper_window_does_not_block() -> None:
@@ -397,7 +421,7 @@ def test_direct_refresh_stops_at_t0_for_a_dialog_it_could_not_read(monkeypatch) 
         refresh(port=1234, tables=["Orders"], timeout_sec=5, desktop_pid=111)
     elapsed = time.monotonic() - started
 
-    assert excinfo.value.finding.verdict == "DIALOG_NEEDS_HUMAN"
+    assert excinfo.value.args[0].startswith("DIALOG_NEEDS_HUMAN ")
     assert elapsed < 0.5
 
 
@@ -1159,7 +1183,7 @@ def test_an_unowned_window_that_renders_pixels_is_still_classified() -> None:
     state = inspect_desktop_observer(111, lambda _pid: [frame, unowned_visible])
 
     assert state.dialog is not None
-    assert state.dialog.verdict == "DIALOG_NEEDS_HUMAN"
+    assert state.state == "HUMAN_ACTION_REQUIRED"
 
 
 def test_ownership_is_followed_transitively_to_the_unowned_root() -> None:
@@ -1264,7 +1288,7 @@ def test_an_unowned_host_with_unrecognised_text_still_surfaces_beside_our_own_re
     state = inspect_desktop_observer(111, lambda _pid: [tip, host, frame])
 
     assert state.dialog is not None, "an unaccounted window must never collapse into the healthy state"
-    assert state.dialog.verdict == "DIALOG_NEEDS_HUMAN"
+    assert state.state == "HUMAN_ACTION_REQUIRED"
     assert state.dialog.window is host
 
 
@@ -1576,7 +1600,7 @@ def test_retired_wire_states_fold_to_unknown_never_clean(retired: str) -> None:
 def test_any_blocking_finding_adapts_to_the_single_human_stop_token() -> None:
     """There is one dialog verdict: the finding carries a title for a human, never a classification."""
     state = dialog_state(title="Native Database Query")
-    assert state.dialog.verdict == "DIALOG_NEEDS_HUMAN"
+    assert state.state == "HUMAN_ACTION_REQUIRED"
     assert _desktop_observer.legacy_token(state) == "DIALOG_NEEDS_HUMAN"
 
 
@@ -1604,8 +1628,11 @@ def test_sanitize_title_strips_controls_and_caps_length(raw, expected: str) -> N
 
 def test_describe_open_dialog_names_the_title_or_says_no_title() -> None:
     """The D1 sentence quotes the sanitized title once, or says so when there is none."""
-    assert _desktop_observer.describe_open_dialog('Sign "in"\n') == "a Power BI Desktop dialog is open: \"Sign 'in'\""
-    assert _desktop_observer.describe_open_dialog("\u202e") == "a Power BI Desktop dialog is open (no title)"
+    named = dialog_finding(title='Sign "in"\n').title
+    assert _desktop_observer.describe_open_dialog(named) == "a Power BI Desktop dialog is open: \"Sign 'in'\""
+    assert _desktop_observer.describe_open_dialog(dialog_finding(title="\u202e").title) == (
+        "a Power BI Desktop dialog is open (no title)"
+    )
 
 
 def test_the_title_is_an_exception_attribute_never_an_arg() -> None:
@@ -1642,6 +1669,45 @@ def test_a_failing_title_read_still_stops_and_says_no_title() -> None:
     assert state.state == "HUMAN_ACTION_REQUIRED" and state.dialog.title == ""
 
 
+def test_a_title_stdout_cannot_encode_still_stops_at_exit_3(monkeypatch, tmp_path: Path) -> None:
+    """A Polish, Chinese, emoji or lone-surrogate title on a cp1252 pipe is escaped, never a crash at exit 1."""
+    out = io.TextIOWrapper(io.BytesIO(), encoding="cp1252")
+    monkeypatch.setattr(sys, "stdout", out)
+    model_folder(tmp_path, "MyMigration")
+    monkeypatch.setattr(
+        refresh_pbip_model,
+        "_bridge_status",
+        lambda: {"instances": [{"pid": 111, "currentFilePath": str(tmp_path / "MyMigration.pbip")}]},
+    )
+    monkeypatch.setattr(
+        refresh_pbip_model,
+        "_credential_state",
+        lambda _pid: dialog_state(title="\u0179r\xf3d\u0142o \u6570 \U0001f512 \ud800"),
+    )
+    monkeypatch.setattr(refresh_pbip_model, "discover_port", explode("discover_port"))
+    assert refresh_pbip_model.main(["--pid", "111"]) == 3
+    out.flush()
+    assert (
+        out.buffer.getvalue()
+        .decode("cp1252")
+        .startswith(
+            'REFRESH: DIALOG_NEEDS_HUMAN pid=111; a Power BI Desktop dialog is open: "\\u0179r\xf3d\\u0142o \\u6570 \\U0001f512 \\ud800".'
+        )
+    )
+
+
+def test_window_title_keeps_only_the_characters_getwindowtextw_copied(monkeypatch) -> None:
+    """The one production caption read returns what the native call reported, nothing more."""
+
+    def get_window_text(_hwnd, buffer, _size) -> int:
+        buffer.value = "Sign in to X"
+        return 7
+
+    monkeypatch.setattr(_desktop_observer, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(_desktop_observer, "_user32", lambda: SimpleNamespace(GetWindowTextW=get_window_text))
+    assert _desktop_observer._window_title(0x10001) == "Sign in"
+
+
 # --- T11: the real ctypes read, against this test process only (no window is created) ------------
 
 
@@ -1665,7 +1731,7 @@ def test_real_process_start_matches_the_frame_binding_and_a_gone_pid_reads_none(
     assert _desktop_observer.process_start(gone_pid) is None
 
 
-@pytest.mark.skipif(os.name != "nt", reason="Win32 window enumeration is Windows-only")
+@pytest.mark.skipif(os.name != "nt", reason="real Win32 EnumWindows callback is Windows-only")
 def test_real_enum_windows_over_our_windowless_pid_is_complete_and_empty() -> None:
     """``EnumWindows`` really runs; a window-less live process is read as empty, never as an error."""
     windows, count = _desktop_observer._enumerate_pid_windows_with_count(os.getpid())
