@@ -125,6 +125,14 @@ def test_resolve_env_normalises_the_engines_pat_secret_name(tmp_path):
     assert env["TABLEAU_PAT_VALUE"] == "s3cr3t"
 
 
+def test_resolve_env_mirrors_the_documented_pat_secret_name(tmp_path):
+    path = tmp_path / ".env"
+    path.write_text("TABLEAU_PAT_SECRET=s3cr3t\n", encoding="utf-8")
+    env = te.resolve_env(path, environ={})
+    assert env["TABLEAU_PAT_SECRET"] == "s3cr3t"
+    assert env["TABLEAU_PAT_VALUE"] == "s3cr3t"
+
+
 def test_env_example_lists_only_the_documented_pat_secret_name():
     env_example = Path(__file__).resolve().parents[1] / ".env.example"
     keys = {

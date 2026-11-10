@@ -962,6 +962,11 @@ def test_basename_common_rejections_are_lexical_and_bounded(monkeypatch, platfor
         "Sales:Q3.twb",
         r"Sales\Q3.twb",
         "unit?.twb",
+        "unit*.twb",
+        "unit<.twb",
+        "unit>.twb",
+        'unit".twb',
+        "unit|.twb",
     ],
 )
 def test_windows_basename_rules_reject_reserved_forms(monkeypatch, basename: str) -> None:

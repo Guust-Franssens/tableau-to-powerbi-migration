@@ -393,6 +393,26 @@ def test_a_checkout_reached_through_a_junction_is_not_falsely_refused(lab) -> No
     assert h.refuse_unignored_output(out, allow_unignored=False) is False
 
 
+def test_the_junction_cli_refuses_and_writes_nothing(lab) -> None:
+    """End to end, by exit code: 2, and not one byte through the link."""
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "scripts" / "harvest_estate_assets.py"),
+            "--out",
+            str(Path("linkdir") / "sweepout"),
+            "--skip-download",
+        ],
+        cwd=lab.repo,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 2, f"the CLI accepted a junctioned --out:\n{result.stdout}\n{result.stderr}"
+    assert "REFUSING" in (result.stdout + result.stderr)
+    assert not (lab.outside / "sweepout").exists(), "the refusal ran too late - it already wrote through the link"
+
+
 def test_a_literal_tilde_is_judged_where_it_would_actually_land(repo: Path, monkeypatch) -> None:
     """Acceptance criterion 1, at the guard. `~` reaches argv unexpanded from cmd.exe, from a quoted
     PowerShell argument, and from any programmatic call; `Path("~/x")` is a plain relative path."""
