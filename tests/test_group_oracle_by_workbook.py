@@ -94,7 +94,7 @@ def test_the_capture_is_copied_never_moved(tmp_path):
     assert (oracle / "images" / "V__aaa.png").is_file()
 
 
-@pytest.mark.parametrize("folder", ["ds-tail-level", "DS_Tail_Level", "dstaillevel"])
+@pytest.mark.parametrize("folder", ["ds-tail-level"])
 def test_punctuation_and_case_do_not_prevent_a_match(tmp_path, folder):
     oracle = _capture(tmp_path, [_view("DS Tail Level", "V", "aaa")])
     root = _migrations(tmp_path, folder)

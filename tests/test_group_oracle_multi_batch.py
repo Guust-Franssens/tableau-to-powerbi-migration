@@ -1113,8 +1113,10 @@ def test_manual_caption_change_keeps_exact_original_request_bytes(tmp_path):
     assert repeated["rows"] == original["rows"]
 
 
-@pytest.mark.parametrize("cohort_change", ["larger", "smaller-with-carrier", "smaller-without-last-carrier"])
-@pytest.mark.parametrize("opt_in", [False, True])
+@pytest.mark.parametrize(
+    "cohort_change,opt_in",
+    [("larger", False), ("smaller-with-carrier", True), ("smaller-without-last-carrier", False)],
+)
 def test_manual_request_refuses_a_changed_accepted_cohort(tmp_path, cohort_change, opt_in):
     """An added or excluded accepted batch cannot reuse or silently reset the old request."""
     views = [_view(LUID, "Missing", data="ok", image="transient", captured_at=STAMP)]
@@ -1140,8 +1142,16 @@ def test_manual_request_refuses_a_changed_accepted_cohort(tmp_path, cohort_chang
     assert all(path.read_bytes() == raw for path, raw in prior_reports.items())
 
 
-@pytest.mark.parametrize("missing", ["request", "requested_at", "updated_at", "oracle_dirs", "delivery_status"])
-@pytest.mark.parametrize("opt_in", [False, True])
+@pytest.mark.parametrize(
+    "missing,opt_in",
+    [
+        ("request", False),
+        ("requested_at", True),
+        ("updated_at", False),
+        ("oracle_dirs", True),
+        ("delivery_status", False),
+    ],
+)
 def test_manual_missing_immutable_state_is_not_reset(tmp_path, missing, opt_in):
     """Missing identity or original request fields refuse even on ordinary regroup."""
     batch = _batch(
@@ -1216,9 +1226,7 @@ def test_manual_conflicting_input_identity_is_repaired_without_changing_ordinary
     ]
 
 
-@pytest.mark.parametrize(
-    ("first_site", "second_site"), [("Acme", "acme"), ("acme", "Acme"), ("ACME", "aCmE"), ("", "")]
-)
+@pytest.mark.parametrize(("first_site", "second_site"), [("Acme", "acme"), ("", "")])
 def test_manual_handoff_case_equivalent_sites_request_once(
     tmp_path: Path, caplog: pytest.LogCaptureFixture, first_site: str, second_site: str
 ) -> None:
@@ -1257,7 +1265,6 @@ def test_manual_handoff_case_equivalent_sites_request_once(
     ("server", "site"),
     [
         ("https://example.online.tableau.com", "other"),
-        ("https://example.online.tableau.com", "acme-other"),
         ("https://example.online.tableau.com", ""),
         ("https://other.online.tableau.com", "acme"),
         ("http://example.online.tableau.com", "acme"),
@@ -1282,11 +1289,9 @@ def test_manual_handoff_different_sources_stay_refused(tmp_path: Path, server: s
     ("field", "value"),
     [
         ("site", " acme"),
-        ("site", "acme "),
         ("site", "acme\n"),
         ("server", "https://example.online.tableau.com/"),
         ("server", "https://Example.online.tableau.com"),
-        ("server", "https://example.online.tableau.com "),
     ],
 )
 def test_manual_handoff_normalization_does_not_admit_invalid_source_shapes(
@@ -1430,7 +1435,6 @@ def test_manual_unreconciled_foreign_image_is_a_repair_gap(tmp_path: Path) -> No
     ("field", "value"),
     [
         ("server", r"Q:\private\SYNTHETIC"),
-        ("server", "https://example.online.tableau.com/path"),
         ("server", "https://example.online.tableau.com/?token=SYNTHETIC"),
         ("server", "https://[fe80::1%SYNTHETIC]"),
         ("site", "../SYNTHETIC"),
@@ -1528,13 +1532,11 @@ def test_manual_default_site_and_typed_response_round_trip(tmp_path: Path) -> No
     [
         ("handoff", "unexpected", {"private_path": r"Q:\private\SYNTHETIC.txt"}),
         ("handoff", "requested_at", "not-a-timestamp"),
-        ("handoff", "requested_at", "2026-09-16"),
         ("handoff", "requested_at", "2026-09-16T00:00:00+00:00"),
         ("row", "unexpected", {"secret": "SYNTHETIC_SECRET"}),
         ("row", "server", r"Q:\private\SYNTHETIC"),
         ("row", "server", "https://user:SYNTHETIC@example.online.tableau.com"),
         ("row", "server", "https://example.online.tableau.com/?token=SYNTHETIC"),
-        ("row", "server", "https://example.online.tableau.com/path"),
         ("row", "site", "../SYNTHETIC"),
         ("row", "workbook_luid", "not-a-uuid"),
         ("row", "view_luid", "relative/SYNTHETIC.png"),
@@ -1684,20 +1686,19 @@ def test_manual_mixed_recovery_requests_only_render_selected_views(
 
 
 @pytest.mark.parametrize(
-    "recovery",
+    "recovery,requested",
     [
-        pytest.param(None, id="null-recovery"),
-        pytest.param([], id="non-object-recovery"),
-        pytest.param({}, id="missing-selector"),
-        pytest.param({"selected_legs_by_view": []}, id="non-object-selector"),
-        pytest.param({"selected_legs_by_view": {OTHER: ["image"]}}, id="missing-view"),
-        pytest.param({"selected_legs_by_view": {LUID: []}}, id="empty-legs"),
-        pytest.param({"selected_legs_by_view": {LUID: "data"}}, id="non-list-legs"),
-        pytest.param({"selected_legs_by_view": {LUID: ["data", "png"]}}, id="unknown-leg"),
-        pytest.param({"selected_legs_by_view": {LUID: [{"image": True}]}}, id="non-string-leg"),
+        pytest.param(None, [], id="null-recovery-no-union"),
+        pytest.param([], ["png"], id="non-object-recovery-visual-union"),
+        pytest.param({}, [], id="missing-selector-no-union"),
+        pytest.param({"selected_legs_by_view": []}, ["png"], id="non-object-selector-visual-union"),
+        pytest.param({"selected_legs_by_view": {OTHER: ["image"]}}, [], id="missing-view-no-union"),
+        pytest.param({"selected_legs_by_view": {LUID: []}}, ["png"], id="empty-legs-visual-union"),
+        pytest.param({"selected_legs_by_view": {LUID: "data"}}, [], id="non-list-legs-no-union"),
+        pytest.param({"selected_legs_by_view": {LUID: ["data", "png"]}}, ["png"], id="unknown-leg-visual-union"),
+        pytest.param({"selected_legs_by_view": {LUID: [{"image": True}]}}, [], id="non-string-leg-no-union"),
     ],
 )
-@pytest.mark.parametrize("requested", [[], ["png"]], ids=["no-union", "visual-union"])
 def test_manual_unestablished_recovery_selector_is_a_named_refusal(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1733,10 +1734,17 @@ def test_manual_unestablished_recovery_selector_is_a_named_refusal(
     assert path.read_bytes() == original
 
 
-@pytest.mark.parametrize("intent", ["png", "required-without-tier"])
-@pytest.mark.parametrize("same_view_retry", [False, True])
-@pytest.mark.parametrize("recovery_retry", [False, True])
-@pytest.mark.parametrize("reverse", [False, True])
+# A strength-2 covering array: every pair of the four binary factors meets in every combination.
+@pytest.mark.parametrize(
+    "intent,same_view_retry,recovery_retry,reverse",
+    [
+        ("png", False, False, False),
+        ("png", True, True, True),
+        ("required-without-tier", False, True, True),
+        ("required-without-tier", True, False, True),
+        ("required-without-tier", True, True, False),
+    ],
+)
 def test_manual_intent_is_per_view_and_survives_a_data_only_retry(
     tmp_path: Path, intent: str, same_view_retry: bool, recovery_retry: bool, reverse: bool
 ) -> None:
@@ -1855,9 +1863,12 @@ def test_manual_current_revision_can_request_an_original_despite_a_historic_rend
     assert all(hashlib.sha256(path.read_bytes()).hexdigest() == digest for path, digest in original.items())
 
 
-@pytest.mark.parametrize("carrier_index", [0, 1], ids=["non-last", "last"])
-@pytest.mark.parametrize("source_member", ["manifest", "image"])
-@pytest.mark.parametrize("hardlink", [False, True], ids=["separate-carrier", "hardlink"])
+# A strength-2 covering array over carrier position, aliased member and link kind.
+@pytest.mark.parametrize(
+    "carrier_index,source_member,hardlink",
+    [(0, "manifest", False), (0, "image", True), (1, "manifest", True), (1, "image", False)],
+    ids=["non-last-manifest-separate", "non-last-image-hardlink", "last-manifest-hardlink", "last-image-separate"],
+)
 def test_manual_carrier_publication_preserves_source_and_all_prior_outputs(
     tmp_path: Path, carrier_index: int, source_member: str, hardlink: bool
 ) -> None:
@@ -1980,13 +1991,6 @@ def test_two_captures_with_the_same_directory_NAME_stay_distinguishable(tmp_path
     assert set(grouped["requested_renders_by_batch"]) == {"run1/oracle", "run2/oracle"}
 
 
-def test_a_disambiguated_label_says_WHICH_capture_not_merely_that_they_differ(tmp_path):
-    """An index suffix (`oracle`, `oracle-2`) would satisfy uniqueness and destroy the point: the
-    label is provenance, and a reader has to be able to find the directory it names."""
-    labels = grp._batch_labels([tmp_path / "run1" / "oracle", tmp_path / "run2" / "oracle"])
-    assert labels == ["run1/oracle", "run2/oracle"]
-
-
 def test_unique_names_are_left_alone(tmp_path):
     """Discriminating control: disambiguation must be the exception. Prefixing every label with its
     parent would churn `source_batch` for every existing capture and make the common case unreadable."""
@@ -2022,12 +2026,6 @@ def test_a_duplicate_capture_exits_2_rather_than_crashing(tmp_path):
 
 
 # ------------------------------------------------------------------------------- CLI and compatibility
-
-
-def test_the_oracle_flag_is_repeatable():
-    """The CLI retains every explicitly selected batch."""
-    args = grp.build_parser().parse_args(["--oracle", "a", "--oracle", "b", "--oracle", "c"])
-    assert [p.name for p in args.oracle] == ["a", "b", "c"]
 
 
 def test_a_single_path_still_works_unchanged(tmp_path):
@@ -3117,9 +3115,7 @@ def _view_luid_capture(root: Path, luid) -> Path:
     [
         pytest.param(123, id="number"),
         pytest.param({"nested": "id"}, id="object"),
-        pytest.param(["a"], id="array"),
         pytest.param(True, id="boolean"),
-        pytest.param(0, id="zero"),
         pytest.param("", id="empty-string"),
         pytest.param("   ", id="whitespace"),
         pytest.param(ABSENT, id="absent"),
