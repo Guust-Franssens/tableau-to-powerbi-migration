@@ -179,25 +179,6 @@ def test_a_staged_unit_whose_boundary_is_unproven_exits_unmeasurable_without_lea
     assert "Traceback" not in everywhere
 
 
-def test_a_safe_estate_without_oracle_still_publishes_its_digest(tmp_path: Path) -> None:
-    """The control that keeps the refusal above from being "the tool refuses everything now".
-
-    An ordinary staged unit with no `--oracle` still measures and publishes: exit 1 only because this
-    synthetic estate is not the committed expectation. `--oracle` is deliberately absent here - see
-    the scope note on the summary control above.
-    """
-    bundle, specs, _oracle = _estate(tmp_path)
-    out = tmp_path / "result.json"
-
-    completed = _run(bundle, specs, tmp_path / "work", out)
-
-    assert completed.returncode == epgd.EXIT_DIFFERS, completed.stdout + completed.stderr
-    assert epgd.REFUSED_BOUNDARY_MESSAGE not in completed.stderr
-    assert json.loads(out.read_text(encoding="utf-8"))["sha256"] == (
-        "8e2866d250bd56b0b4b7a0705ff34b162bc3ca1f1ff59fd9f245dd9bc2c39934"
-    )
-
-
 def _main_with_redirected_expectation(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, expectation: Path, argv: list[str]
 ) -> int:
@@ -247,25 +228,30 @@ def test_update_refuses_an_unproven_boundary_and_leaves_the_expectation_byte_ide
     assert epgd.REFUSED_BOUNDARY_MESSAGE in capsys.readouterr().err
 
 
-def test_update_still_rewrites_the_expectation_for_a_safe_estate(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_a_safe_estate_still_publishes_its_digest_and_update_still_rewrites_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:
-    """The paired control: `--update` is not simply broken now - a safe estate still rewrites."""
+    """The paired controls that keep the refusals above from being "the tool refuses everything now".
+
+    An ordinary staged unit with no `--oracle` still measures and publishes (exit 1 only because this
+    synthetic estate is not the expectation), and `--update` still rewrites it. `--oracle` is
+    deliberately absent - see the scope note on the summary control above.
+    """
     bundle, specs, _oracle = _estate(tmp_path)
     expectation = tmp_path / "expected.json"
     expectation.write_bytes(b'{"sha256": "sentinel"}\n')
+    out = tmp_path / "result.json"
+    argv = ["--bundle", str(bundle), "--specs", str(specs), "--work", str(tmp_path / "work")]
+    pinned = "8e2866d250bd56b0b4b7a0705ff34b162bc3ca1f1ff59fd9f245dd9bc2c39934"
 
-    code = _main_with_redirected_expectation(
-        monkeypatch,
-        tmp_path,
-        expectation,
-        ["--bundle", str(bundle), "--specs", str(specs), "--work", str(tmp_path / "work"), "--update"],
-    )
+    code = _main_with_redirected_expectation(monkeypatch, tmp_path, expectation, [*argv, "--json", str(out)])
+    assert code == epgd.EXIT_DIFFERS
+    assert epgd.REFUSED_BOUNDARY_MESSAGE not in capsys.readouterr().err
+    assert json.loads(out.read_text(encoding="utf-8"))["sha256"] == pinned
 
+    code = _main_with_redirected_expectation(monkeypatch, tmp_path, expectation, [*argv, "--update"])
     assert code == epgd.EXIT_MATCH
-    assert json.loads(expectation.read_text(encoding="utf-8"))["sha256"] == (
-        "8e2866d250bd56b0b4b7a0705ff34b162bc3ca1f1ff59fd9f245dd9bc2c39934"
-    )
+    assert json.loads(expectation.read_text(encoding="utf-8"))["sha256"] == pinned
 
 
 def test_the_boundary_gate_also_refuses_an_aliased_staged_unit(tmp_path: Path) -> None:

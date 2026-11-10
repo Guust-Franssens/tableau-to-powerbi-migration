@@ -76,6 +76,8 @@ def test_int64_cells_decode_as_integers_and_keep_rows_aligned() -> None:
         "a year must decode as 2018, never as the 0.0-ish denormal a double-read produces"
     )
     assert not entry["ragged_tail_dropped"]
+    # Control: the type guard must not cry wolf on a clean decode, or it gets ignored when it matters.
+    assert etrc._typecheck(entry) == []
 
 
 def test_typecheck_catches_a_column_decoded_as_the_wrong_python_type() -> None:
@@ -94,18 +96,6 @@ def test_typecheck_catches_a_column_decoded_as_the_wrong_python_type() -> None:
 
     assert problems, "a declared-integer column decoded as float must be reported, not accepted"
     assert "Cohort Year" in problems[0] and "integer" in problems[0]
-
-
-def test_a_clean_decode_reports_no_typecheck_problems() -> None:
-    """Control: the guard must not cry wolf, or it gets ignored on the run that matters."""
-    blob = _blob(
-        _meta("Cohort Year", "integer"),
-        _meta("Sales", "real"),
-        _rec(TAG_INT, struct.pack("<q", 2018)),
-        _rec(TAG_NUMBER, struct.pack("<d", 725457.82)),
-    )
-
-    assert etrc._typecheck(etrc.decode_bin(blob)) == []
 
 
 def test_a_truncated_final_tuple_is_dropped_not_emitted_as_a_short_row() -> None:

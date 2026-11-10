@@ -31,28 +31,15 @@ def _args(**kwargs) -> argparse.Namespace:
     return argparse.Namespace(**kwargs)
 
 
-def test_a_dropped_screenshot_is_not_validation_grade_by_default():
-    caps = ctr._manual_capabilities(_args(manual_validation_grade=False))  # pylint: disable=protected-access
-    assert ctr.CAP_VALIDATION not in caps, "an un-provenanced file cannot claim the sign-off tier"
-    assert caps == [ctr.CAP_LAYOUT, ctr.CAP_TEXT]
-
-
-def test_an_absent_flag_attribute_still_defaults_to_not_validation_grade():
-    # Fail closed even if a caller builds the namespace without the flag at all.
-    caps = ctr._manual_capabilities(_args())  # pylint: disable=protected-access
-    assert ctr.CAP_VALIDATION not in caps
-
-
-def test_validation_grade_is_available_but_only_on_an_explicit_assertion():
-    caps = ctr._manual_capabilities(_args(manual_validation_grade=True))  # pylint: disable=protected-access
-    assert ctr.CAP_VALIDATION in caps
-
-
-def test_the_manual_provider_does_not_outrank_a_live_server_render():
+def test_a_dropped_screenshot_is_validation_grade_only_on_an_explicit_assertion():
+    # pylint: disable=protected-access
+    caps = ctr._manual_capabilities(_args(manual_validation_grade=False))
     # The oracle's REST images are default-state, so layout+text is their honest ceiling. A dropped
     # file must not be graded above that without an explicit human claim.
-    default_manual = ctr._manual_capabilities(_args(manual_validation_grade=False))  # pylint: disable=protected-access
-    assert set(default_manual) <= {ctr.CAP_LAYOUT, ctr.CAP_TEXT}
+    assert caps == [ctr.CAP_LAYOUT, ctr.CAP_TEXT], "an un-provenanced file cannot claim the sign-off tier"
+    # Fail closed even if a caller builds the namespace without the flag at all.
+    assert ctr.CAP_VALIDATION not in ctr._manual_capabilities(_args())
+    assert ctr.CAP_VALIDATION in ctr._manual_capabilities(_args(manual_validation_grade=True))
 
 
 def test_the_flag_is_wired_into_the_cli_and_defaults_off():

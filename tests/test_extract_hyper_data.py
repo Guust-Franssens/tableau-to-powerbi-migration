@@ -54,8 +54,14 @@ def _csv_row_count(path: Path) -> int:
         return sum(1 for _ in csv.DictReader(handle))
 
 
-def test_default_export_writes_every_relation_across_every_extract(tmp_path: Path) -> None:
-    """A federated multi-relation workbook must not silently keep only one relation per datasource."""
+def test_export_and_enrich_cover_every_relation_across_every_extract(tmp_path: Path) -> None:
+    """A federated multi-relation workbook must not silently keep only one relation per datasource.
+
+    ds.small reuses big's `"Extract"."Products.csv_DIM"` on purpose: distinct data sources must not
+    dedupe by qualified name. Enrichment then exercises both table-matching paths on real Hyper
+    relation names (which `str(table.name)` quotes): by name for ds.big's two tables, and the 1x1
+    shortcut for ds.small, whose Tableau table name need not equal the Hyper relation name.
+    """
     big_hyper = tmp_path / "big.hyper"
     small_hyper = tmp_path / "small.hyper"
     _create_hyper(
@@ -65,12 +71,15 @@ def test_default_export_writes_every_relation_across_every_extract(tmp_path: Pat
             "Products.csv_DIM": (["Product ID"], [("p1",), ("p2",)]),
         },
     )
-    _create_hyper(small_hyper, {"Customers.csv_DIM": (["Customer ID"], [("c1",), ("c2",), ("c3",), ("c4",)])})
+    _create_hyper(small_hyper, {"Products.csv_DIM": (["Product ID"], [("c1",), ("c2",), ("c3",), ("c4",)])})
 
     workbook = tmp_path / "multi_extract.twbx"
     with zipfile.ZipFile(workbook, "w") as archive:
         archive.write(big_hyper, "Data/big/federated.hyper")
         archive.write(small_hyper, "Data/small/federated.hyper")
+
+    def table(name: str) -> dict:
+        return {"id": f"tbl.{name}", "name": name, "row_count": {"source": "unknown"}}
 
     spec = tmp_path / "migration-spec.json"
     spec.write_text(
@@ -81,11 +90,13 @@ def test_default_export_writes_every_relation_across_every_extract(tmp_path: Pat
                         "id": "ds.big",
                         "connection": {"mode": "extract", "hyper_file": "Data/big/federated.hyper"},
                         "joins": [{"left": "Orders.csv_FACT", "right": "Products.csv_DIM", "type": "inner"}],
+                        "tables": [table("Orders.csv_FACT"), table("Products.csv_DIM")],
                     },
                     {
                         "id": "ds.small",
                         "connection": {"mode": "extract", "hyper_file": "Data/small/federated.hyper"},
                         "joins": [],
+                        "tables": [table("Sales")],
                     },
                 ]
             }
@@ -115,106 +126,12 @@ def test_default_export_writes_every_relation_across_every_extract(tmp_path: Pat
     assert big_relations["ds.big.Extract.Orders.csv_FACT.csv"]["row_count"]["value"] == 3
     assert big_relations["ds.big.Extract.Orders.csv_FACT.csv"]["row_count"]["source"] == "hyper"
     assert big_relations["ds.big.Extract.Orders.csv_FACT.csv"]["row_count"]["observed_at"].endswith("Z")
+    small = manifest["ds.small"]["relations"]
+    assert [relation["qualified_name"] for relation in small] == ['"Extract"."Products.csv_DIM"']
+    assert big_relations["ds.big.Extract.Products.csv_DIM.csv"]["qualified_name"] == small[0]["qualified_name"]
     assert _csv_row_count(output_dir / "ds.big.Extract.Orders.csv_FACT.csv") == 3
     assert _csv_row_count(output_dir / "ds.big.Extract.Products.csv_DIM.csv") == 2
     assert _csv_row_count(output_dir / "ds.small.csv") == 4
-
-
-def test_same_qualified_table_name_in_distinct_extracts_keeps_both_datasources(tmp_path: Path) -> None:
-    """One-table extracts often all expose "Extract"."Extract"; distinct data sources must not dedupe."""
-    orders_hyper = tmp_path / "orders.hyper"
-    annotations_hyper = tmp_path / "annotations.hyper"
-    _create_hyper(
-        orders_hyper,
-        {"Extract": (["Order ID", "Sales"], [("o1", "10"), ("o2", "20"), ("o3", "30")])},
-    )
-    _create_hyper(annotations_hyper, {"Extract": (["Label"], [("overview",)])})
-
-    workbook = tmp_path / "same_table_name.twbx"
-    with zipfile.ZipFile(workbook, "w") as archive:
-        archive.write(orders_hyper, "Data/orders/orders.hyper")
-        archive.write(annotations_hyper, "Data/annotations/annotations.hyper")
-
-    spec = tmp_path / "migration-spec.json"
-    spec.write_text(
-        json.dumps(
-            {
-                "data_sources": [
-                    {
-                        "id": "ds.orders",
-                        "connection": {"mode": "extract", "hyper_file": "Data/orders/orders.hyper"},
-                        "joins": [],
-                    },
-                    {
-                        "id": "ds.annotations",
-                        "connection": {"mode": "extract", "hyper_file": "Data/annotations/annotations.hyper"},
-                        "joins": [],
-                    },
-                ]
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    output_dir = tmp_path / "out"
-    subprocess.run(
-        [sys.executable, str(SCRIPT), str(workbook), str(spec), "-o", str(output_dir)],
-        check=True,
-        cwd=SCRIPT.parents[1],
-    )
-
-    manifest = json.loads((output_dir / "extract_manifest.json").read_text(encoding="utf-8"))
-
-    assert manifest["ds.orders"]["relation_count"] == 1
-    assert manifest["ds.annotations"]["relation_count"] == 1
-    assert manifest["ds.orders"]["relations"][0]["qualified_name"] == '"Extract"."Extract"'
-    assert manifest["ds.annotations"]["relations"][0]["qualified_name"] == '"Extract"."Extract"'
-    assert manifest["ds.orders"]["relations"][0]["row_count"]["value"] == 3
-    assert manifest["ds.orders"]["relations"][0]["row_count"]["source"] == "hyper"
-    assert manifest["ds.annotations"]["relations"][0]["row_count"]["value"] == 1
-    assert _csv_row_count(output_dir / "ds.orders.csv") == 3
-    assert _csv_row_count(output_dir / "ds.annotations.csv") == 1
-
-
-def test_enrich_spec_writes_table_level_hyper_row_counts(tmp_path: Path) -> None:
-    """The post-parse enrichment step persists the count where consumers can use it: tables[]."""
-    orders_hyper = tmp_path / "orders.hyper"
-    _create_hyper(
-        orders_hyper,
-        {"Orders.csv_FACT": (["Order ID", "Sales"], [("o1", "10"), ("o2", "20"), ("o3", "30")])},
-    )
-
-    workbook = tmp_path / "orders.twbx"
-    with zipfile.ZipFile(workbook, "w") as archive:
-        archive.write(orders_hyper, "Data/orders/orders.hyper")
-
-    spec = tmp_path / "migration-spec.json"
-    spec.write_text(
-        json.dumps(
-            {
-                "migration_spec_version": "1.0",
-                "source": {"file_name": "orders.twbx"},
-                "data_sources": [
-                    {
-                        "id": "ds.orders",
-                        "connection": {"class": "hyper", "mode": "extract", "hyper_file": "Data/orders/orders.hyper"},
-                        "tables": [
-                            {
-                                "id": "tbl.orders",
-                                "name": "Orders.csv_FACT",
-                                "source_relation": "table",
-                                "row_count": {"source": "unknown"},
-                            }
-                        ],
-                        "fields": [],
-                    }
-                ],
-                "worksheets": [],
-                "dashboards": [],
-            }
-        ),
-        encoding="utf-8",
-    )
 
     enriched = tmp_path / "enriched.json"
     subprocess.run(
@@ -223,11 +140,17 @@ def test_enrich_spec_writes_table_level_hyper_row_counts(tmp_path: Path) -> None
         cwd=SCRIPT.parents[1],
     )
 
-    table = json.loads(enriched.read_text(encoding="utf-8"))["data_sources"][0]["tables"][0]
-
-    assert table["row_count"]["value"] == 3
-    assert table["row_count"]["source"] == "hyper"
-    assert table["row_count"]["observed_at"].endswith("Z")
+    counts = {
+        f"{data_source['id']}/{tbl['name']}": tbl["row_count"]
+        for data_source in json.loads(enriched.read_text(encoding="utf-8"))["data_sources"]
+        for tbl in data_source["tables"]
+    }
+    assert {key: count["value"] for key, count in counts.items()} == {
+        "ds.big/Orders.csv_FACT": 3,
+        "ds.big/Products.csv_DIM": 2,
+        "ds.small/Sales": 4,
+    }
+    assert all(count["source"] == "hyper" and count["observed_at"].endswith("Z") for count in counts.values())
 
 
 def _load_script_module():
@@ -258,55 +181,6 @@ def test_duplicate_unqualified_table_names_are_omitted_rather_than_last_write_wi
 
     assert "orders" not in counts, "an ambiguous name must be omitted, not resolved by iteration order"
     assert counts["products"]["value"] == 7
-
-
-def test_a_multi_table_datasource_gets_every_count_matched_by_name(tmp_path: Path) -> None:
-    """The by-name path, not the 1x1 shortcut - previously untested, so disabling it stayed green.
-
-    Mutations E6 (`by_name = {}`) and E8 (`_row_count_by_table_name` -> `{}`) both survived the
-    original suite because the only enrichment test had exactly one table and one relation, which
-    the shortcut answers without ever consulting the name map.
-
-    The quoted relation names are the REAL producer shape, not decoration: `_describe_hyper_file`
-    writes `str(table.name)`, and stringifying a Hyper `Name` escapes it, so the value carries
-    literal double quotes. That is why `_normalise_table_name` strips them. A first draft of this
-    test used `"Extract.Orders"` and failed - the schema lives in `qualified_name`, never here.
-    """
-    module = _load_script_module()
-    data_source = {
-        "id": "ds.sales",
-        "tables": [
-            {"id": "tbl.orders", "name": "Orders", "row_count": {"source": "unknown"}},
-            {"id": "tbl.products", "name": "Products", "row_count": {"source": "unknown"}},
-        ],
-    }
-    relations = [
-        {"table": '"Orders"', "row_count": {"value": 3, "source": "hyper", "observed_at": "Z"}},
-        {"table": '"Products"', "row_count": {"value": 7, "source": "hyper", "observed_at": "Z"}},
-    ]
-
-    updated = module._apply_hyper_counts_to_tables(data_source, relations)
-
-    assert updated == 2
-    assert data_source["tables"][0]["row_count"]["value"] == 3
-    assert data_source["tables"][1]["row_count"]["value"] == 7
-
-
-def test_a_lone_table_is_matched_to_a_lone_relation_even_when_the_names_differ() -> None:
-    """The 1x1 shortcut exists because Tableau's table name need not equal the Hyper relation name."""
-    module = _load_script_module()
-    data_source = {
-        "id": "ds.sales",
-        "tables": [{"id": "tbl.sales", "name": "Sales", "row_count": {"source": "unknown"}}],
-    }
-    relations = [
-        {"table": "Extract.Orders_csv_FACT", "row_count": {"value": 9994, "source": "hyper", "observed_at": "Z"}}
-    ]
-
-    updated = module._apply_hyper_counts_to_tables(data_source, relations)
-
-    assert updated == 1, "a single table and a single relation must match positionally, not by name"
-    assert data_source["tables"][0]["row_count"]["value"] == 9994
 
 
 def test_a_null_hyper_file_is_reported_not_raised(tmp_path: Path) -> None:

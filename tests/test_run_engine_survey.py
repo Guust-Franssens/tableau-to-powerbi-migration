@@ -34,19 +34,25 @@ def _no_ambient_secret(monkeypatch) -> None:
         monkeypatch.delenv(key, raising=False)
 
 
-def test_main_bridges_the_documented_secret_and_adds_no_prompt(tmp_path, monkeypatch):
+def test_main_bridges_the_documented_secret_adds_no_prompt_and_propagates_the_exit_code(tmp_path, monkeypatch):
+    """`estate_survey.py` returns 1 on unresolved dependencies or a degraded survey - keep it.
+
+    `os.execvpe` detached on Windows and reported 0 unconditionally, so an incomplete survey (#99)
+    looked like a clean one and the runbook's next step ran before the JSON existed.
+    """
     dotenv = tmp_path / ".env"
     dotenv.write_text("TABLEAU_PAT_SECRET=documented-secret\n", encoding="utf-8")
     called: dict[str, object] = {}
 
     _no_ambient_secret(monkeypatch)
     monkeypatch.setattr(survey, "engine_scripts_dir", lambda: tmp_path / "engine-scripts")
-    monkeypatch.setattr(survey.subprocess, "run", _fake_engine(called))
+    monkeypatch.setattr(survey.subprocess, "run", _fake_engine(called, returncode=1))
 
     with pytest.raises(SystemExit) as excinfo:
         survey.main(["--env-file", str(dotenv), "--server", "https://tableau.example", "--json", "survey.json"])
 
     assert called, f"the engine was never launched: {excinfo.value}"
+    assert excinfo.value.code == 1
     assert called["command"] == [
         sys.executable,
         str(tmp_path / "engine-scripts" / "estate_survey.py"),
@@ -95,25 +101,6 @@ def test_main_accepts_the_engines_bare_env_file_flag(tmp_path, monkeypatch):
 
     assert called, f"the bare --env-file flag did not fall back to ./.env: {excinfo.value}"
     assert called["env"]["TABLEAU_PAT_VALUE"] == "documented-secret"
-
-
-def test_main_propagates_the_engines_exit_code(tmp_path, monkeypatch):
-    """`estate_survey.py` returns 1 on unresolved dependencies or a degraded survey - keep it.
-
-    `os.execvpe` detached on Windows and reported 0 unconditionally, so an incomplete survey (#99)
-    looked like a clean one and the runbook's next step ran before the JSON existed.
-    """
-    dotenv = tmp_path / ".env"
-    dotenv.write_text("TABLEAU_PAT_SECRET=documented-secret\n", encoding="utf-8")
-
-    _no_ambient_secret(monkeypatch)
-    monkeypatch.setattr(survey, "engine_scripts_dir", lambda: tmp_path / "engine-scripts")
-    monkeypatch.setattr(survey.subprocess, "run", _fake_engine({}, returncode=1))
-
-    with pytest.raises(SystemExit) as excinfo:
-        survey.main(["--env-file", str(dotenv)])
-
-    assert excinfo.value.code == 1
 
 
 def test_help_needs_no_credential_and_launches_nothing(monkeypatch, capsys):
