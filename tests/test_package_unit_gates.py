@@ -1,20 +1,4 @@
-"""The acceptance test for issue #446: BOTH gates, on the packaged folder, with NO flags.
-
-This is the whole point of the packaging, so it is tested as a before/after rather than as an
-assertion in isolation. The same gate, on the same engine output, is run twice:
-
-* **before** - pointed at the engine working copy (`bundle/pbip/<Unit>`), which is what an operator
-  actually has. `check_reference_readiness.py` exits 3 `CANNOT_ESTABLISH` because neither `--source`
-  nor `--oracle` can be derived from that path, and `check_unit.py` cannot derive an expected page
-  set at all (#443). Exit 3 reads like "this unit is broken" rather than "you did not tell me where
-  the workbook is", which is the defect;
-* **after** - pointed at the package, no flags, and both produce a real per-page verdict.
-
-The negative control shares a fixture with the positive one on purpose: one workbook, renders for
-some of its objects and not others, so a single run has to report `ready` for the covered pages and
-`blind` for the rest. Packaging that manufactured coverage would fail here, and packaging that lost
-it would fail here too.
-"""
+"""The acceptance test for issue #446: BOTH gates, on the packaged folder, with NO flags. See #443."""
 
 from __future__ import annotations
 
@@ -57,17 +41,7 @@ PUBLISHED_KEY = "sales-site/shared_sales"
 
 
 def _write_pbir(bundle: Path, unit: str, objects: list) -> None:
-    """A PBIR report with one visual-bearing page per Tableau object, named as the engine names them.
-
-    `displayName` carries the Tableau object name because `check_unit.actual_pages` matches on it,
-    and each page gets a `visual.json` because `_page_visual_count` is what distinguishes a rebuilt
-    page from the engine's crash-guard placeholder.
-
-    ⚠️ The `.SemanticModel`, the `definition.pbir` binding and the `.pbip` entry point are here
-    because a real 2.339.0 `pbip/<Unit>/` carries all three - measured on all 62 units of the
-    reference run - and #562 S2 checks that cardinality. A fixture with a report and no model was
-    modelling engine output that does not exist.
-    """
+    """A PBIR report with one visual-bearing page per Tableau object, named as the engine names them. See #562."""
     working = bundle / "pbip" / unit
     pages = working / f"{unit}.Report" / "definition" / "pages"
     pages.mkdir(parents=True, exist_ok=True)
@@ -93,12 +67,7 @@ def _write_model(bundle: Path, unit: str) -> None:
 
 
 def _write_receipt(bundle: Path, units: list[str]) -> None:
-    """The engine receipt, listing every output it wrote for these units.
-
-    `package_unit` re-roots the rows under `fabric/` and drops every row belonging to another unit,
-    which is what lets #562 S2 ask whether a package's receipt accounts for the report/model/PBIP
-    roles it claims - and only for files that are actually in it.
-    """
+    """The engine receipt, listing every output it wrote for these units. See #562."""
     artifacts = [
         {"path": path.relative_to(bundle).as_posix(), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
         for unit in units
@@ -193,8 +162,6 @@ def _bundle(tmp_path: Path, *, covered: set[str] | None, datasource_only: bool =
     chosen = objects if covered is None else [obj for obj in objects if obj.name in covered]
     # The capture lives in its OWN subtree, never at `tmp_path`: `_collect_evidence` scans the
     # target's grandparent too, so an `_oracle/` beside `out/` would be matched alongside the
-    # packaged subset and every page would read `unverifiable`. `conflicting_evidence_dirs` refuses
-    # that layout; this fixture models the layout a real run actually has.
     oracle = write_oracle(
         tmp_path / "capture",
         [
@@ -206,10 +173,6 @@ def _bundle(tmp_path: Path, *, covered: set[str] | None, datasource_only: bool =
                 "view_type": obj.kind,
                 # ⚠️ The shape a CURRENT capture writes, all three fields together (#480 round 3).
                 # `status`+`path` alone was the pre-certification shape, and since certification
-                # became authoritative that record is unassessable: packaging withholds its `path`
-                # and both gates below correctly report NOT_CHECKED. This is the positive end-to-end
-                # control, so it has to be a capture something actually measured; the negative half
-                # is `test_a_legacy_uncertified_capture_earns_no_numeric_evidence_end_to_end`.
                 "data": {
                     "status": "ok",
                     "certification": "certified",
@@ -248,12 +211,7 @@ def _readiness(target: Path, *others: Path) -> tuple[int, dict]:
 
 
 def _cli_args(bundle: Path, out: Path, oracle: Path, tmp_path: Path) -> list[str]:
-    """The documented `package_unit.py` command line, WITH the brief the dispatcher writes.
-
-    `--brief` is part of the ordinary invocation rather than an extra: a package with no brief has
-    no role for the one document saying what the migration is for, and the entry gate blocks it
-    (`test_a_package_written_with_no_brief_is_blocked_at_the_entry_gate` is that negative control).
-    """
+    """The documented `package_unit.py` command line, WITH the brief the dispatcher writes."""
     return [
         "--bundle",
         str(bundle),
@@ -884,22 +842,10 @@ def test_the_engine_working_copy_alone_has_no_expected_page_set(tmp_path: Path) 
 
 # --------------------------------------------------------------------------------------------
 # after - the LEGACY negative control, end to end (#480 round 3)
-#
-# The positive control above was, until round 3, `{"status": "ok", "path": ...}` and nothing else -
-# which is a PRE-CERTIFICATION record, not a current one. It passed because a bare `row_count` (and
-# before that, a bare `path`) was accepted as evidence. Now that certification is authoritative, the
-# same fixture must be split in two: a genuinely certified capture that stays consumable, and this -
-# the shape a customer's existing `_oracle/` actually holds - which must not reach a numeric gate.
-# --------------------------------------------------------------------------------------------
 
 
 def _legacy_oracle(oracle: Path) -> None:
-    """Rewrite a captured manifest into the shape `origin/master`'s producer wrote for every 200.
-
-    A `row_count` and `columns` derived from the body, and NO `certification` - because nothing
-    certified anything. The files stay exactly where they are: this is a manifest-shape change, which
-    is the only kind a pre-#480 capture on disk can have.
-    """
+    """Rewrite a captured manifest into the shape `origin/master`'s producer wrote for every 200. See #480."""
     manifest = json.loads((oracle / "oracle-manifest.json").read_text(encoding="utf-8"))
     for view in manifest["views"]:
         data = view.get("data") or {}
@@ -1046,21 +992,6 @@ def test_invalid_v2_brief_refuses_before_real_packager_assembly(
 
 #: The usage exit each gate returns for an argument it cannot use, keyed by the command the README
 #: prints. Deliberately PER SCRIPT rather than one shared tuple.
-#:
-#: ⚠️ A shared `(2, check_unit.EXIT_USAGE)` was wrong, and it took ubuntu CI to show it: exit 2 is
-#: argparse's usage code in `check_reference_readiness.py` (`EXIT_USAGE = 2`, verdicts 0/1/3) but it
-#: is `check_unit.EXIT_NOT_CHECKED` - a genuine VERDICT - in `check_unit.py`, whose usage code is 64.
-#: So a package on which check_unit legitimately reported NOT_CHECKED was read as a usage error and
-#: failed this test, with an empty stderr as the only clue. Windows local runs happened to land on a
-#: different verdict, so nothing but CI saw it.
-#:
-#: ⚠️ **`check_unit.py` emits BOTH.** 64 is its own refusal for a directory it cannot use; 2 is what
-#: argparse emits for malformed SYNTAX - measured, `check_unit.py --bogus` exits 2 with a message on
-#: stderr - and dropping 2 from its map classified a real usage error as a verdict (round-2 finding
-#: 5). Both are mapped, and :func:`_rejected_the_argument` requires stderr, which is what separates
-#: argparse's 2 from `EXIT_NOT_CHECKED`'s silent 2. That distinction is asserted directly by
-#: `test_the_usage_map_separates_argparses_2_from_check_units_NOT_CHECKED`, because a mapping nobody
-#: exercises is how the wrong one survived a round.
 USAGE_EXITS = {
     "scripts/check_reference_readiness.py": (crr.EXIT_USAGE,),
     "scripts/check_unit.py": (2, check_unit.EXIT_USAGE),
@@ -1080,37 +1011,13 @@ BIND_SCRIPT = "scripts/set_data_folder.py"
 
 
 def _rejected_the_argument(script: str, proc: subprocess.CompletedProcess[str]) -> bool:
-    """Whether the gate refused the ARGUMENT, as opposed to returning a verdict about a package.
-
-    Both halves are required. The exit code alone conflates a verdict with a refusal on any gate
-    whose codes overlap - `check_unit.py` returns 2 for both argparse and `NOT_CHECKED` - and stderr
-    alone would accept a gate that grumbles and still reports.
-    """
+    """Whether the gate refused the ARGUMENT, as opposed to returning a verdict about a package."""
     return proc.returncode in USAGE_EXITS[script] and bool(proc.stderr.strip())
 
 
 @pytest.mark.slow
 def test_every_command_the_readme_prints_produces_a_verdict_not_a_usage_error(tmp_path: Path) -> None:
-    """The README showed the unit NAME where both gates require a PATH (2026-09-03 cold run).
-
-    Measured against the shipped `HR_Dashboard` package before this fix::
-
-        $ python scripts/check_reference_readiness.py HR_Dashboard
-        error: HR_Dashboard is not a directory                       # exit 2
-
-    An argparse usage error is not a verdict, so an agent following the package's own map learned
-    nothing about its package.
-
-    ⚠️ **The DOCUMENTED argument is what runs.** Round-2 finding 5: this used to parse the argument
-    out of the README, throw it away, and run the gate on a path it had constructed itself - so any
-    malformed argument other than the exact bare unit name passed, and the test could not fail for
-    the defect it was written for (`mutation_survived=True`). Only the recognized
-    `<path-to-this-folder>` placeholder is substituted; everything else is executed as printed.
-
-    ⚠️ A *verdict* is any exit the gate reaches after reading the package, INCLUDING
-    `check_unit.EXIT_NOT_CHECKED` (2). "I looked and could not check it" is an opinion about the
-    package; "I cannot use this argument" is not. See :data:`USAGE_EXITS`.
-    """
+    """The README showed the unit NAME where both gates require a PATH (2026-09-03 cold run)."""
     bundle, oracle, _ = _bundle(tmp_path, covered=None)
     unit = _package(tmp_path, bundle, oracle)
     readme = (unit / "README.md").read_text(encoding="utf-8")
@@ -1153,17 +1060,7 @@ def test_every_command_the_readme_prints_produces_a_verdict_not_a_usage_error(tm
 
 @pytest.mark.slow
 def test_the_usage_map_separates_argparses_2_from_check_units_NOT_CHECKED(tmp_path: Path) -> None:
-    """Round-2 finding 5: `check_unit.py`'s map omitted argparse's own 2, so a usage error read as a verdict.
-
-    Three measured cases, and each one is a different cell of the table:
-
-    * `check_unit.py --bogus`   -> 2, stderr  -> a USAGE error (argparse), not a verdict
-    * `check_unit.py <not-a-dir>` -> 64, stderr -> the gate's own refusal
-    * `check_unit.py <package>` -> a verdict, whatever it is, and NEVER classified as usage
-
-    The third is what stops the fix for the first from swallowing `EXIT_NOT_CHECKED`, which is also
-    2 and is a genuine opinion about the package.
-    """
+    """Round-2 finding 5: `check_unit.py`'s map omitted argparse's own 2, so a usage error read as a verdict."""
     script = "scripts/check_unit.py"
     bogus = _run_gate(script, ["--definitely-not-a-flag"], tmp_path)
     assert (bogus.returncode, bool(bogus.stderr.strip())) == (2, True)
@@ -1217,8 +1114,6 @@ def test_incomplete_flat_package_without_manifest_fails_closed_when_ancestor_evi
 
     # ENTRY GATE ONLY. ⚠️ The refusal SHAPE changed with #562: the damaged boundary is classified
     # before the root is resolved and before any discovery runs, so the gate forms no opinion at all
-    # instead of reporting the unit's pages as blind. Both are exit 3; the new one additionally
-    # proves discovery never happened. The exit gate is asserted separately below.
     code, payload = _readiness(unit)
     assert (code, payload["status"]) == (3, "CANNOT_ESTABLISH")
     assert payload["pages_ready"] == 0
@@ -1235,8 +1130,6 @@ def test_incomplete_flat_package_without_manifest_fails_closed_when_ancestor_evi
 
     # ⚠️ The exit gate's SHAPE changed the same way, one slice later (#562 follow-up): `run_all`
     # classifies the original target first, so a damaged boundary stops before `_unit_dir` resolves
-    # anything and there is no `oracle-coverage` row left to inspect. Strictly stronger than the
-    # NOT_CHECKED row this used to assert - the coverage assertions above still hold that end.
     run_report = check_unit.run_all(unit, scope=check_unit.SCOPE_REPORT)
     checks = {c["id"]: c for c in run_report["checks"]}
     assert "oracle-coverage" not in checks
@@ -1246,21 +1139,7 @@ def test_incomplete_flat_package_without_manifest_fails_closed_when_ancestor_evi
 
 # --------------------------------------------------------------------------------------------
 # the scoped report, against BOTH gates - the positive control for round-1 finding 1
-#
-# `test_package_unit.py` proves the negative half (no foreign unit survives). Scoping can fail the
-# other way too, and that failure is invisible in a leak test: `_engine_report` returns None unless
-# `workbooks` is a LIST, so a scoped report that trimmed one field too many silently costs a
-# datasource-only unit its earned `NOT_APPLICABLE`. Both halves are run here on a report in the real
-# engine's 13-field shape rather than the minimal fixture, because the minimal one has nothing to
-# over-trim.
-# --------------------------------------------------------------------------------------------
 
 
 # --------------------------------------------------------------------------------------------
 # The ceilings themselves. Pinned HERE, in a suite the package-unit mutation harness scored (retired in #830), because
-# that was the gap: mutating `DIR_CEILING` 247 -> 260 and running the two suites the mutation
-# harness uses reported `148 passed, exit 0`. The full documented gate command DOES catch it
-# (`tests/test_check_path_ceiling.py` pins both, and the same mutation gives `4 failed, exit 1`),
-# so the defect was never "nothing detects a regression" - it was that nothing the harness can
-# score detected one, and therefore no anchor could prove the pin can fail.
-# --------------------------------------------------------------------------------------------

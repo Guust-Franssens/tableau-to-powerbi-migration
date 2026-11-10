@@ -1,23 +1,4 @@
-"""Packaging must ARRANGE evidence, never create it (issue #446).
-
-`package_unit.py` is the join nothing else performs: engine output keyed by sanitized workbook name,
-oracle renders keyed by bare view LUID in a flat tree, and a LUID-prefixed source asset in a third
-place. The only way that join can be harmful is by attributing a render to the wrong object, so every
-test here pins one of the three ways it could:
-
-1. **guessing a workbook** - copying a render "because it was in the same capture" (issue #438 in a
-   new place). Attribution has exactly two admissible routes, and both mirror
-   `reference_evidence.Evidence.is_for`, so packaging can never widen what the gate would accept;
-2. **guessing an object KIND** - `view_type` may legitimately be `unknown`, and `content_url` is
-   `<wb>/sheets/<view>` for dashboards AND worksheets, so there is nothing to fall back to; and
-3. **manufacturing coverage in the human layer** - a selected view with no usable render must not be
-   greppable as `ORACLE_RENDER`, or `grep -c` over-reports the reference an agent thinks it has.
-
-Fixtures are reused from `test_check_reference_readiness.py` on purpose: its `write_png` emits a
-genuine, parseable, per-file-distinct PNG because round-1 review measured an 8-byte signature stub
-being asserted as evidence. A packaging test that wrote stubs would prove nothing about a gate that
-verifies recorded hashes and dimensions.
-"""
+"""Packaging must ARRANGE evidence, never create it (issue #446; see #438)"""
 
 from __future__ import annotations
 
@@ -1191,11 +1172,7 @@ def test_reference_identity_and_content_faults_remain_non_admitting(tmp_path: Pa
 
 
 def test_one_asset_mapped_onto_two_workbook_luids_attributes_nothing(tmp_path: Path) -> None:
-    """Byte-identical uploads in two projects: provenance holds two LUIDs for one sha256.
-
-    Neither may win. This is the multi-owner case that the deleted name route used to have its own
-    single-owner guard for; with one identity route the same refusal lives in exactly one place.
-    """
+    """Byte-identical uploads in two projects: provenance holds two LUIDs for one sha256."""
     bundle, oracle = _bundle(tmp_path)
     payload = json.loads((bundle / "source-provenance.json").read_text(encoding="utf-8"))
     same_sha = payload["inputs"][0]["input"]["sha256"]
@@ -1214,12 +1191,7 @@ def test_one_asset_mapped_onto_two_workbook_luids_attributes_nothing(tmp_path: P
 
 
 def test_a_provenance_luid_contradicting_the_asset_filename_fails_closed(tmp_path: Path) -> None:
-    """Two identities that disagree resolve to NEITHER, rather than to whichever is read first.
-
-    This once caught a real fail-open path: refusing the LUID was not enough while an exact-name
-    fallback still attributed the same renders. That fallback is now deleted outright (#450), so a
-    contradiction has nowhere to fall through to - which is the simplification, not another guard.
-    """
+    """Two identities that disagree resolve to NEITHER, rather than to whichever is read first. See #450."""
     bundle, oracle = _bundle(tmp_path, provenance_luid=OTHER_LUID, asset_prefix=WB_LUID)
     result = _package(tmp_path, bundle, oracle)
     assert result["workbook_identity"]["luid"] is None
@@ -1283,53 +1255,18 @@ def test_a_leg_claiming_ok_whose_file_is_absent_cannot_become_evidence(tmp_path:
 
 # --------------------------------------------------------------------------------------------
 # 4a. the scoped report as a DATA-EGRESS boundary (round-1 finding 1)
-#
-# `scope_report` used to copy every key it did not explicitly filter. Measured by the reviewer on
-# `HR_Dashboard` in the 48-workbook reference bundle: `workbooks[]` held 1 entry while **11 of the 13
-# top-level fields were byte-identical to the whole-estate report** - 67 `input_manifest.assets`, 62
-# `openable_outputs`, and (unnamed in the report, found while fixing it) 48 `definition_of_done`
-# rows. A customer package named other customers' workbooks.
-#
-# ⚠️ Two controls that look adequate and are NOT, both measured while writing these tests:
-#
-# * **`workbooks[] == 1`** passes on the DEFECTIVE code. Every test above section 4a does, which is
-#   why the leak survived a full green suite.
-# * **a whole-file hash diff between two packages** also passes on the defective code - the files
-#   genuinely differ, because `workbooks[]` is filtered. Scoping is only provable FIELD BY FIELD.
-#
-# So the control is a sentinel planted in every aggregate field, asserted absent, plus a per-field
-# identity comparison. The sentinel is a full token rather than a bare word on purpose: probing the
-# real fix for the literal `Groups` reported a leak that was actually `'Age Groups'`, a worksheet
-# INSIDE the unit. A substring sentinel manufactures findings.
-# --------------------------------------------------------------------------------------------
 
 #: A token no real Tableau object can collide with, and that no substring of this unit's own content
 #: can produce. `scope_report` must not emit it anywhere.
 FOREIGN = "Zz_Foreign_Unit_Sentinel"
 
 #: An absolute host path, ASSEMBLED AT RUNTIME so no tracked file contains the literal.
-#:
-#: The privacy gate (`scripts/set_data_folder.py --check`, a CI step) scans raw file TEXT and cannot
-#: distinguish a fixture that must contain an absolute path in order to prove one is stripped from a
-#: real leaked path - and it should not have to. Round-2 CI went red on exactly this: three fixture
-#: lines here carried `<drive>:\Users\<account>\...` and were flagged, correctly, as indistinguishable
-#: from a leak. Building the string from parts keeps the gate's teeth for real leaks while letting
-#: this fixture stay realistic.
 _SEP = chr(92)
 HOST_PATH_ROOT = f"C:{_SEP}Users{_SEP}a-real-account"
 
 
 def absolute_host_paths(payload: object, path: str = "") -> list[str]:
-    """JSON paths whose STRING VALUE is an absolute host path, found by WALKING the parsed document.
-
-    ⚠️ Deliberately not a substring search over serialized text, which is how the earlier version of
-    this assertion was vacuous: `json.dumps` escapes each separator, so the serialized form carries a
-    DOUBLED separator and a needle written with a single one can never appear - the assertion passed
-    whether or not the path survived. Three separate errors this round came from matching text where
-    the artifact is structured (a substring sentinel reporting `'Age Groups'` as the foreign workbook
-    `Groups`; a host-path probe returning False against escaped JSON; and this).
-    Walk the parse; do not grep the render.
-    """
+    """JSON paths whose STRING VALUE is an absolute host path, found by WALKING the parsed document."""
     found: list[str] = []
     if isinstance(payload, dict):
         for key, value in payload.items():
@@ -1344,27 +1281,11 @@ def absolute_host_paths(payload: object, path: str = "") -> list[str]:
 
 #: A SECOND sentinel, planted only in rows this unit RETAINS. Round-2 review found the round-1
 #: fixture structurally unable to see blocker 1: it planted sentinels exclusively in FOREIGN rows,
-#: which are guaranteed to be filtered out whole, so it never exercised a retained row's unknown
-#: extensions - and `workbooks[0].future_nested` shipped unnoticed. A guard that cannot fail is
-#: worse than no guard, because it is credited as coverage.
 RETAINED_EXTENSION = "Zz_Retained_Row_Extension_Sentinel"
 
 
 def _estate_report(unit: str) -> dict:
-    """A `report.json` in the REAL engine's 13-field shape, sentinel-planted in EVERY aggregate field.
-
-    Shapes are copied from the reference bundle, not invented: `input_manifest.assets[]` entries
-    carry `name`/`staged_input_path`/`sha256`, `openable_outputs[]` carry absolute `pbip`/
-    `model_folder` paths, `definition_of_done.workbooks[]` carry `workbook`/`pbip_folder`/`reason`,
-    and `fallbacks[]` carry `datasource`/`source_id`. A fixture that planted the sentinel only in a
-    field the engine does not really write would prove nothing about a real package.
-
-    ⚠️ It plants TWO sentinels, in two structurally different places. `FOREIGN` goes in rows and
-    containers belonging to other units, which filtering removes wholesale. `RETAINED_EXTENSION`
-    goes inside the rows this unit KEEPS - `workbooks[0].future_nested` and
-    `definition_of_done.workbooks[0].future_nested` - which only a NESTED allowlist can remove, and
-    which the round-1 fixture had no case for at all.
-    """
+    """A `report.json` in the REAL engine's 13-field shape, sentinel-planted in EVERY aggregate field."""
     return {
         "tool": "migrate_estate",
         "generated_at": "2026-09-02T07:04:07Z",
@@ -1438,17 +1359,7 @@ def test_a_container_at_a_scalar_leaf_fails_loudly_rather_than_shipping() -> Non
 
 
 def test_the_scoped_report_still_declares_both_collections_as_lists(tmp_path: Path) -> None:
-    """Over-trimming is the opposite defect: both gates reject the file unless `workbooks` is a list.
-
-    `check_reference_readiness._engine_report` returns None without it - which silently costs a
-    datasource-only unit its earned `NOT_APPLICABLE` - and `check_unit._is_engine_report` stops
-    recognising the package as engine output at all.
-
-    ⚠️ The load-bearing case is a report that OMITS a collection, not one that merely filters to
-    empty. An allowlist only emits keys the source actually had, so a report with no `datasources`
-    key would ship without one - and the round-2 mutation campaign showed the earlier version of
-    this test could not see that, because its fixture always supplied both.
-    """
+    """Over-trimming is the opposite defect: both gates reject the file unless `workbooks` is a list."""
     _full, scoped, _text = _package_estate_report(tmp_path)
     assert isinstance(scoped["workbooks"], list)
     assert isinstance(scoped["datasources"], list)
@@ -1464,32 +1375,10 @@ def test_the_scoped_report_still_declares_both_collections_as_lists(tmp_path: Pa
 
 # --------------------------------------------------------------------------------------------
 # 4b. the generated README as the package MAP (round-1 findings 2 and 3)
-#
-# Both findings were prose drifting from code, in opposite directions, and both are fail-CLOSED: an
-# agent believes the README, cannot find what it names, and concludes the package is broken.
-#
-# * finding 2 - the README and the module layout comment said `dashboards/` and `worksheets/`; the
-#   code emits `object_identity`'s KIND_* values, which are SINGULAR. The code is right (`Path(kind)`,
-#   and the committed tests above assert `worksheet/data/Sales.csv`), so the prose was fixed.
-# * finding 3 - the table presented itself as the package map while omitting `report.json`,
-#   `source-provenance.json` and `engine-output-receipt.json`, all three of which ship in every
-#   package and are load-bearing rather than incidental.
-#
-# So the guard is derived from the package the code ACTUALLY writes, never from a second hand-kept
-# list - a list would drift exactly as the prose did.
-# --------------------------------------------------------------------------------------------
 
 
 # --------------------------------------------------------------------------------------------
 # 4b-2. self-containment: the model's own rows (issue #461)
-#
-# `_copy_fabric` copies the engine's working copy verbatim, and the engine writes an ABSOLUTE,
-# machine-local path into every import partition, pointing back into the originating
-# `<bundle>/data/`. Measured across the 67 packaged units of estate run 408: 23 such references in
-# 17 units, 11.2 MB of extracts the package did not carry. No existing gate saw it - `check_unit.py`
-# passed page parity and oracle coverage on `HR_Dashboard`, and `powerbi-report-author validate` was
-# clean - so these tests are the only thing standing between that defect and its return.
-# --------------------------------------------------------------------------------------------
 
 
 def _model_definition(root: Path) -> Path:
@@ -2164,19 +2053,7 @@ def test_assembly_only_folder_decision_bypass_is_caught_before_source_enumeratio
 
 
 def test_a_POSIX_literal_with_no_file_suffix_is_left_alone(tmp_path: Path) -> None:
-    """At face value a POSIX-absolute literal is mostly a FALSE POSITIVE, and acting on one is a bug.
-
-    Measured on estate run 408: 9 POSIX-absolute literals, 8 of them false - a Databricks
-    ``HttpPath = "/sql/1.0/warehouses/<id>"`` in three units, and a bare ``"/"`` inside a
-    ``TableauFormula`` annotation in two more. Requiring a file suffix keeps the one genuine hit (a
-    macOS ``.xlsx``) and drops all eight, so both halves are asserted here from one fixture.
-
-    ⚠️ ``_is_path_literal`` being False is "do not ACT on it", not "definitely not a path": it
-    collapses ``NOT_A_PATH`` and ``UNCLASSIFIED``. The endpoint is cleared by its ROLE, in the
-    fixture's measured shape - a ``HttpPath`` field, never a ``File.Contents`` argument, which no
-    Databricks model writes. The same string in a filesystem position is still reported, and
-    ``test_an_unassessable_POSIX_literal_is_RECORDED_not_silently_cleared`` pins that.
-    """
+    """At face value a POSIX-absolute literal is mostly a FALSE POSITIVE, and acting on one is a bug."""
     for value in ("/sql/1.0/warehouses/764e5801f0e0fac8", "/", "/mnt/lake/warehouse"):
         assert not pkg._is_path_literal(value), f"{value} would be treated as a file path"  # noqa: SLF001
     for value in ("/Users/<person>/Data/Global Superstore.xlsx", r"C:\data\x.csv", r"\\host\share\x.csv"):
@@ -2322,11 +2199,7 @@ def test_binding_cannot_use_incomplete_roles_or_ambiguous_owned_text(tmp_path: P
 
 
 def test_an_oversized_source_is_refused_by_the_ceiling_rather_than_copied(tmp_path: Path) -> None:
-    """The ceiling exists so an unbounded case is loud, and it must not fire on a normal one.
-
-    Both directions are asserted from ONE fixture by moving the ceiling, not the data: a test that
-    only proves the refusal cannot tell a working ceiling from one set to zero.
-    """
+    """The ceiling exists so an unbounded case is loud, and it must not fire on a normal one."""
     bundle, oracle = _bundle(tmp_path)
     payload = tmp_path / "big.csv"
     payload.write_text("a,b\n1,2\n" * 500, encoding="utf-8")
@@ -2348,12 +2221,7 @@ def test_an_oversized_source_is_refused_by_the_ceiling_rather_than_copied(tmp_pa
 
 
 def test_two_sources_sharing_a_file_name_do_not_overwrite_each_other(tmp_path: Path) -> None:
-    """The engine's extract paths are `.../<table>/federated_<hash>/Extract_Extract.csv`.
-
-    Parent folder plus file name is readable but not unique, and two sources landing on one packaged
-    file would silently repoint one partition at the other's ROWS - a wrong-numbers defect no
-    structural check can see.
-    """
+    """The engine's extract paths are `.../<table>/federated_<hash>/Extract_Extract.csv`."""
     bundle, oracle = _bundle(tmp_path)
     first = tmp_path / "one" / "federated" / "Extract_Extract.csv"
     second = tmp_path / "two" / "federated" / "Extract_Extract.csv"
@@ -2371,12 +2239,7 @@ def test_two_sources_sharing_a_file_name_do_not_overwrite_each_other(tmp_path: P
 
 
 def _point_partition_at(bundle: Path, *sources: str, folder: str = "", leaf: str = "", http_path: str = "") -> None:
-    """Give the fixture model import partitions shaped as the engine actually emits them.
-
-    Three shapes, because the packager must tell three apart: a bare `File.Contents("<absolute>")`,
-    the folder PARAMETER that every datasource-only unit in the estate uses, and a Databricks
-    `HttpPath` - a POSIX-absolute literal that is NOT a path at all and must stay silent.
-    """
+    """Give the fixture model import partitions shaped as the engine actually emits them."""
     definition = bundle / "pbip" / UNIT / f"{UNIT}.SemanticModel" / "definition"
     (definition / "tables").mkdir(parents=True, exist_ok=True)
     (definition / "model.tmdl").write_text("model Model\n\tculture: en-US\n\n", encoding="utf-8")
@@ -2426,12 +2289,6 @@ def _point_partition_at(bundle: Path, *sources: str, folder: str = "", leaf: str
 
 # --------------------------------------------------------------------------------------------
 # 4c. the OTHER shipped manifests (round-2 blocker 2)
-#
-# Round 1 fixed one denylist. `package_oracle()` and `scope_receipt()` were still denylists in
-# their own right - measured on the packaged `HR_Dashboard`, the oracle manifest carried **22 fields
-# byte-identical** to the 360-view estate manifest (`view_types` still totalling 360 beside a
-# rewritten `view_count: 23`), and the receipt shipped two absolute `C:\\Users\\<user>\\...` paths.
-# --------------------------------------------------------------------------------------------
 
 ESTATE_ORACLE_EXTRA = {
     "view_count": 360,
@@ -2461,11 +2318,7 @@ ESTATE_ORACLE_EXTRA = {
 
 
 def test_no_shipped_manifest_carries_an_absolute_host_path(tmp_path: Path) -> None:
-    """One assertion over the WHOLE package - the round-1 claim was scoped to report.json alone.
-
-    Each manifest is PARSED and walked rather than grepped: the serialized form doubles every
-    separator, so a text search for the single-separator form silently never matches.
-    """
+    """One assertion over the WHOLE package - the round-1 claim was scoped to report.json alone."""
     bundle, oracle = _bundle(tmp_path)
     manifest = json.loads((oracle / "oracle-manifest.json").read_text(encoding="utf-8"))
     manifest.update(ESTATE_ORACLE_EXTRA)
@@ -2487,14 +2340,6 @@ def test_no_shipped_manifest_carries_an_absolute_host_path(tmp_path: Path) -> No
 
 # --------------------------------------------------------------------------------------------
 # 4e. the oracle manifest is UNTRUSTED INPUT (round-3 finding 3)
-#
-# `oracle-manifest.json` is written by a separate tool against a live Tableau server, and
-# `_copy_leg` used to join its declared path straight onto the capture root. Round-3 review copied
-# an arbitrary file into the customer package with `"../outside-secret.png"`, and an absolute path
-# both copied the file AND wrote the host path into the packaged manifest.
-#
-# This is deliberately NOT an allowlist problem and is not fixed with one: it is containment.
-# --------------------------------------------------------------------------------------------
 
 
 def _secret_outside(oracle: Path, name: str) -> Path:
@@ -2505,14 +2350,7 @@ def _secret_outside(oracle: Path, name: str) -> Path:
 
 @pytest.mark.parametrize("declared", ["../outside-secret.png"])
 def test_a_relative_path_escaping_the_capture_root_is_refused(tmp_path: Path, declared: str) -> None:
-    """`../` traversal copied an arbitrary file byte-identically into the customer package.
-
-    ⚠️ The end-to-end half is now defended TWICE: round-6 source containment refuses a `..` component
-    before `_resolve_capture_file` ever sees it, so the end-to-end assertions alone can no longer
-    tell whether the containment check still exists. The resolver is therefore driven DIRECTLY as
-    well - it is the sole mitigation for the shape source containment cannot see, a symlink INSIDE
-    the capture pointing out of it, and a check nothing can falsify is a check that will be deleted.
-    """
+    """`../` traversal copied an arbitrary file byte-identically into the customer package."""
     bundle, oracle = _bundle(tmp_path)
     _secret_outside(oracle, "outside-secret.png")
     resolved, reason = pkg._resolve_capture_file(oracle, declared)  # pylint: disable=protected-access
@@ -2529,19 +2367,7 @@ def test_a_relative_path_escaping_the_capture_root_is_refused(tmp_path: Path, de
 
 
 def test_a_LEGACY_data_leg_cannot_ship_a_host_path_under_retained_path(tmp_path: Path) -> None:
-    """#480 round 4, finding 1. The containment guard was keyed to a FIELD NAME, not to the manifest.
-
-    `withhold_uncertified_evidence` demotes an uncertified data leg's `path` to `retained_path`
-    before the packager looks at it -- correctly, because those bytes are not evidence -- and
-    `_copy_leg` then keyed on `path`, found none, and returned the leg verbatim. The review's
-    controlled differential drove ONE absolute path through both shapes:
-
-        certified_data.path=<refused-by-packager>
-        legacy_data.retained_path=<drive>:\\Users\\<account>\\private\\oracle.csv
-
-    A customer package carrying an absolute host path is #461's class -- it names their server,
-    project and operator, and this repo is public.
-    """
+    """#480 round 4, finding 1. The containment guard was keyed to a FIELD NAME, not to the manifest. See #461."""
     bundle, oracle = _bundle(tmp_path)
     manifest = json.loads((oracle / "oracle-manifest.json").read_text(encoding="utf-8"))
     # The REAL legacy shape: a row count and no certification, so it is withheld and renamed.
@@ -2577,25 +2403,7 @@ def _shipped_with(tmp_path: Path, *, view: dict) -> tuple[dict, Path]:
 
 
 def test_the_ORACLE_RESULT_itself_is_contained_not_only_the_scoped_manifest(tmp_path: Path) -> None:
-    """#480 round 6. The document sweep guards ONE artifact; `oracle.objects` is built beside it.
-
-    Rounds 3, 4 and 5 each contained a value at the consumer that had just leaked, and each was
-    followed by a consumer that had not been enumerated. Round 5 swept the scoped
-    `oracle-manifest.json`, and `package_oracle` went on constructing `objects`/`omissions` from the
-    RAW view - which `package-manifest.json` embeds verbatim and `render_handover` interpolates.
-    Review's controlled input and its measured result on the tip::
-
-        view_luid = <drive>:\\Users\\<account>\\private\\view-id.log
-        view_type = \\\\server\\share\\declared-type.log
-
-        oracle-manifest view_luid:                  <refused-by-packager>   # swept
-        package-manifest oracle.objects[0].view_luid: <drive>:\\Users\\...   # NOT swept
-        handover.md:  UNTYPED_RENDER ... luid=<drive>:\\Users\\...           # NOT swept
-
-    So this asserts the SOURCE, not a fifth sweep: the view is contained once, before any field is
-    read, and all four shipped surfaces are checked together because that is the class - a future
-    consumer must inherit containment rather than need its own guard.
-    """
+    """#480 round 6. The document sweep guards ONE artifact; `oracle.objects` is built beside it."""
     luid_leak = f"{HOST_PATH_ROOT}{_SEP}private{_SEP}view-id.log"
     type_leak = f"{_SEP}{_SEP}server{_SEP}share{_SEP}declared-type.log"
     shipped, root = _shipped_with(tmp_path, view={"view_luid": luid_leak, "view_type": type_leak})
@@ -2626,13 +2434,7 @@ def test_the_ORACLE_RESULT_itself_is_contained_not_only_the_scoped_manifest(tmp_
 
 
 def test_the_handover_KEY_walk_reports_the_REDACTED_key_and_stays_idempotent() -> None:
-    """Driven directly, because two properties of key redaction have no artifact that shows them.
-
-    Copied from `package_unit._contain_unsafe_key`, which solved this for the oracle manifest one
-    round earlier, and from `tableau_env.scrub_tree` before that: the reported path must be built
-    from the REDACTED key or the record of the catch re-emits what was caught, and a second pass over
-    an already-redacted document must not read the sentinel as a fresh, safe key.
-    """
+    """Driven directly, because two properties of key redaction have no artifact that shows them."""
     leak_a = f"{HOST_PATH_ROOT}{_SEP}a"
     leak_b = f"{HOST_PATH_ROOT}{_SEP}b"
     payload = {leak_a: "kept-a", leak_b: "kept-b", "rows": [{leak_a: "kept-nested"}], "count": 7}
@@ -2653,27 +2455,7 @@ def test_the_handover_KEY_walk_reports_the_REDACTED_key_and_stays_idempotent() -
 
 
 def test_ORDINARY_PROSE_that_merely_MENTIONS_a_path_is_NOT_refused(tmp_path: Path) -> None:
-    """Positive control for the broader predicate - and the main risk the fix introduces.
-
-    A CONTAINS test is far likelier to false-positive than an IS test, and over-refusal destroys the
-    operator's evidence exactly as under-refusal leaks it. Every shape here mentions something
-    path-like while disclosing no host location: a REST route, a relative directory, a `..` inside a
-    sentence, `Users` as an English word, an ordinary view name, and the repo's own documented
-    `<placeholder>` spelling - which `set_data_folder.py --check` exempts on purpose, so the packager
-    must exempt it identically or the two definitions have re-diverged.
-
-    ⚠️ **Round 9 REVERSES one entry of this control, deliberately, and it is the whole point of the
-    round.** Round 8 asserted here that `the build wrote to <drive>:\\builds and then stopped` must
-    ship, on the reading that a non-profile location in prose is ordinary text. It is not: this PR's
-    own parse anchor states that a build drive names the OPERATOR'S MACHINE and must be refused, and
-    a location cannot become acceptable merely because a status prefix precedes it. That entry has
-    moved to :func:`test_a_NON_PROFILE_absolute_WRAPPED_IN_PROSE_is_refused_in_EVERY_SPELLING`, which
-    asserts the opposite verdict on the same string.
-
-    The four entries after the blank line are round 9's own negative controls, one per way the wider
-    grammar could over-fire: a URL whose PATH looks POSIX-absolute, a dotted version string, a drive
-    letter in prose with no path after it, and a colon-bearing timestamp.
-    """
+    """Positive control for the broader predicate - and the main risk the fix introduces."""
     prose = [
         "HTTP 503 from GET /api/2.4/sites/abc/views/def after 2 retries",
         "renderer wrote nothing (see ../logs on the server)",
@@ -2695,24 +2477,7 @@ def test_ORDINARY_PROSE_that_merely_MENTIONS_a_path_is_NOT_refused(tmp_path: Pat
 
 
 def test_a_NON_PROFILE_absolute_WRAPPED_IN_PROSE_is_refused_in_EVERY_SPELLING(tmp_path: Path) -> None:
-    """#480 round-9 leak 1. The containment predicate matched a SPELLING, not the property.
-
-    Rounds 3-8 each widened the guard by one shape, and each time a different spelling escaped -
-    because a *profile root* is a way of writing a location, not the property that matters to a
-    customer deliverable. Measured on the round-8 tip, one wrapper (`HTTP 503: `, which is how
-    `classify_export_error` writes `retry_reasons[]`) over locations that are all absolute::
-
-        <drive>:\\builds\\out\\secret.log                        -> DISCLOSES=False  SHIPPED=True
-        \\\\customer-server\\finance-share\\secret.log              -> DISCLOSES=False  SHIPPED=True
-        /var/lib/tableau/secret.log                           -> DISCLOSES=False  SHIPPED=True
-        \\\\server\\C$\\Users\\<a real account>\\private\\secret.log  -> DISCLOSES=False  SHIPPED=True
-        C%3A%5CUsers%5C<a real account>%5Cprivate%5Csecret.log-> DISCLOSES=False  SHIPPED=True
-
-    The last two are the decisive ones and are why the account name is asserted against the shipped
-    BYTES: they are a REAL profile path with a REAL account name, re-spelled as an administrative
-    share and as percent-encoding. A spelling test lets the same secret through in another alphabet,
-    so the predicate now normalises the alphabet away and asks ONE question about every rooted form.
-    """
+    """#480 round-9 leak 1. The containment predicate matched a SPELLING, not the property."""
     account = "blind-review-account"
     profile = f"C:{_SEP}Users{_SEP}{account}"
     wrapped = [
@@ -2739,19 +2504,7 @@ def test_a_NON_PROFILE_absolute_WRAPPED_IN_PROSE_is_refused_in_EVERY_SPELLING(tm
 
 
 def test_the_containment_walk_contains_KEYS_and_reports_the_CONTAINED_key(tmp_path: Path) -> None:
-    """Driven directly, because three properties of key containment have no artifact that shows them.
-
-    Copied from `tableau_env.scrub_tree` (:461-478), which already solved this for the credential
-    sink and documents why each matters:
-
-    1. a **collision is disambiguated, never silently dropped** - two distinct unsafe keys both
-       contain to the sentinel, and `dict` would keep the last, turning containment into data loss;
-    2. the **reported path uses the CONTAINED key**, or the guard re-emits what it just caught into
-       `scope.refused_fields`;
-    3. the walk stays **IDEMPOTENT**, including the `#2` collision spelling - a second pass must not
-       read it as a fresh, safe key and stop reporting it, which is what lets containment move to the
-       source without a later reader losing what it could previously see.
-    """
+    """Driven directly, because three properties of key containment have no artifact that shows them."""
     leak_a = f"{HOST_PATH_ROOT}{_SEP}a"
     leak_b = f"{HOST_PATH_ROOT}{_SEP}b"
     payload = {leak_a: "kept-a", leak_b: "kept-b", "views": [{leak_a: "kept-nested"}], "count": 7}
@@ -2775,17 +2528,7 @@ def test_the_containment_walk_contains_KEYS_and_reports_the_CONTAINED_key(tmp_pa
 
 
 def test_a_packaged_view_whose_row_count_was_never_recorded_says_so(tmp_path: Path) -> None:
-    """#480 finding 1, at the package boundary -- the third consumer the reviewer named.
-
-    Their observation was `data_ok=1 status=ok row_count absent flags absent`: a packaged unit
-    shipping a view nothing had measured, with nothing anywhere saying so. The estate-wide counts are
-    deliberately dropped here (this packager cannot recompute them for one unit), so the per-view
-    flag is the ONLY channel the fact has -- and `certification` is now allowlisted beside it so a
-    reader knows WHY, not merely that something is off.
-
-    ⚠️ `data_ok` staying 1 is not the defect and must not be "fixed": the export genuinely succeeded.
-    What was missing is everything else on the row.
-    """
+    """#480 finding 1, at the package boundary -- the third consumer the reviewer named."""
     bundle, oracle = _bundle(tmp_path)
     manifest = json.loads((oracle / "oracle-manifest.json").read_text(encoding="utf-8"))
     view = manifest["views"][0]
@@ -3178,25 +2921,14 @@ def test_published_authority_absence_never_uses_an_ancestor_or_name_fallback(
 
 # An existing `<out>/<unit>` was merged into, never rebuilt, so an artifact the new input no longer
 # produces was never removed. Re-running with an EMPTY oracle left the previous capture in place and
-# the entry gate still returned READY - an agent builds against evidence that no longer exists, with
-# a gate agreeing.
-# --------------------------------------------------------------------------------------------
 
 
 # The package is the canonical place to edit (#460), and `replace_dir` above replaces it WHOLE - so
 # re-running the same command silently deleted an agent's work. The guard and the removal contract
-# above pull in opposite directions on the same tree, and both are load-bearing; the seam between
-# them is the digest packaging records of its own output.
-# --------------------------------------------------------------------------------------------
 
 
 def test_a_package_with_no_recorded_digest_is_REFUSED_rather_than_assumed_clean(tmp_path: Path) -> None:
-    """ "I cannot tell whether this was edited" is not "it was not edited" - it is its own answer.
-
-    A package written before the digest existed, or one whose manifest was removed, carries no
-    record to compare against. Treating that as unedited is the collapse this repo keeps re-fixing,
-    so it refuses with a REASON and an empty change list rather than overwriting.
-    """
+    """ "I cannot tell whether this was edited" is not "it was not edited" - it is its own answer."""
     bundle, oracle = _bundle(tmp_path)
     _package(tmp_path, bundle, oracle)
     root = _out(tmp_path) / UNIT
@@ -3216,11 +2948,7 @@ def test_a_package_with_no_recorded_digest_is_REFUSED_rather_than_assumed_clean(
 
 
 def test_emptied_visuals_lead_the_handover_and_name_their_page(tmp_path: Path) -> None:
-    """They render blank on a report that validates clean, and nothing else in the toolkit shows them.
-
-    The engine's `pbip_ref_drops[]` rows carry only a visual id, so the page is resolved from the
-    PBIR tree - a bare `v-page-Dashboard06ca9874` is not something an operator can act on.
-    """
+    """They render blank on a report that validates clean, and nothing else in the toolkit shows them."""
     bundle, oracle = _bundle(tmp_path)
     page_id = _page_ids(bundle.parent / "assets" / f"{WB_LUID}_{UNIT}.twb")[0]
     visual = bundle / "pbip" / UNIT / f"{UNIT}.Report" / "definition" / "pages" / page_id / "visuals" / "v-abc"
@@ -3342,13 +3070,6 @@ def test_selecting_one_engine_alias_still_blocks_before_it_can_overwrite_its_sib
 
 # --------------------------------------------------------------------------------------------
 # 7. the path budget (#476) - a package Power BI Desktop cannot open, refused before it is written
-# --------------------------------------------------------------------------------------------
-#
-# The field failure: `[WinError 206] The filename or extension is too long`, thrown mid-assembly on
-# unit 30 of 47 of a live estate, naming no path, no limit and no remedy. Every test below is
-# ARITHMETIC on the destination side - the projected paths are strings that are never created - so
-# the boundary is exercised identically on the Linux and Windows CI runners, neither of which can be
-# assumed to write a 270-character path at all. The BUNDLE these read is deliberately short.
 
 #: The two generated id segments from the crash report, kept verbatim so the fixture is the shape
 #: that actually failed rather than a contrived deep tree.
@@ -3362,11 +3083,7 @@ BUDGET_UNIT = "Unit_Sales"
 
 
 def _pbir_bundle(tmp_path: Path, *units: str) -> Path:
-    """A bundle whose units each have the deepest-path shape that crashed in the field.
-
-    `pbip/<Unit>/<Unit>.Report/definition/pages/<page-id>/visuals/<visual-id>/visual.json` - the unit
-    name twice, then the two generated id segments.
-    """
+    """A bundle whose units each have the deepest-path shape that crashed in the field."""
     bundle = tmp_path / "bundle"
     names = list(units) or [BUDGET_UNIT]
     write_engine_report(bundle, workbooks=names)
@@ -3388,11 +3105,7 @@ def _pbir_bundle(tmp_path: Path, *units: str) -> Path:
 
 
 def _padded_path(base: Path, length: int) -> Path:
-    """A path under `base` measuring exactly `length` ASCII characters.
-
-    Segments are capped at 60 characters because a single name may not exceed 255 on either CI
-    runner, and because a real `--out` is several directories deep rather than one absurd one.
-    """
+    """A path under `base` measuring exactly `length` ASCII characters."""
     if len(str(base)) > length:
         pytest.skip(f"{base} is already {len(str(base))} characters; cannot build a {length}-character path")
     out = base
@@ -3404,25 +3117,14 @@ def _padded_path(base: Path, length: int) -> Path:
 
 
 def _pin_windows(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Make the CLI judge absolute paths against WINDOWS ceilings, whichever runner is executing.
-
-    `package_unit` asks :func:`package_unit.platform_limits` what the HOST may write (blind-review
-    B3), so a test that means "this is what a Windows operator sees" has to say so - otherwise it
-    asserts a refusal that the ubuntu runner correctly declines to make, and the two CI legs
-    disagree about arithmetic neither of them is wrong about.
-    """
+    """Make the CLI judge absolute paths against WINDOWS ceilings, whichever runner is executing."""
     monkeypatch.setattr(pkg, "platform_limits", lambda system=None: pkg.WINDOWS_LIMITS)
 
 
 def test_the_retired_package_is_never_named_after_the_package_it_retires(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`replace_dir` moves the old package aside and `shutil.rmtree` then WALKS it.
-
-    `.{name}.replaced` made every path in a package being REPLACED 10 characters longer than the one
-    anything had measured, so a package that fitted could still fail its second run - in a tree
-    nothing looks at.
-    """
+    """`replace_dir` moves the old package aside and `shutil.rmtree` then WALKS it."""
     staged, final = tmp_path / "s", tmp_path / "Sales_Performance_Dashboard"
     staged.mkdir()
     final.mkdir()
@@ -3440,14 +3142,7 @@ def test_the_retired_package_is_never_named_after_the_package_it_retires(
 
 
 def test_a_unit_whose_paths_exceed_the_ceiling_is_refused_BEFORE_anything_is_written(tmp_path: Path) -> None:
-    """The customer's shape: 47 units, a canonical `_runs/<NNN>-<slug>/packages/<batch>/` `--out`.
-
-    The old failure wrote 29 packages first and then threw `[WinError 206]` from inside `shutil`.
-
-    ``limits`` is pinned to Windows' rather than inherited from the runner, because that is the
-    platform whose arithmetic this test states - see :func:`package_unit.platform_limits` and the
-    POSIX case below.
-    """
+    """The customer's shape: 47 units, a canonical `_runs/<NNN>-<slug>/packages/<batch>/` `--out`."""
     bundle = _pbir_bundle(tmp_path)
     out = _padded_path(tmp_path, 200)
     with pytest.raises(pkg.PackagePathTooLong) as excinfo:
@@ -3516,32 +3211,13 @@ def test_a_budget_measurement_exception_is_unassessable_for_one_unit_only(
 
 # --------------------------------------------------------------------------------------------
 # 7b. the blind-review blockers against the budget in section 7
-#
-# Three findings, each reproduced through the real CLI on the branch before it was fixed:
-#
-#   B2  a unit may be named exactly like another unit's staging directory, because a leading dot is
-#       a legal Tableau name. `Victim` and `.d72cee2e` were BOTH reported packaged at exit 0 and only
-#       `Victim` existed on disk - `rmtree(staging)` had deleted a finished package. Reporting
-#       success while destroying one is the worst outcome this file can produce, so it is first.
-#   B1  the projection measured a SUBSET and said exit 0 about the rest: `assets/`, `data/`,
-#       `oracle/`, a generated `expressions.tmdl` and the retired tree were all unmeasured. A valid
-#       204-character workbook filename projected a maximum of 102 and shipped a 279-character path.
-#   B3  Windows ceilings were applied to absolute POSIX paths, refusing a 297-character `--out`
-#       whose package was valid at 332. Packages relocate, so that is a false refusal.
-# --------------------------------------------------------------------------------------------
 
 
 # --- B2: a staging name may never be able to name a package ---------------------------------
 
 
 def test_a_unit_named_like_another_units_staging_directory_cannot_delete_it(tmp_path: Path) -> None:
-    """The reproduction, unchanged: two units, one of them named `.<digest of the other>`.
-
-    Before: `main` exited 0 having reported BOTH packaged, and the alias package was gone - deleted
-    by `rmtree(staging)` on its way to assembling `Victim`. The run reported success about an
-    artifact it had just destroyed, which no downstream gate can detect because the manifest that
-    would have said otherwise went with it.
-    """
+    """The reproduction, unchanged: two units, one of them named `.<digest of the other>`."""
     victim = "Victim"
     alias = pkg.staging_dir(tmp_path, victim).name
     bundle = _pbir_bundle(tmp_path, victim, alias)
@@ -3561,12 +3237,7 @@ def test_a_unit_named_like_another_units_staging_directory_cannot_delete_it(tmp_
 
 
 def test_the_cleanup_refuses_to_delete_a_directory_this_packager_did_not_name(tmp_path: Path) -> None:
-    """The tripwire behind the name refusal: `rmtree` may only target a scratch name.
-
-    Prevention is the fix - a unit cannot be named like a staging directory - and this is asserted
-    anyway because the consequence is invisible here and lands on someone else, as a package that
-    was reported shipped and is not there.
-    """
+    """The tripwire behind the name refusal: `rmtree` may only target a scratch name."""
     package = tmp_path / "Victim"
     (package / "fabric").mkdir(parents=True)
     (package / "fabric" / "model.tmdl").write_text("rows", encoding="utf-8")
@@ -3588,13 +3259,7 @@ def test_the_cleanup_refuses_to_delete_a_directory_this_packager_did_not_name(tm
 def test_an_output_the_projection_never_predicted_is_still_refused_before_the_swap(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The property that replaces the old "not exhaustive, and deliberately so" comment.
-
-    A projection is a MODEL of the output and blind review measured four real outputs missing from
-    it. This walks the tree assembly ACTUALLY produced, before the swap, so an output a future edit
-    adds appears in the budget without anyone remembering to declare it. Simulated by making an
-    existing writer emit one more file - which is exactly what "somebody adds an output" looks like.
-    """
+    """The property that replaces the old "not exhaustive, and deliberately so" comment."""
     bundle, _oracle = _bundle(tmp_path)
     out = _out(tmp_path)
     assert pkg.main(["--bundle", str(bundle), "--out", str(out), "--quiet"]) == 0
@@ -3621,12 +3286,7 @@ def test_an_output_the_projection_never_predicted_is_still_refused_before_the_sw
 def test_a_length_refusal_from_the_FILESYSTEM_is_restated_with_a_path_and_a_remedy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The backstop for the machine that cannot even WRITE the tree there is to measure.
-
-    On stock Windows the write throws before there is anything to walk, and `[WinError 206] The
-    filename or extension is too long` named no path, no limit and no remedy - it escaped as an
-    uncaught traceback whose exit 1 is indistinguishable from `EXIT_NO_WORKING_COPY`.
-    """
+    """The backstop for the machine that cannot even WRITE the tree there is to measure."""
     bundle, _oracle = _bundle(tmp_path)
     out = _out(tmp_path)
     out.mkdir(parents=True, exist_ok=True)
@@ -3659,12 +3319,7 @@ def test_a_length_refusal_from_the_FILESYSTEM_is_restated_with_a_path_and_a_reme
 def test_a_tail_no_WINDOWS_root_can_fit_is_refused_even_on_a_generous_host(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The half of Desktop's ceiling that is NOT a false positive - and the negative control for B3.
-
-    Without this, "stop applying Windows ceilings on POSIX" would mean a Linux run happily building
-    a package no Windows machine can ever open. The ceilings are lowered here rather than a
-    260-character tree created, exactly as `check_path_ceiling.py`'s own `--ceiling` does.
-    """
+    """The half of Desktop's ceiling that is NOT a false positive - and the negative control for B3."""
     monkeypatch.setattr(pkg, "WINDOWS_LIMITS", pkg.Limits(file_ceiling=40, dir_ceiling=28))
     bundle = _pbir_bundle(tmp_path)
     budget = pkg.path_budget(bundle, BUDGET_UNIT, tmp_path / "o", limits=cpc.POSIX_LIMITS)
@@ -3678,12 +3333,7 @@ def test_a_tail_no_WINDOWS_root_can_fit_is_refused_even_on_a_generous_host(
 def test_a_package_that_barely_fits_a_WINDOWS_root_WARNS_and_still_ships(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The other half of the B3 split: advisory, never a refusal.
-
-    A tight relocation budget is a shipping hazard rather than a defect - `C:\\Users\\<name>\\
-    Documents\\` is ~28 characters before a customer makes one folder - so it is reported and the
-    package still ships. The first run is the negative control: a shallow package does not warn.
-    """
+    """The other half of the B3 split: advisory, never a refusal."""
     bundle, _oracle = _bundle(tmp_path)
     command = ["--bundle", str(bundle), "--out", str(_out(tmp_path)), "--quiet"]
 
@@ -3699,12 +3349,6 @@ def test_a_package_that_barely_fits_a_WINDOWS_root_WARNS_and_still_ships(
 
 # --------------------------------------------------------------------------------------------
 # 8. the blind-review round-4 blockers
-#
-# Six findings, each reproduced through the real CLI on the branch before it was fixed, and each
-# invisible to every gate that was already green. They share one shape: a verdict that reads as a
-# pass while the thing it is a verdict ABOUT could not be established, could not be contained, or
-# was never even the right file.
-# --------------------------------------------------------------------------------------------
 
 
 def _cli(tmp_path: Path, bundle: Path, *extra: str) -> int:
@@ -3728,12 +3372,7 @@ def test_every_bundle_input_that_must_be_read_is_refused_when_it_is_corrupt(tmp_
 
 
 def test_a_workbook_whose_source_asset_vanished_cannot_be_assessed(tmp_path: Path) -> None:
-    """Reproduced: `exit 0  OK Book`, for a package on which BOTH gates return CANNOT_ESTABLISH.
-
-    Without the source, `check_unit` cannot derive an expected page set (#443) and the entry gate
-    reports `CANNOT_ESTABLISH`, so every per-page verdict the package would yield is "I do not
-    know". Saying `OK` for it is the clean-verdict-from-unreadable-input class exactly.
-    """
+    """Reproduced: `exit 0  OK Book`, for a package on which BOTH gates return CANNOT_ESTABLISH. See #443."""
     bundle, _ = _bundle(tmp_path)
     for path in (tmp_path / "assets").iterdir():
         path.unlink()
@@ -3769,19 +3408,7 @@ def test_a_manifest_declaring_no_digest_is_an_absence_not_a_mismatch(tmp_path: P
 
 
 def test_a_host_path_the_packager_cannot_classify_is_still_CONTAINED(tmp_path: Path) -> None:
-    """Reproduced: a `File.Contents` argument naming a POSIX home directory shipped verbatim at exit 4.
-
-    A POSIX user-profile directory has no file suffix and no trailing separator, so
-    `_path_verdict` returns UNCLASSIFIED and the shape-only neutralizer skipped it. Exit 4 was
-    right - the unit is not self-contained - but exit 4 means "written and incomplete", and a
-    package carrying somebody's home directory is not merely incomplete. Containment now comes from
-    the literal's ROLE: `File.Contents` reads files and nothing else.
-
-    One literal for both platforms: `_host_local` asks about the LITERAL's flavour, not the host's,
-    so a POSIX-absolute path is host-local on Windows too - which is exactly where the reviewer
-    measured it. The `<...>` segment is the placeholder form `set_data_folder.py --check` exempts; a
-    real account name committed to this repo is the very leak this test exists for.
-    """
+    """Reproduced: a `File.Contents` argument naming a POSIX home directory shipped verbatim at exit 4."""
     literal = "/Users/<review-canary>/private-data"
     assert pkg._path_verdict(literal) == pkg.UNCLASSIFIED  # noqa: SLF001
     assert pkg._host_local(literal)  # noqa: SLF001
@@ -3799,15 +3426,7 @@ def test_a_host_path_the_packager_cannot_classify_is_still_CONTAINED(tmp_path: P
 
 
 def test_an_unclassifiable_literal_in_an_UNKNOWN_field_is_recorded_and_left_alone(tmp_path: Path) -> None:
-    """The other half of the control, and the one the `HttpPath` fixture structurally cannot give.
-
-    `HttpPath` is exonerated by :func:`package_unit._service_routes` before containment is even
-    consulted, so widening containment to *every* POSIX-absolute literal leaves that fixture green.
-    This literal is in a field nothing has catalogued - so it is UNCLASSIFIED, it is NOT a
-    `File.Contents` argument, and the packager has no evidence it is a path at all. The contract is
-    the one `test_an_unassessable_POSIX_literal_is_RECORDED_not_silently_cleared` states: recorded
-    with its reason, never rewritten. Rewriting it would break a model that was never broken.
-    """
+    """The other half of the control, and the one the `HttpPath` fixture structurally cannot give."""
     route = "/api/v2/customer-feed"
     bundle, _ = _bundle(tmp_path)
     definition = bundle / "pbip" / UNIT / f"{UNIT}.SemanticModel" / "definition"
@@ -3834,13 +3453,7 @@ def test_an_unclassifiable_literal_in_an_UNKNOWN_field_is_recorded_and_left_alon
 
 
 def test_a_package_that_cannot_be_made_safe_is_not_written_at_all(tmp_path: Path) -> None:
-    """The tripwire's own contract: when containment fails, nothing lands on disk.
-
-    `_assert_no_host_path_survives` used to escape as an uncaught traceback, whose interpreter
-    exit 1 is indistinguishable from `EXIT_NO_WORKING_COPY` - and it aborted the rest of the estate.
-    Simulated here by disabling the neutralizer, which is the only thing that makes the tripwire
-    unreachable.
-    """
+    """The tripwire's own contract: when containment fails, nothing lands on disk."""
     literal = "/Users/<review-canary>/private-data"
     bundle, _ = _bundle(tmp_path)
     _point_partition_at(bundle, literal)
@@ -3884,13 +3497,6 @@ def test_a_byConnection_report_makes_no_containment_claim(tmp_path: Path) -> Non
 
 # --------------------------------------------------------------------------------------------
 # the BATCH contract (#478): one unit's failure costs that unit, and nothing else
-# --------------------------------------------------------------------------------------------
-#
-# Packaging a 47-unit estate is ONE command. Measured on the SES estate (47 assets, 2026-09-03): 29
-# units packaged, then `IA_Operation_Health_Summary_Dashboard` raised `shutil.Error: [WinError 3]`
-# out of a comprehension over `sorted(units)`, and every alphabetically later unit was never
-# attempted and never reported. The tests below pin the two halves of the fix that can each fail
-# silently: every requested unit is ATTEMPTED, and every requested unit is ACCOUNTED FOR.
 
 BATCH_EARLY = "IA_Alpha_Dashboard"
 BATCH_BOOM = "IA_Operation_Health_Summary_Dashboard"
@@ -3899,12 +3505,7 @@ BATCH_UNITS = sorted([UNIT, BATCH_EARLY, BATCH_BOOM, BATCH_LATE])
 
 
 def _batch_bundle(tmp_path: Path) -> tuple[Path, Path]:
-    """The SES shape: four real units, with the one that will raise sitting THIRD in sorted order.
-
-    `main` packages `sorted(units)`, which is exactly what made the customer's cut-off alphabetical.
-    `IA_Policy_Change_Report` exists so "later units still run" is measured on a unit that really is
-    later, rather than merely on a second one.
-    """
+    """The SES shape: four real units, with the one that will raise sitting THIRD in sorted order."""
     bundle, oracle = _bundle(tmp_path)
     assets = tmp_path / "assets"
     write_engine_report(bundle, workbooks=BATCH_UNITS)
@@ -3930,13 +3531,7 @@ def _many_unit_bundle(tmp_path: Path, units: list[str]) -> tuple[Path, Path]:
 
 
 def _arm_boom(monkeypatch: pytest.MonkeyPatch, boom: str, attempted: list[str]) -> None:
-    """Make ``boom`` raise the CUSTOMER's exception, and record every unit assembly is attempted for.
-
-    The spy is the only way to tell "the unit after the failure was attempted and succeeded" from "it
-    happened to be on disk already" - a package directory answers only the second question. The
-    exception is deliberately `shutil.Error`, which is NOT a `PackagingError`: the modelled refusals
-    were already collected before this fix, and the field failure was not one of them.
-    """
+    """Make ``boom`` raise the CUSTOMER's exception, and record every unit assembly is attempted for."""
     real = pkg._assemble_unit  # noqa: SLF001  # pylint: disable=protected-access
 
     def spy(bundle: Path, unit: str, dest: Path, **kwargs: object) -> tuple[dict, Callable[[], None]]:
@@ -4290,12 +3885,7 @@ def test_a_staging_tree_that_survives_cleanup_fails_its_unit_rather_than_being_a
 def test_a_residue_found_while_a_unit_is_already_failing_does_not_replace_the_root_cause(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The residue is recorded ON the in-flight failure, never raised out of the `finally`.
-
-    An exception raised from a `finally` REPLACES the one already propagating, and the in-flight one
-    is the root cause the operator needs - the report would name a staging directory instead of the
-    `shutil.Error` that actually killed the unit.
-    """
+    """The residue is recorded ON the in-flight failure, never raised out of the `finally`."""
     bundle, oracle = _batch_bundle(tmp_path)
     staging = pkg.staging_dir(_out(tmp_path), BATCH_BOOM)
     real_assemble, real_rmtree = pkg._assemble_unit, shutil.rmtree  # noqa: SLF001  # pylint: disable=protected-access
@@ -4332,11 +3922,7 @@ def test_a_residue_found_while_a_unit_is_already_failing_does_not_replace_the_ro
 
 
 def test_a_requested_unit_in_no_bucket_is_named_rather_than_counted_clean() -> None:
-    """The tripwire behind the totals line, exercised directly - both directions are a gap.
-
-    A unit that vanished before it could be recorded anywhere would otherwise shrink the denominator,
-    and the run would read as a clean pass over a smaller estate.
-    """
+    """The tripwire behind the totals line, exercised directly - both directions are a gap."""
     assembled = [{"unit": "A"}]
     failed = [pkg.UnitCrashed("B", RuntimeError("boom"))]
     refusal = pkg.PackageEditsRefused("C", Path("C"), [], None)
