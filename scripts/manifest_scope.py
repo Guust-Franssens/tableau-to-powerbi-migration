@@ -448,9 +448,10 @@ def _valid_published_dependencies(payload: Any) -> bool:
 PROVENANCE_ALLOW: dict[str, Any] = {
     "inputs": Rows(
         {
-            "input": _fields("file", "sha256"),
+            "input": {**_fields("file", "sha256"), "revision_key": _fields("algo", "value")},
             "origin": {
-                **_fields("workbook_luid", "datasource_luid", "match"),
+                **_fields("workbook_luid", "datasource_luid", "match", "revision_match"),
+                "remote_revision_key": _fields("algo", "value"),
                 "published_dependencies": PUBLISHED_DEPENDENCIES_ALLOW,
             },
         }
