@@ -1360,6 +1360,24 @@ def test_a_container_at_a_scalar_leaf_fails_loudly_rather_than_shipping() -> Non
     assert project({"tiers": ["png", "svg"]}, {"tiers": ms.SCALAR_LIST}) == ({"tiers": ["png", "svg"]}, [])
 
 
+def test_a_dropped_nested_field_is_recorded_by_its_full_path(tmp_path: Path) -> None:
+    """An omission must be discoverable: the path is engine schema, the value is the estate content."""
+    _full, scoped, _text = _package_estate_report(tmp_path)
+    dropped = scoped["scope"]["dropped_fields"]
+    assert "workbooks[].future_nested" in dropped
+    assert "input_manifest" in dropped
+    assert "definition_of_done" in dropped
+    assert not any(RETAINED_EXTENSION in entry or FOREIGN in entry for entry in dropped)
+
+
+def test_the_report_is_descoped_to_the_classification_the_gates_read(tmp_path: Path) -> None:
+    """Round 3: DELETE the surface rather than enumerate it a fourth time."""
+    _full, scoped, _text = _package_estate_report(tmp_path)
+    assert sorted(scoped) == ["datasources", "generated_at", "scope", "scoped_by", "tool", "workbooks"]
+    assert "definition_of_done" not in scoped
+    assert all(list(row) == ["name"] for row in scoped["workbooks"] + scoped["datasources"])
+
+
 def test_the_scoped_report_still_declares_both_collections_as_lists(tmp_path: Path) -> None:
     """Over-trimming is the opposite defect: both gates reject the file unless `workbooks` is a list."""
     _full, scoped, _text = _package_estate_report(tmp_path)
@@ -4122,6 +4140,43 @@ def test_a_requested_unit_in_no_bucket_is_named_rather_than_counted_clean() -> N
     assert pkg.partition_gaps(["A"], assembled + assembled, [], []) == [
         {"unit": "A", "state": "recorded_too_many", "reason": "requested 1 time(s) but recorded 2 outcome(s)"}
     ]
+
+
+def test_an_unaccounted_unit_is_reported_and_cannot_exit_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """If the loop ever loses a unit again, the run SAYS so and refuses to exit 0."""
+    bundle, oracle = _bundle(tmp_path)
+    monkeypatch.setattr(pkg, "_package_each", lambda *args, **kwargs: None)
+    report = tmp_path / "packaging.json"
+
+    code = _batch_main(tmp_path, bundle, oracle, report)
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    summary = capsys.readouterr().out
+
+    assert payload["unaccounted"] == [
+        {"unit": UNIT, "state": "not_attempted", "reason": "requested occurrence recorded in no outcome bucket"}
+    ]
+    assert payload["totals"] == {
+        "requested": 1,
+        "units": 0,
+        "failed": 0,
+        "refused": 0,
+        "unaccounted": 1,
+        "assembled": 0,
+        "blocked": 1,
+    }
+    assert payload["construction"]["blocked"] == [
+        {
+            "unit": UNIT,
+            "status": pkg.STATUS_BLOCKED,
+            "reason_code": "outcome_accounting_mismatch",
+            "reason": "the requested occurrence did not reach exactly one construction bucket",
+        }
+    ]
+    assert "1 requested = 0 ASSEMBLED + 1 BLOCKED" in summary
+    assert f"BLOCKED {UNIT} [outcome_accounting_mismatch]" in summary
+    assert code == pkg.EXIT_CANNOT_ASSESS, "a unit nobody can account for left the run clean"
 
 
 def test_an_operator_interrupt_before_publish_is_persisted_and_stops_the_run(

@@ -333,6 +333,51 @@ def test_json_destination_external_alias_cannot_replace_protected_files(  # pyli
     assert {path.relative_to(out) for path in out.rglob("*") if path.is_dir()} == original_dirs
 
 
+def test_json_destination_reparse_parent_is_not_traversed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The no-follow check must precede even lstat of a child reached through a directory alias."""
+    bundle, _oracle, _objects = _bundle(tmp_path, covered=None, datasource_only=True)
+    out = tmp_path / "packages"
+    brief = _brief(tmp_path, UNIT)
+    protected = tmp_path / "protected"
+    protected.mkdir()
+    sentinel = protected / "held.txt"
+    sentinel.write_bytes(b"outside data")
+    alias = tmp_path / "alias"
+    try:
+        alias.symlink_to(protected, target_is_directory=True)
+    except (OSError, NotImplementedError) as error:
+        if (
+            isinstance(error, OSError)
+            and error.errno not in (errno.EACCES, errno.EPERM, errno.ENOTSUP)
+            and getattr(error, "winerror", None) != 1314
+        ):
+            raise
+        pytest.skip("this platform/account cannot create symlinks without elevation")
+    original = Path.lstat
+
+    def no_follow(path: Path) -> os.stat_result:
+        assert path == alias or not path.is_relative_to(alias), "report admission traversed an unsafe parent"
+        return original(path)
+
+    monkeypatch.setattr(Path, "lstat", no_follow)
+    with pytest.raises(SystemExit) as refused:
+        pkg.main(
+            [
+                "--bundle",
+                str(bundle),
+                "--out",
+                str(out),
+                "--brief",
+                str(brief),
+                "--json",
+                str(alias / "new" / "status.json"),
+            ]
+        )
+    assert refused.value.code == 2
+    assert sentinel.read_bytes() == b"outside data" and list(protected.iterdir()) == [sentinel]
+    assert not out.exists()
+
+
 @pytest.mark.parametrize("variant", ["credential", "header"])
 def test_full_brief_is_refused_without_copying_redacting_or_echoing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], variant: str
