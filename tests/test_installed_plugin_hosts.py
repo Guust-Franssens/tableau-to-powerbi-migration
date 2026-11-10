@@ -27,6 +27,7 @@ from build_plugin import SHIPPED_SKILLS  # noqa: E402  # pylint: disable=wrong-i
 PS = shutil.which("pwsh") or shutil.which("powershell")
 KINDS = ("engine", "authoring", "bundles")
 NAMES = dict(zip(KINDS, ("tableau-fabric-skills", "powerbi-authoring", "synthetic-bundles"), strict=True))
+MARKETPLACES = dict(zip(KINDS, ("tableau-collection", "fabric-collection", "synthetic"), strict=True))
 AUTHORING = "plugin: powerbi-authoring@fabric-collection"
 BUNDLES = "plugin: reusable Power BI skill bundles"
 SELECTORS = ("T2P_PLUGIN_HOST=cli", "T2P_PLUGIN_HOST=vscode")
@@ -52,7 +53,7 @@ def _cli_root(environment: dict[str, str], kind: str) -> Path:
 
 
 def _cache(environment: dict[str, str]) -> Path:
-    return Path(environment["APPDATA"]) / "Code" / "User" / "agent-plugins"
+    return Path(environment["USERPROFILE"]) / ".vscode" / "agent-plugins"
 
 
 def _content(root: Path, kind: str) -> Path:
@@ -237,15 +238,39 @@ def test_one_tree_registered_by_both_hosts_is_one_install(profile: dict[str, str
     assert (verdict.status, verdict.plugin_root) == ("found", root), verdict.detail
 
 
+@pytest.mark.skipif(os.name != "nt", reason="junctions are a Windows reparse point")
+@pytest.mark.parametrize("kind", KINDS)
+def test_cli_root_junctioned_to_the_vscode_copy_is_one_install(profile: dict[str, str], kind: str) -> None:
+    """#811 L2: the dedup compares physical paths, so a real junction between host roots is one install."""
+    target = _install(profile, "vscode", kind)
+    link = _cli_root(profile, kind)
+    link.parent.mkdir(parents=True)
+    made = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)], capture_output=True, check=False)
+    assert made.returncode == 0, made.stderr
+    if kind == "authoring":
+        _write_config(profile, [_cli_entry(link)])
+    assert engine.discover_installed_plugin(kind, env={**profile, "T2P_PLUGIN_HOST": "cli"}).plugin_root == link
+    verdict = engine.discover_installed_plugin(kind, env=profile)
+    assert (verdict.status, verdict.plugin_root) == ("found", link), verdict.detail
+
+
 @pytest.mark.parametrize("kind", ["engine", "authoring"])
 def test_vscode_identity_is_the_registered_name_not_the_files(profile: dict[str, str], kind: str) -> None:
     """Re-review repro: an `evil-plugin` entry carrying engine files must not become the engine."""
     root = _install(profile, "vscode", kind)
     impostor = _content(root.parent / "evil-plugin", kind)
+    if kind != "bundles":
+        (impostor / ".github" / "plugin" / "plugin.json").write_text(
+            json.dumps({"name": "evil-plugin"}), encoding="utf-8"
+        )
     _rewrite_registry(
         profile,
         lambda payload: payload["installed"].extend(
-            [{"pluginUri": impostor.as_uri(), "name": "evil-plugin"}, {"pluginUri": impostor.as_uri()}]
+            [
+                {"pluginUri": impostor.as_uri(), "name": "evil-plugin"},
+                {"pluginUri": impostor.as_uri()},
+                {"pluginUri": impostor.as_uri(), "marketplace": MARKETPLACES[kind]},
+            ]
         ),
     )
     selected = {**profile, "T2P_PLUGIN_HOST": "vscode"}
@@ -254,6 +279,30 @@ def test_vscode_identity_is_the_registered_name_not_the_files(profile: dict[str,
     _rewrite_registry(profile, lambda payload: payload["installed"].pop(0))
     verdict = engine.discover_installed_plugin(kind, env=selected)
     assert (verdict.status, verdict.plugin_root) == ("missing", None), "a wrong or absent name is not identity"
+
+
+@pytest.mark.parametrize("kind", ["engine", "authoring"])
+def test_vscode_registry_supports_default_directory_and_unnamed_entries(profile: dict[str, str], kind: str) -> None:
+    """Resolve the real per-user registry layout when VS Code omits the optional name."""
+    root = _install(profile, "vscode", kind)
+    assert _cache(profile) == Path(profile["USERPROFILE"]) / ".vscode" / "agent-plugins"
+    _rewrite_registry(profile, lambda payload: payload["installed"][0].pop("name"))
+    verdict = engine.discover_installed_plugin(kind, env={**profile, "T2P_PLUGIN_HOST": "vscode"})
+    assert (verdict.status, verdict.plugin_root) == ("found", root), verdict.detail
+
+
+def test_vscode_reports_an_existing_registry_without_the_target_plugin(profile: dict[str, str]) -> None:
+    """Distinguish a valid registry with another plugin from an absent registry."""
+    cache = _cache(profile)
+    cache.mkdir(parents=True)
+    (cache / "installed.json").write_text(
+        json.dumps({"version": 1, "installed": [{"pluginUri": "file:///other", "marketplace": "azure-skills"}]}),
+        encoding="utf-8",
+    )
+    verdict = engine.discover_installed_plugin("engine", env={**profile, "T2P_PLUGIN_HOST": "vscode"})
+    assert verdict.status == "missing"
+    assert "registry is absent" not in verdict.detail
+    assert str(cache / "installed.json") in verdict.detail
 
 
 def test_both_hosts_missing_reports_the_cli_repair(profile: dict[str, str]) -> None:
@@ -554,7 +603,8 @@ def test_preflight_doctor_shared_evidence(profile: dict[str, str], host: str) ->
     assert (unverified in rows["engine: plugin installed"]["Detail"]) == (host == "vscode")
     bundle_rows = [row for name, row in rows.items() if name.startswith("plugin: ") and name != AUTHORING]
     assert [(row["Ok"], unverified in row["Detail"]) for row in bundle_rows] == [(True, host == "vscode")]
-    assert rows["engine: single source"]["Ok"] is True
+    # #811: the preflight subprocess still sees an engine clone beside this checkout; the fixture cannot move it.
+    assert rows["engine: single source"]["Ok"] is not engine.is_engine_tree(ROOT.parent / "tableau-fabric-skills")
     authoring = rows[AUTHORING]
     assert authoring["Ok"] is True
     if host == "vscode":
@@ -583,6 +633,9 @@ def test_preflight_dual_host_refuses_with_the_selector_hint(profile: dict[str, s
         assert all(selector in rows[name]["Hint"] for selector in SELECTORS), rows[name]["Hint"]
     safe = t2p._doctor_preflight(json.dumps(result["doctor"]).encode(), b"", 1)  # pylint: disable=protected-access
     assert safe["availability"] == "available"
+    for blocker in safe["blockers"]:
+        action = t2p._doctor_blocker_lines(blocker)[-1]  # pylint: disable=protected-access
+        assert all(selector in action for selector in SELECTORS), f"#811 L1: {action}"
     assert _preflight({**profile, "T2P_PLUGIN_HOST": "cli"})["doctor"]["blockers"] == []
 
 

@@ -595,6 +595,11 @@ def _doctor_configuration_lines(result: dict) -> list[str]:
 
 
 def _doctor_blocker_lines(blocker: dict, *, installed: bool = False) -> list[str]:
+    # #811: preflight also emits these plugin tokens for a dual-host refusal, which a host choice clears.
+    choose_host = (
+        "if preflight says it is installed for both the Copilot CLI and VS Code, choose one host with"
+        " T2P_PLUGIN_HOST=cli or T2P_PLUGIN_HOST=vscode; otherwise "
+    )
     labels = {
         "copilot_home": "configured Copilot home directory was not found",
         "python_runtime": "Python is unavailable, unreadable or below 3.11",
@@ -604,7 +609,7 @@ def _doctor_blocker_lines(blocker: dict, *, installed: bool = False) -> list[str
         "report_author": "powerbi-report-author is not on PATH",
         "report_author_version": "powerbi-report-author release does not satisfy its existing floor check",
         "desktop_bridge_version": "powerbi-desktop release does not satisfy its existing floor check",
-        "engine_plugin": "canonical conversion-engine plugin is missing",
+        "engine_plugin": "canonical conversion-engine plugin is missing or needs a host choice",
         "engine_source": "engine single-source requirement could not be satisfied",
         "authoring_plugin": "powerbi-authoring plugin does not satisfy its existing joint check",
         "reusable_skill_plugins": "multiple reusable-skill plugin installations were found",
@@ -626,13 +631,13 @@ def _doctor_blocker_lines(blocker: dict, *, installed: bool = False) -> list[str
         "install_report_author": "manually install @microsoft/powerbi-report-authoring-cli per setup guidance.",
         "inspect_cli_release": "privately inspect that CLI; select a plain release meeting the existing preflight floor"
         " at session start only, using docs/operator-runbook.md.",
-        "install_engine_plugin": "install the canonical tableau-fabric-skills plugin between sessions"
+        "install_engine_plugin": choose_host + "install the canonical tableau-fabric-skills plugin between sessions"
         " per setup guidance.",
         "inspect_engine_source": "run python -B scripts\\engine_source.py --json privately"
         " and restore a usable resolver/Python invocation.",
-        "repair_authoring_plugin_between_sessions": "close Copilot sessions; manually inspect/repair only"
+        "repair_authoring_plugin_between_sessions": choose_host + "close Copilot sessions; manually inspect/repair only"
         " powerbi-authoring@fabric-collection per docs/operator-runbook.md, then verify enabled/version/content.",
-        "inspect_duplicate_skill_plugins": "privately inspect duplicate skill-plugin installations;"
+        "inspect_duplicate_skill_plugins": choose_host + "privately inspect duplicate skill-plugin installations;"
         " retain the intended copy and remove a duplicate manually between sessions.",
         "sync_installed_skills": "manually refresh installed bundles with scripts\\sync_installed_skills.py;"
         " install/update a new bundle's plugin only between sessions.",

@@ -36,6 +36,8 @@ def test_copilot_home_discovery(tmp_path, monkeypatch, configured):
     relocated_plugin = _make_plugin(relocated / "installed-plugins", "collection", "plugin")
     monkeypatch.setattr(Path, "home", lambda: user)
     monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))  # #727: VS Code's registry is a host too
+    monkeypatch.setenv("USERPROFILE", str(user))  # VS Code's agent-plugins registry is found via the profile
+    monkeypatch.setenv("HOME", str(user))
     monkeypatch.delenv("T2P_PLUGIN_HOST", raising=False)
     monkeypatch.delenv(PLUGIN_ROOT_ENV, raising=False)
     if configured is None:
