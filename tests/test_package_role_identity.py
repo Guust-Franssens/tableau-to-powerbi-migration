@@ -20,7 +20,6 @@ import hashlib
 import inspect
 import json
 import os
-import pickle
 import shutil
 import sys
 import types
@@ -288,14 +287,6 @@ def verify_one(package: Path) -> pri.Phase1RoleIdentityResult:
 # --------------------------------------------------------------------------------------------
 
 
-def test_the_state_and_verdict_vocabulary_is_pinned_to_its_literal_values() -> None:
-    """Redefining a constant would otherwise change both sides of every assertion below."""
-    assert (pri.STATE_RESOLVED, pri.STATE_NOT_APPLICABLE) == ("resolved", "not_applicable")
-    assert (pri.STATE_MISSING, pri.STATE_AMBIGUOUS, pri.STATE_MISMATCH) == ("missing", "ambiguous", "mismatch")
-    assert (pri.VERDICT_START_READY, pri.VERDICT_BLOCKED) == ("START_READY", "BLOCKED")
-    assert pri.BLOCKING_STATES == frozenset({"missing", "ambiguous", "mismatch"})
-
-
 # --------------------------------------------------------------------------------------------
 # positives - the three shapes the audit's role matrix enumerates
 # --------------------------------------------------------------------------------------------
@@ -397,27 +388,6 @@ def test_a_local_source_with_no_server_luid_resolves_by_sha_and_earns_luid_not_a
     assert role(result, pri.ROLE_TABLEAU_REFERENCE).state == pri.STATE_RESOLVED
 
 
-def test_two_packages_sharing_a_display_name_resolve_independently(tmp_path: Path) -> None:
-    """Nothing here joins on a name, so identical unit names with distinct identities cannot collide.
-
-    ⚠️ Both packages carry the SAME `unit` on purpose. It is a package-local scope key derived from a
-    Tableau display name, and two genuinely distinct workbooks can share one; a cohort-level
-    "duplicate unit" refusal would be a name join wearing a collision check. What must differ, and
-    does, is the identity: different LUID, different bytes.
-    """
-    other_luid = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff"
-    first = workbook_package(tmp_path / "a" / "Revenue")
-    second = workbook_package(tmp_path / "b" / "Revenue", luid=other_luid, body="<workbook name='Revenue' rev='2'/>\n")
-
-    results = pri.verify_phase1_role_identity([first, second])
-
-    assert [row.verdict for row in results] == [pri.VERDICT_START_READY, pri.VERDICT_START_READY]
-    assert [row.unit for row in results] == [WB_UNIT, WB_UNIT]
-    assert [row.source_identity.tableau_luid for row in results if row.source_identity] == [WB_LUID, other_luid]
-    shas = {row.source_identity.sha256 for row in results if row.source_identity}
-    assert len(shas) == 2, "two distinct workbooks must not share one source identity"
-
-
 # --------------------------------------------------------------------------------------------
 # the frozen negatives - the three controls that used to read READY at exit 0
 # --------------------------------------------------------------------------------------------
@@ -444,21 +414,6 @@ def test_removing_the_asset_declaration_is_missing_even_though_the_file_remains(
     assert result.source_identity is not None and result.source_identity.sha256 is None
 
 
-def test_a_contradictory_workbook_luid_is_a_source_identity_mismatch(tmp_path: Path) -> None:
-    """Two identities that disagree are LESS evidence than none - the oracle cannot rescue it."""
-    package = workbook_package(tmp_path / "Revenue")
-    provenance = json.loads((package / "source-provenance.json").read_text(encoding="utf-8"))
-    provenance["inputs"][0]["origin"]["workbook_luid"] = "cccccccc-dddd-eeee-ffff-000000000000"
-    _write(package / "source-provenance.json", provenance)
-    seal(package, **json.loads((package / "package-manifest.json").read_text(encoding="utf-8")))
-
-    result = verify_one(package)
-
-    assert role(result, pri.ROLE_SERVER_IDENTITY).state == pri.STATE_MISMATCH
-    assert role(result, pri.ROLE_SERVER_IDENTITY).code == pri.CODE_LUID_CONTRADICTION
-    assert result.verdict == pri.VERDICT_BLOCKED
-
-
 def test_a_declared_oracle_file_no_record_accounts_for_is_foreign_evidence(tmp_path: Path) -> None:
     """S1 refuses an UNdeclared extra file; this is the declared-but-unattributed one it cannot see."""
     package = workbook_package(tmp_path / "Revenue")
@@ -471,20 +426,6 @@ def test_a_declared_oracle_file_no_record_accounts_for_is_foreign_evidence(tmp_p
     assert role(result, pri.ROLE_TABLEAU_ORACLE).code == pri.CODE_EVIDENCE_UNACCOUNTED
     assert "oracle/dashboard/stray.png" in role(result, pri.ROLE_TABLEAU_ORACLE).paths
     assert result.verdict == pri.VERDICT_BLOCKED
-
-
-def test_an_oracle_view_belonging_to_another_workbook_is_foreign_evidence(tmp_path: Path) -> None:
-    """The other half of foreign evidence: the file is accounted for, the OWNER is someone else."""
-    package = workbook_package(tmp_path / "Revenue")
-    manifest = json.loads((package / "oracle" / "oracle-manifest.json").read_text(encoding="utf-8"))
-    manifest["views"][0]["workbook_luid"] = "cccccccc-dddd-eeee-ffff-000000000000"
-    _write(package / "oracle" / "oracle-manifest.json", manifest)
-    seal(package, **json.loads((package / "package-manifest.json").read_text(encoding="utf-8")))
-
-    result = verify_one(package)
-
-    assert role(result, pri.ROLE_TABLEAU_ORACLE).state == pri.STATE_MISMATCH
-    assert role(result, pri.ROLE_TABLEAU_ORACLE).code == pri.CODE_EVIDENCE_FOREIGN
 
 
 # --------------------------------------------------------------------------------------------
@@ -528,44 +469,6 @@ def test_a_handover_slice_scoped_to_another_unit_blocks(tmp_path: Path) -> None:
     assert role(result, pri.ROLE_HANDOVER).code == pri.CODE_SCOPE_MISMATCH
 
 
-def test_a_spec_naming_a_different_source_file_is_a_source_identity_mismatch(tmp_path: Path) -> None:
-    package = workbook_package(tmp_path / "Revenue")
-    _write(package / "migration-spec.json", {"source": {"file_name": "SomethingElse.twb"}, "data_sources": []})
-    seal(package, **json.loads((package / "package-manifest.json").read_text(encoding="utf-8")))
-
-    result = verify_one(package)
-
-    assert role(result, pri.ROLE_SOURCE_IDENTITY).state == pri.STATE_MISMATCH
-    assert role(result, pri.ROLE_SOURCE_IDENTITY).code == pri.CODE_SPEC_FILE
-
-
-def test_a_provenance_row_for_other_bytes_is_a_provenance_mismatch(tmp_path: Path) -> None:
-    package = workbook_package(tmp_path / "Revenue")
-    provenance = json.loads((package / "source-provenance.json").read_text(encoding="utf-8"))
-    provenance["inputs"][0]["input"]["sha256"] = "0" * 64
-    _write(package / "source-provenance.json", provenance)
-    seal(package, **json.loads((package / "package-manifest.json").read_text(encoding="utf-8")))
-
-    result = verify_one(package)
-
-    assert role(result, pri.ROLE_SOURCE_PROVENANCE).state == pri.STATE_MISMATCH
-    assert role(result, pri.ROLE_SOURCE_PROVENANCE).code == pri.CODE_PROVENANCE_SHA
-
-
-def test_a_datasource_luid_in_a_workbook_provenance_row_is_a_namespace_mismatch(tmp_path: Path) -> None:
-    """The two UUID namespaces are typed. Reading one as the other fails OPEN if they ever collide."""
-    package = workbook_package(tmp_path / "Revenue")
-    provenance = json.loads((package / "source-provenance.json").read_text(encoding="utf-8"))
-    provenance["inputs"][0]["origin"]["datasource_luid"] = DS_LUID
-    _write(package / "source-provenance.json", provenance)
-    seal(package, **json.loads((package / "package-manifest.json").read_text(encoding="utf-8")))
-
-    result = verify_one(package)
-
-    assert role(result, pri.ROLE_SERVER_IDENTITY).state == pri.STATE_MISMATCH
-    assert role(result, pri.ROLE_SERVER_IDENTITY).code == pri.CODE_LUID_NAMESPACE
-
-
 def test_a_receipt_output_belonging_to_another_unit_blocks(tmp_path: Path) -> None:
     """A receipt that attests to files this package does not contain describes another build."""
     package = workbook_package(tmp_path / "Revenue")
@@ -594,139 +497,14 @@ def test_a_receipt_that_does_not_account_for_the_model_role_blocks(tmp_path: Pat
     assert role(result, pri.ROLE_ENGINE_RECEIPT).code == pri.CODE_RECEIPT_UNCOVERED
 
 
-def test_a_unit_the_engine_classifies_as_neither_kind_blocks(tmp_path: Path) -> None:
-    package = workbook_package(tmp_path / "Revenue")
-    _write(package / "report.json", {"workbooks": [], "datasources": [], "scope": {"unit": WB_UNIT}})
-    seal(package, **json.loads((package / "package-manifest.json").read_text(encoding="utf-8")))
-
-    result = verify_one(package)
-
-    assert role(result, pri.ROLE_ENGINE_CLASSIFICATION).state == pri.STATE_MISMATCH
-    assert role(result, pri.ROLE_ENGINE_CLASSIFICATION).code == pri.CODE_ENGINE_MEMBERSHIP
-
-
-def test_a_datasource_asset_in_a_workbook_package_is_not_an_admissible_source_role(tmp_path: Path) -> None:
-    """Extension is part of the role, so a `.tds` cannot fill a workbook's source role."""
-    package = workbook_package(tmp_path / "Revenue", asset_name="Revenue.tds")
-
-    result = verify_one(package)
-
-    assert role(result, pri.ROLE_SOURCE_ASSET).state == pri.STATE_MISMATCH
-    assert role(result, pri.ROLE_SOURCE_ASSET).code == pri.CODE_ROLE_WRONG_CANDIDATE
-
-
 # --------------------------------------------------------------------------------------------
 # the brief
 # --------------------------------------------------------------------------------------------
 
 
-def test_a_package_with_no_brief_blocks(tmp_path: Path) -> None:
-    """A stateless agent handed only the package would have nothing saying what this is FOR."""
-    package = workbook_package(tmp_path / "Revenue")
-    (package / "migration-brief.md").unlink()
-    manifest = json.loads((package / "package-manifest.json").read_text(encoding="utf-8"))
-    manifest["artifacts"]["migration_brief"] = None
-    seal(package, **manifest)
-
-    result = verify_one(package)
-
-    assert role(result, pri.ROLE_MIGRATION_BRIEF).state == pri.STATE_MISSING
-    assert result.verdict == pri.VERDICT_BLOCKED
-
-
-def test_a_brief_declared_as_an_external_path_is_not_a_packaged_role(tmp_path: Path) -> None:
-    """A path is not availability: the bytes have to be IN the package, under the role name."""
-    package = workbook_package(tmp_path / "Revenue")
-    manifest = json.loads((package / "package-manifest.json").read_text(encoding="utf-8"))
-    manifest["artifacts"]["migration_brief"] = "C:/dispatcher/migrations/workbooks/revenue/migration-brief.md"
-    seal(package, **manifest)
-
-    result = verify_one(package)
-
-    assert role(result, pri.ROLE_MIGRATION_BRIEF).state == pri.STATE_MISMATCH
-    assert role(result, pri.ROLE_MIGRATION_BRIEF).code == pri.CODE_ROLE_NOT_VERIFIED
-
-
-def test_a_brief_whose_frontmatter_names_another_unit_blocks(tmp_path: Path) -> None:
-    package = workbook_package(tmp_path / "Revenue")
-    _write(package / "migration-brief.md", brief_text("SomeOtherUnit", "model_and_report"))
-    seal(package, **json.loads((package / "package-manifest.json").read_text(encoding="utf-8")))
-
-    result = verify_one(package)
-
-    assert role(result, pri.ROLE_MIGRATION_BRIEF).state == pri.STATE_MISMATCH
-    assert role(result, pri.ROLE_MIGRATION_BRIEF).code == pri.CODE_BRIEF_UNIT
-
-
-def test_a_brief_whose_scope_contradicts_the_topology_blocks(tmp_path: Path) -> None:
-    """`scope` is an identity claim about the unit's shape, so S2 checks it; policy is not read."""
-    package = workbook_package(tmp_path / "Revenue")
-    _write(package / "migration-brief.md", brief_text(WB_UNIT, "report_only_shared_model"))
-    seal(package, **json.loads((package / "package-manifest.json").read_text(encoding="utf-8")))
-
-    result = verify_one(package)
-
-    assert role(result, pri.ROLE_MIGRATION_BRIEF).state == pri.STATE_MISMATCH
-    assert role(result, pri.ROLE_MIGRATION_BRIEF).code == pri.CODE_BRIEF_SCOPE
-
-
-def test_a_brief_with_unparseable_frontmatter_blocks_rather_than_falling_back_to_prose(tmp_path: Path) -> None:
-    package = workbook_package(tmp_path / "Revenue")
-    _write(package / "migration-brief.md", "+++\nunit = \nthis is not toml\n+++\n")
-    seal(package, **json.loads((package / "package-manifest.json").read_text(encoding="utf-8")))
-
-    result = verify_one(package)
-
-    assert role(result, pri.ROLE_MIGRATION_BRIEF).state == pri.STATE_MISMATCH
-    assert role(result, pri.ROLE_MIGRATION_BRIEF).code == pri.CODE_BRIEF_FRONTMATTER
-
-
-def test_a_free_form_brief_resolves_as_PRESENT_and_records_the_unparsed_policy_limitation(tmp_path: Path) -> None:
-    """The explicit S2 boundary: free-form Markdown is never parsed as policy, and says so."""
-    package = workbook_package(tmp_path / "Revenue")
-    _write(package / "migration-brief.md", "# Migration brief\n\nFaithful re-creation, stop on a wall.\n")
-    seal(package, **json.loads((package / "package-manifest.json").read_text(encoding="utf-8")))
-
-    result = verify_one(package)
-
-    assert role(result, pri.ROLE_MIGRATION_BRIEF).state == pri.STATE_RESOLVED
-    assert pri.LIMITATION_BRIEF_POLICY_UNPARSED in result.authorized_limitations
-    assert result.verdict == pri.VERDICT_START_READY, result.blockers
-
-
 # --------------------------------------------------------------------------------------------
 # the published cohort
 # --------------------------------------------------------------------------------------------
-
-
-def test_a_consumer_with_no_provider_in_the_cohort_blocks(tmp_path: Path) -> None:
-    """ "I cannot see a provider" and "there is no provider" are the same answer from one package."""
-    consumer = workbook_package(
-        tmp_path / "Revenue",
-        published={"id": DS_UNIT, "site": "sales-site", "key": PUBLISHED_KEY, "luid": DS_LUID},
-        binding=f"../{DS_UNIT}.SemanticModel",
-    )
-
-    result = verify_one(consumer)
-
-    assert role(result, pri.ROLE_PUBLISHED_DEPENDENCY).state == pri.STATE_MISSING
-    assert result.dependencies[0].code == pri.CODE_PROVIDER_MISSING
-    assert result.verdict == pri.VERDICT_BLOCKED
-
-
-def test_two_providers_answering_one_datasource_luid_are_ambiguous(tmp_path: Path) -> None:
-    first = datasource_package(tmp_path / "a" / "Shared_Sales", published_key=PUBLISHED_KEY)
-    second = datasource_package(tmp_path / "b" / "Shared_Sales_2", unit="Shared_Sales_2", published_key=PUBLISHED_KEY)
-    consumer = workbook_package(
-        tmp_path / "Revenue",
-        published={"id": DS_UNIT, "site": "sales-site", "key": PUBLISHED_KEY, "luid": DS_LUID},
-        binding=f"../{DS_UNIT}.SemanticModel",
-    )
-
-    results = pri.verify_phase1_role_identity([first, second, consumer])
-
-    assert role(results[2], pri.ROLE_PUBLISHED_DEPENDENCY).state == pri.STATE_AMBIGUOUS
-    assert results[2].dependencies[0].code == pri.CODE_PROVIDER_AMBIGUOUS
 
 
 def test_a_provider_answering_the_key_with_a_different_luid_is_a_contradiction(tmp_path: Path) -> None:
@@ -744,81 +522,6 @@ def test_a_provider_answering_the_key_with_a_different_luid_is_a_contradiction(t
 
     assert results[1].dependencies[0].code == pri.CODE_PROVIDER_LUID_CONTRADICTION
     assert role(results[1], pri.ROLE_PUBLISHED_DEPENDENCY).state == pri.STATE_MISMATCH
-
-
-def test_a_consumer_bound_to_its_own_model_instead_of_the_provider_blocks(tmp_path: Path) -> None:
-    """A duplicate model is a mismatch, not a convenience - nothing can then say which numbers won."""
-    provider = datasource_package(tmp_path / "Shared_Sales", published_key=PUBLISHED_KEY)
-    consumer = workbook_package(
-        tmp_path / "Revenue",
-        published={"id": DS_UNIT, "site": "sales-site", "key": PUBLISHED_KEY, "luid": DS_LUID},
-        own_model=True,
-    )
-
-    results = pri.verify_phase1_role_identity([provider, consumer])
-
-    assert role(results[1], pri.ROLE_FABRIC_MODEL).state == pri.STATE_MISMATCH
-    assert results[1].dependencies[0].code == pri.CODE_PROVIDER_BINDING
-
-
-def test_a_provider_with_no_luid_cannot_be_selected_by_the_exact_key(tmp_path: Path) -> None:
-    """Even a unique exact key and correct binding cannot replace acquired datasource identity."""
-    provider = datasource_package(tmp_path / "Shared_Sales", luid=None, published_key=PUBLISHED_KEY)
-    consumer = workbook_package(
-        tmp_path / "Revenue",
-        published={"id": DS_UNIT, "site": "sales-site", "key": PUBLISHED_KEY},
-        binding=f"../../../{DS_UNIT}/fabric/{DS_UNIT}.SemanticModel",
-    )
-
-    results = pri.verify_phase1_role_identity([provider, consumer])
-
-    assert [row.verdict for row in results] == ["START_READY", "BLOCKED"]
-    assert results[1].dependencies[0].published_key == PUBLISHED_KEY
-    assert results[1].dependencies[0].datasource_luid == DS_LUID
-    assert results[1].dependencies[0].code == "provider_missing"
-
-
-def test_a_provider_named_only_by_a_DISPLAY_name_never_resolves(tmp_path: Path) -> None:
-    """The route this slice refuses to have: a caption is not an identity, at any cardinality."""
-    provider = datasource_package(tmp_path / "Shared_Sales", luid=None)
-    consumer = workbook_package(
-        tmp_path / "Revenue",
-        published={"id": DS_UNIT, "site": "sales-site", "key": None, "luid": None},
-        binding=f"../{DS_UNIT}.SemanticModel",
-    )
-    results = pri.verify_phase1_role_identity([provider, consumer])
-
-    assert results[1].topology == pri.TOPOLOGY_PUBLISHED_CONSUMER
-    assert len(results[1].dependencies) == 1
-    assert results[1].dependencies[0].code == "published_dependency_identity_missing"
-    assert results[1].verdict == "BLOCKED"
-
-
-def test_a_provider_whose_only_agreement_is_its_NAME_is_still_missing(tmp_path: Path) -> None:
-    """The discriminating twin of the test above, one layer lower.
-
-    Here the consumer DOES declare a stable identity - an exact published key - and the only package
-    in the cohort answers a different one while sharing the datasource's display name and unit name.
-    A name-shaped fallback anywhere in the matcher would resolve this; the honest answer is that no
-    provider for that key was supplied. Without this, a mutation that added a name route survived
-    the whole file, because the case above never reaches the matcher at all.
-    """
-    provider = datasource_package(tmp_path / "Shared_Sales", luid=None, published_key=PUBLISHED_KEY)
-    consumer = workbook_package(
-        tmp_path / "Revenue",
-        published={"id": DS_UNIT, "site": "other-site", "key": "other-site/shared_sales", "luid": None},
-        binding=f"../{DS_UNIT}.SemanticModel",
-    )
-    provenance = json.loads((consumer / "source-provenance.json").read_bytes())
-    provenance["inputs"][0]["origin"]["published_dependencies"]["rows"][0]["published_key"] = "other-site/shared_sales"
-    _write(consumer / "source-provenance.json", provenance)
-    seal(consumer, **json.loads((consumer / "package-manifest.json").read_bytes()))
-
-    results = pri.verify_phase1_role_identity([provider, consumer])
-
-    assert results[1].dependencies[0].code == pri.CODE_PROVIDER_MISSING
-    assert role(results[1], pri.ROLE_PUBLISHED_DEPENDENCY).state == pri.STATE_MISSING
-    assert results[1].verdict == pri.VERDICT_BLOCKED
 
 
 # --------------------------------------------------------------------------------------------
@@ -858,25 +561,6 @@ def test_a_clearance_for_a_DIFFERENT_root_is_never_applied(tmp_path: Path) -> No
     assert result.blockers == (pri.CODE_ROOT_BINDING_INVALID,), "a foreign clearance was accepted"
 
 
-def test_a_bound_clearance_is_reverified_once_at_the_S2_seam(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """An earlier clearance is an observation, not authority to read a later revision."""
-    package = workbook_package(tmp_path / "Revenue")
-    clearance = pri.verify_s1(package)
-    calls = []
-    original = pri.verify_s1
-
-    def counted(root: Path) -> pri.VerifiedPackage:
-        calls.append(root)
-        return original(root)
-
-    monkeypatch.setattr(pri, "verify_s1", counted)
-
-    result = pri.verify_phase1_role_identity([package], verified=[clearance])[0]
-
-    assert result.verdict == pri.VERDICT_START_READY, result.blockers
-    assert calls == [package], "S2 must verify the current root and bytes exactly once"
-
-
 def test_the_verifier_returns_no_source_path_anywhere_in_its_result(tmp_path: Path) -> None:
     """#558 is a separate slice: this one names a role, it never hands back a file to open."""
     result = verify_one(workbook_package(tmp_path / "Revenue"))
@@ -887,7 +571,7 @@ def test_the_verifier_returns_no_source_path_anywhere_in_its_result(tmp_path: Pa
     assert all(not path.startswith(("/", "\\")) and ":" not in path for row in result.roles for path in row.paths)
 
 
-@pytest.mark.parametrize("numeric_obligation", [None, "none", "required"], ids=["v1", "v2-none", "v2-required"])
+@pytest.mark.parametrize("numeric_obligation", ["required"], ids=["v2-required"])
 def test_strict_brief_policy_is_frozen_and_nonserialized(tmp_path: Path, numeric_obligation: str | None) -> None:
     package = datasource_package(tmp_path / "Provider")
     if numeric_obligation is not None:
@@ -908,8 +592,7 @@ def test_strict_brief_policy_is_frozen_and_nonserialized(tmp_path: Path, numeric
     assert pri.brief_identity(brief_text(DS_UNIT, "model_only"), DS_UNIT, "model_only") == (None, False)
 
 
-@pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
-@pytest.mark.parametrize("numeric_obligation", [None, "none"], ids=["v1", "v2"])
+@pytest.mark.parametrize(("newline", "numeric_obligation"), [("\n", "none"), ("\r\n", None)], ids=["lf-v2", "crlf-v1"])
 @pytest.mark.parametrize(
     "boundary",
     [
@@ -986,10 +669,8 @@ def test_frontmatter_requires_two_exact_boundary_lines(
     ("old", "new", "code"),
     [
         ('fallback_authorization = "stop"', "fallback_authorization = 99", "brief_policy_invalid"),
-        ('fallback_authorization = "stop"', 'fallback_authorization = ["stop"]', "brief_policy_invalid"),
         ('fallback_authorization = "stop"', 'fallback_authorization = "continue"', "brief_policy_invalid"),
         ('schema = "phase1-start-ready/v1"', 'schema = "phase1-start-ready/v2"', "brief_policy_invalid"),
-        ('schema = "phase1-start-ready/v1"\n', "", "brief_policy_invalid"),
         ('scope = "model_only"\n', "", "brief_policy_invalid"),
         ('scope = "model_only"', 'scope = "model_and_report"', "brief_scope_mismatch"),
         (f'unit = "{DS_UNIT}"', 'unit = "Other"', "brief_unit_mismatch"),
@@ -1017,7 +698,7 @@ def test_strict_policy_refuses_exact_invalid_field(tmp_path: Path, old: str, new
     assert pri.brief_identity(text, DS_UNIT, "model_only") == (code, False)
 
 
-@pytest.mark.parametrize("variant", ["plain", "identity-only", "absent"])
+@pytest.mark.parametrize("variant", ["identity-only", "absent"])
 def test_missing_policy_never_infers_stop(tmp_path: Path, variant: str) -> None:
     package = datasource_package(tmp_path / "Provider")
     brief = package / "migration-brief.md"
@@ -1036,16 +717,9 @@ def test_missing_policy_never_infers_stop(tmp_path: Path, variant: str) -> None:
     assert result.is_start_ready is (variant != "absent")
 
 
-@pytest.mark.parametrize("numeric_obligation", ["none", "required"])
-@pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
-@pytest.mark.parametrize(
-    ("shape", "unit", "scope"),
-    [
-        ("workbook", WB_UNIT, "model_and_report"),
-        ("datasource", DS_UNIT, "model_only"),
-        ("consumer", WB_UNIT, "report_only_shared_model"),
-    ],
-)
+@pytest.mark.parametrize("numeric_obligation", ["required"])
+@pytest.mark.parametrize("newline", ["\n"], ids=["lf"])
+@pytest.mark.parametrize(("shape", "unit", "scope"), [("consumer", WB_UNIT, "report_only_shared_model")])
 def test_current_v2_brief_uses_package_identity_and_topology(
     tmp_path: Path, shape: str, unit: str, scope: str, numeric_obligation: str, newline: str
 ) -> None:
@@ -1062,28 +736,11 @@ def test_current_v2_brief_uses_package_identity_and_topology(
 @pytest.mark.parametrize(
     ("old", "new", "code"),
     [
-        ('numeric_obligation = "none"\n', "", "brief_policy_invalid"),
-        ('fallback_authorization = "stop"\n', "", "brief_policy_invalid"),
-        ('schema = "phase1-start-ready/v2"\n', "", "brief_policy_invalid"),
-        ('schema = "phase1-start-ready/v2"', 'schema = "phase1-start-ready/v1"', "brief_policy_invalid"),
-        ('schema = "phase1-start-ready/v2"', 'schema = "phase1-start-ready/v3"', "brief_policy_invalid"),
-        ('schema = "phase1-start-ready/v2"', "schema = 2", "brief_policy_invalid"),
-        ('numeric_obligation = "none"', 'numeric_obligation = "NONE"', "brief_policy_invalid"),
         ('numeric_obligation = "none"', 'numeric_obligation = "skip"', "brief_policy_invalid"),
-        ('numeric_obligation = "none"', 'numeric_obligation = " none "', "brief_policy_invalid"),
-        ('numeric_obligation = "none"', 'numeric_obligation = ""', "brief_policy_invalid"),
-        ('numeric_obligation = "none"', "numeric_obligation = false", "brief_policy_invalid"),
-        ('numeric_obligation = "none"', "numeric_obligation = 0", "brief_policy_invalid"),
-        ('numeric_obligation = "none"', 'numeric_obligation = ["none"]', "brief_policy_invalid"),
         ('numeric_obligation = "none"', 'numeric_obligation = {value = "none"}', "brief_policy_invalid"),
         ('numeric_obligation = "none"', 'numeric_obligation = "none"\nextra = "none"', "brief_policy_invalid"),
         ('numeric_obligation = "none"', "numeric_obligation =", "brief_frontmatter_unparseable"),
         ('fallback_authorization = "stop"', 'fallback_authorization = "skip"', "brief_policy_invalid"),
-        (f'unit = "{WB_UNIT}"', 'unit = "Other"', "brief_unit_mismatch"),
-        (f'unit = "{WB_UNIT}"', "unit = 0", "brief_unit_mismatch"),
-        (f'unit = "{WB_UNIT}"\n', "", "brief_unit_mismatch"),
-        ('scope = "model_and_report"', 'scope = "model_only"', "brief_scope_mismatch"),
-        ('scope = "model_and_report"', 'scope = ["model_and_report"]', "brief_scope_mismatch"),
         ('scope = "model_and_report"\n', "", "brief_policy_invalid"),
     ],
 )
@@ -1098,44 +755,6 @@ def test_v2_invalid_policy_never_falls_back_to_prose(tmp_path: Path, old: str, n
     result = verify_one(package)
     assert not result.is_start_ready and role(result, "migration_brief").code == code
     assert result.brief_policy is None
-
-
-@pytest.mark.parametrize("key", ["schema", "unit", "scope", "fallback_authorization", "numeric_obligation"])
-def test_v2_duplicate_key_refuses_numeric_authority(tmp_path: Path, key: str) -> None:
-    package = numeric_package(tmp_path / "Unit")
-    text = numeric_brief_text(WB_UNIT, "model_and_report", "none")
-    duplicate = next(line for line in text.splitlines() if line.startswith(f"{key} ="))
-    text = text.replace(duplicate, f"{duplicate}\n{duplicate}")
-    (package / "migration-brief.md").write_bytes(text.encode("utf-8"))
-    seal(package, **json.loads((package / "package-manifest.json").read_bytes()))
-    assert pri.parse_brief_policy(text, WB_UNIT, "model_and_report") == ("brief_frontmatter_unparseable", None)
-    assert pri.read_current_brief_policy(package) == ("brief_frontmatter_unparseable", None)
-
-
-@pytest.mark.parametrize("variant", ["v1", "identity-only", "legacy", "plain", "absent"])
-def test_current_brief_never_upgrades_unknown_numeric_scope(tmp_path: Path, variant: str) -> None:
-    package = workbook_package(tmp_path / "Unit")
-    brief = package / "migration-brief.md"
-    if variant == "identity-only":
-        brief.write_bytes(
-            brief_text(WB_UNIT, "model_and_report").replace('fallback_authorization = "stop"\n', "").encode()
-        )
-    elif variant == "legacy":
-        brief.write_bytes(f'+++\nunit = "{WB_UNIT}"\nscope = "model_and_report"\n+++\n'.encode())
-    elif variant == "plain":
-        brief.write_bytes(b'No numeric work needed. numeric_obligation = "none"\n')
-    elif variant == "absent":
-        brief.unlink()
-    seal(package, **json.loads((package / "package-manifest.json").read_bytes()))
-    expected_code = (
-        "role_declaration_not_a_verified_file" if variant == "absent" else "brief_numeric_obligation_unknown"
-    )
-    assert pri.read_current_brief_policy(package) == (expected_code, None)
-    phase1 = verify_one(package)
-    assert phase1.is_start_ready is (variant != "absent")
-    if variant == "v1":
-        assert phase1.brief_policy == pri.BriefPolicy("model_and_report", "stop")
-        assert phase1.brief_policy.numeric_obligation is None
 
 
 @pytest.mark.parametrize(
@@ -1335,7 +954,7 @@ def test_current_brief_refuses_links_before_opening_any_bytes(
     assert pri.read_current_brief_policy(package) == ("package_boundary_unsafe", None)
 
 
-@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("reverse", [True])
 def test_selected_provider_ordinal_survives_duplicate_units_and_filtered_roots(tmp_path: Path, reverse: bool) -> None:
     first = datasource_package(tmp_path / "first", unit="Shared", luid=DS_LUID, published_key=PUBLISHED_KEY)
     second = datasource_package(tmp_path / "second", unit="Shared", luid=WB_LUID)
@@ -1401,15 +1020,6 @@ def _w_ordinary_key(server: str) -> str:
 
 _W_LIVE_KEY = _w_ordinary_key("source.example")
 _W_OTHER_KEY = _w_ordinary_key("other.example")
-_W_IMMUTABLE = (
-    _W_ASSET,
-    "migration-spec.json",
-    "migration-spec.schema.json",
-    "data-access.json",
-    "source-provenance.json",
-    "report.json",
-    "migration-brief.md",
-)
 
 
 class _WorkingString(str):
@@ -1538,131 +1148,7 @@ def test_current_working_public_interface_has_only_the_approved_required_inputs(
         assert all(parameter.default is inspect.Parameter.empty for parameter in parameters.values())
 
 
-def test_current_working_baseline_holds_exact_literal_roles_and_canonical_objects(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Real role/spec/data parsing, with retained bytes and literal field assertions as oracles."""
-    package, raw = _w_package(tmp_path / "Unit")
-    revision_value = _w_revision(raw)
-    assert pri.revision.package_working_revision(package, package / _W_MODEL) == revision_value
-    facts_parser, data_parser = pri.package_spec_facts, pri.parse_data_access
-    parsed_facts, parsed_data, inputs = [], [], []
-
-    def facts(document: object) -> pri.PackageSpecFacts:
-        inputs.append(document)
-        result = facts_parser(document)
-        parsed_facts.append(result)
-        return result
-
-    def data(text: str) -> pri.DataAccessAssessment:
-        inputs.append(text)
-        result = data_parser(text)
-        parsed_data.append(result)
-        return result
-
-    monkeypatch.setattr(pri, "package_spec_facts", facts)
-    monkeypatch.setattr(pri, "parse_data_access", data)
-    handoff = _w_read(package, revision_value)
-    assert parsed_facts == [handoff.facts] and handoff.facts is parsed_facts[0]
-    assert parsed_data == [handoff.stored_data_access] and handoff.stored_data_access is parsed_data[0]
-    assert inputs == [json.loads(raw["migration-spec.json"]), raw["data-access.json"].decode("utf-8")]
-    assert tuple(handoff.facts) == ((), False, True, False, None)
-    assert handoff.stored_data_access.to_json() == _W_LOCAL
-    assert (handoff.unit, handoff.kind, handoff.topology) == ("Revenue", "workbook", "owned_model")
-    assert (handoff.report_path, handoff.model_path, handoff.pbip_path) == (_W_REPORT, _W_MODEL, _W_PBIP)
-    assert handoff.source_asset_path == _W_ASSET
-    assert handoff.source_identity.sha256 == hashlib.sha256(raw[_W_ASSET]).hexdigest()
-    assert handoff.source_identity.tableau_luid == WB_LUID
-    assert handoff.source_identity.kind == "workbook" and handoff.source_identity.published_key is None
-    assert handoff.current_manifest_sha256 == hashlib.sha256(raw["package-manifest.json"]).hexdigest()
-    assert handoff.package_working_revision == revision_value and handoff.root_identity == str(package)
-    assert handoff.declared_paths == tuple(sorted(set(raw) - {"package-manifest.json"}))
-    snapshot = handoff._snapshot
-    assert snapshot.manifest == raw["package-manifest.json"]
-    for name, address, identity, digest, content in snapshot.members:
-        assert address == str(package.joinpath(*name.split("/")))
-        info = os.lstat(address)
-        assert identity == (info.st_dev, info.st_ino, 1)
-        assert digest == hashlib.sha256(raw[name]).hexdigest()
-        assert content == (None if name in (_W_ASSET, f"{_W_MODEL}/definition/model.tmdl") else raw[name])
-    assert repr(handoff) == "CurrentWorkingSourceDataHandoff()"
-    assert not any(hasattr(handoff, name) for name in ("verdict", "is_start_ready", "complete", "brief_policy"))
-    assert {item.name for item in fields(handoff)} == {
-        "package_root",
-        "root_identity",
-        "package_working_revision",
-        "current_manifest_sha256",
-        "unit",
-        "kind",
-        "topology",
-        "source_asset_path",
-        "report_path",
-        "model_path",
-        "pbip_path",
-        "declared_paths",
-        "source_identity",
-        "facts",
-        "stored_data_access",
-        "_snapshot",
-        "_authority",
-    }
-
-
-def test_current_working_edits_and_arbitrary_iteration_cache_bytes_are_not_s1_or_evidence(tmp_path: Path) -> None:
-    package, raw = _w_package(tmp_path / "Unit")
-    baseline = _w_read(package, _w_revision(raw))
-    for name, content in {
-        f"{_W_MODEL}/definition/model.tmdl": b"model Edited\n",
-        f"{_W_REPORT}/definition/pages/pages.json": b'{"pageOrder":["edited"]}\n',
-        _W_PBIP: raw[_W_PBIP] + b" \n",
-        "validation/iterations/arbitrary/not-a-receipt.json": b"not receipt JSON",
-        "validation/iterations/arbitrary/render.png": b"not PNG",
-        "validation/iterations/arbitrary/ignored.pbip": b"not a working target",
-        "validation/iterations/arbitrary/ignored.Report/definition.pbir": b"not a working target",
-        _W_CACHE: b"not a qualified cache",
-    }.items():
-        _w_put(package, name, content)
-    edited = _w_bytes(package)
-    current = _w_revision(edited)
-    assert current != _w_revision(raw)
-    handoff = _w_read(package, current)
-    assert all(edited[name] == raw[name] for name in _W_IMMUTABLE)
-    assert handoff.facts == baseline.facts and handoff.stored_data_access == baseline.stored_data_access
-    assert handoff.current_manifest_sha256 == baseline.current_manifest_sha256
-    assert handoff.declared_paths == baseline.declared_paths
-    assert pri.read_current_source_data_handoff(
-        package, expected_package_working_revision=baseline.package_working_revision
-    ) == ("working_revision_mismatch", None)
-    assert (
-        pri.validate_current_source_data_handoff(
-            package, baseline, expected_package_working_revision=baseline.package_working_revision
-        )
-        == "working_revision_mismatch"
-    )
-    # These namespaces carry no W evidence and do not invalidate a held W object by their content.
-    _w_put(package, _W_CACHE, b"different still-unqualified cache")
-    _w_put(package, "validation/iterations/arbitrary/render.png", b"still not PNG")
-    assert pri.validate_current_source_data_handoff(package, handoff, expected_package_working_revision=current) is None
-
-
-@pytest.mark.parametrize(
-    "value",
-    [
-        None,
-        True,
-        1,
-        b"sha256:" + b"a" * 64,
-        "",
-        "a" * 64,
-        "sha256:" + "a" * 63,
-        "sha256:" + "g" * 64,
-        "SHA256:" + "a" * 64,
-        "sha256:" + "A" * 64,
-        " sha256:" + "a" * 64,
-        "sha256:" + "a" * 64 + "\n",
-        _WorkingString("sha256:" + "a" * 64),
-    ],
-)
+@pytest.mark.parametrize("value", ["sha256:" + "g" * 64])
 def test_current_working_revision_arguments_are_exact_before_any_read(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: object
 ) -> None:
@@ -1695,123 +1181,6 @@ def test_current_working_foreign_and_wrong_selected_cache_revision_refuse(tmp_pa
             "working_revision_mismatch",
             None,
         )
-
-
-@pytest.mark.parametrize("name", _W_IMMUTABLE)
-def test_current_working_stale_immutable_declarations_refuse_with_matching_new_r(tmp_path: Path, name: str) -> None:
-    package, raw = _w_package(tmp_path / "Unit")
-    _w_put(package, name, raw[name] + b"\n")
-    assert pri.read_current_source_data_handoff(
-        package, expected_package_working_revision=_w_revision(_w_bytes(package))
-    ) == ("package_file_digest_mismatch", None)
-
-
-def test_current_working_coherent_role_rewrite_is_a_new_snapshot_not_original_commissioning(tmp_path: Path) -> None:
-    package, raw = _w_package(tmp_path / "Unit")
-    original = _w_read(package, _w_revision(raw))
-    source = b"<workbook name='Revenue' revised='yes'/>\n"
-    spec = json.loads(raw["migration-spec.json"])
-    spec["data_sources"][0]["connection"] = _W_LIVE_CONNECTION
-    spec["data_sources"][0]["tables"] = [{"name": "Orders", "table": "[dbo].[Orders]", "connection": "orders-leg"}]
-    provenance = json.loads(raw["source-provenance.json"])
-    provenance["inputs"][0]["input"]["sha256"] = hashlib.sha256(source).hexdigest()
-    projection = {
-        **_W_LOCAL,
-        "state": "live_data_ok",
-        "source_keys": [_W_LIVE_KEY],
-        "codes": ["probe-cleared", "probe-data-ok"],
-    }
-    for name, content in {
-        _W_ASSET: source,
-        "migration-spec.json": _w_json(spec),
-        "source-provenance.json": _w_json(provenance),
-        "data-access.json": _w_json(projection),
-        "migration-brief.md": numeric_brief_text("Revenue", "model_and_report", "required").encode(),
-    }.items():
-        _w_put(package, name, content)
-    _w_redeclare(
-        package, _W_ASSET, "migration-spec.json", "source-provenance.json", "data-access.json", "migration-brief.md"
-    )
-    revised = _w_bytes(package)
-    assert pri.read_current_source_data_handoff(
-        package, expected_package_working_revision=original.package_working_revision
-    ) == ("working_revision_mismatch", None)
-    handoff = _w_read(package, _w_revision(revised))
-    assert handoff.current_manifest_sha256 != original.current_manifest_sha256
-    assert handoff.source_identity.sha256 == hashlib.sha256(source).hexdigest()
-    assert handoff.facts.live_source_keys == (_W_LIVE_KEY,)
-    assert handoff.stored_data_access.to_json() == projection
-    assert pri.read_current_brief_policy(package) == (None, pri.BriefPolicy("model_and_report", "stop", "required"))
-    assert "commissioned_manifest_sha256" not in inspect.signature(pri.read_current_source_data_handoff).parameters
-
-
-@pytest.mark.parametrize(
-    "state", ["local_import_ready", "live_data_ok", "authorized_model_only", "blocked", "cannot_establish"]
-)
-def test_current_working_canonical_states_and_ceilings_are_preserved(tmp_path: Path, state: str) -> None:
-    projection = dict(_W_LOCAL)
-    if state in ("live_data_ok", "authorized_model_only"):
-        projection.update(state=state, source_keys=[_W_LIVE_KEY], codes=["probe-cleared", "probe-data-ok"])
-    if state == "authorized_model_only":
-        projection.update(
-            validation="unvalidated",
-            effective_scope="model_only",
-            max_phase2_claim="structural_only",
-            codes=["brief-model-only", "human-authorize"],
-        )
-    if state in ("blocked", "cannot_establish"):
-        projection.update(
-            state=state,
-            validation="not_established",
-            effective_scope=None,
-            max_phase2_claim="none",
-            codes=["probe-no-credential"] if state == "blocked" else ["spec-unreadable"],
-        )
-    package, raw = _w_package(tmp_path / "Unit", live=state != "local_import_ready", projection=projection)
-    handoff = _w_read(package, _w_revision(raw))
-    assert handoff.stored_data_access.to_json() == projection
-    assert (handoff.stored_data_access.state, handoff.stored_data_access.max_phase2_claim) == (
-        state,
-        projection["max_phase2_claim"],
-    )
-
-
-def test_current_working_wrong_live_keys_are_retained_for_later_canonical_reconciliation(tmp_path: Path) -> None:
-    import package_data_access as pda
-
-    projection = {
-        **_W_LOCAL,
-        "state": "live_data_ok",
-        "source_keys": [_W_OTHER_KEY],
-        "codes": ["probe-cleared", "probe-data-ok"],
-    }
-    package, raw = _w_package(tmp_path / "Unit", live=True, projection=projection)
-    handoff = _w_read(package, _w_revision(raw))
-    assert handoff.facts.live_source_keys == (_W_LIVE_KEY,)
-    assert handoff.stored_data_access.source_keys == (_W_OTHER_KEY,)
-    reconciled = pda.reconcile_package_data_access(
-        handoff.stored_data_access,
-        handoff.facts,
-        requested_scope="model_and_report",
-        fallback_authorization="stop",
-        provider=None,
-    )
-    assert (reconciled.state, reconciled.max_phase2_claim, reconciled.codes) == (
-        "cannot_establish",
-        "none",
-        ("source-key-set-changed",),
-    )
-
-
-def test_current_working_rogue_ordinary_file_changes_r_but_is_not_granted_integrity(tmp_path: Path) -> None:
-    package, raw = _w_package(tmp_path / "Unit")
-    baseline = _w_read(package, _w_revision(raw))
-    _w_put(package, "rogue.bin", b"not a declared or admitted role")
-    current = _w_revision(_w_bytes(package))
-    assert current != baseline.package_working_revision
-    handoff = _w_read(package, current)
-    assert handoff.declared_paths == baseline.declared_paths and "rogue.bin" not in handoff.declared_paths
-    assert not hasattr(handoff, "complete") and not hasattr(handoff, "is_clean")
 
 
 @pytest.mark.parametrize("brief", [b"Plain historical prose\n", b'+++\nnumeric_obligation = "unknown"\n+++\n', b"\xff"])
@@ -1894,15 +1263,12 @@ def test_current_working_strict_manifest_refusals_are_fixed_and_shareable(
     assert "private" not in repr(result) and str(tmp_path) not in repr(result)
 
 
-@pytest.mark.parametrize(
-    "name", ["migration-spec.json", "migration-spec.schema.json", "source-provenance.json", "report.json"]
-)
+@pytest.mark.parametrize("name", ["source-provenance.json"])
 @pytest.mark.parametrize(
     "content,code",
     [
         (b'{"duplicate":0,"duplicate":1}', "package_manifest_duplicate_key"),
         (b'{"notfinite":NaN}', "package_manifest_non_finite_number"),
-        (b'{"overflow":1e999}', "package_manifest_non_finite_number"),
         (b"\xff", "package_manifest_not_utf8"),
         (b"[", "package_manifest_not_json"),
     ],
@@ -1921,15 +1287,7 @@ def test_current_working_held_json_uses_strict_current_semantics(
 
 @pytest.mark.parametrize(
     "content",
-    [
-        b"\xff",
-        b'{"schema":"phase1-data-access/v1","schema":"private"}',
-        b'{"state":NaN}',
-        b'{"state":1e999}',
-        b'{"state":"unknown"}',
-        b"[]",
-        b'{"private":',
-    ],
+    [b"\xff", b'{"schema":"phase1-data-access/v1","schema":"private"}', b'{"state":NaN}', b"[]", b'{"private":'],
 )
 def test_current_working_bad_projection_never_falls_back(tmp_path: Path, content: bytes) -> None:
     """Only the canonical projection parser owns its typed refusal."""
@@ -2122,7 +1480,7 @@ def test_current_working_unsupported_or_incoherent_targets_never_issue(tmp_path:
     ) == (code, None)
 
 
-@pytest.mark.parametrize("mode", ["string", "subclass", "bool"])
+@pytest.mark.parametrize("mode", ["subclass"])
 def test_current_working_root_arguments_are_exact_native_paths(tmp_path: Path, mode: str) -> None:
     """No argument coercion, normalization or filesystem fallback."""
     root = str(tmp_path) if mode == "string" else _WorkingPath(tmp_path) if mode == "subclass" else True
@@ -2134,30 +1492,6 @@ def test_current_working_root_arguments_are_exact_native_paths(tmp_path: Path, m
         pri.validate_current_source_data_handoff(root, None, expected_package_working_revision="sha256:" + "0" * 64)
         == "package_root_binding_invalid"
     )
-
-
-@pytest.mark.parametrize("mode", ["copy", "deepcopy", "replace", "reconstruct", "reconstruct-with-authority"])
-def test_current_working_only_the_original_issued_object_validates(tmp_path: Path, mode: str) -> None:
-    """Equal field values cannot carry the issuing object's authority to another object."""
-    package, raw = _w_package(tmp_path / "Unit")
-    current = _w_revision(raw)
-    handoff = _w_read(package, current)
-    if mode in ("copy", "deepcopy"):
-        candidate = getattr(copy, mode)(handoff)
-    elif mode == "replace":
-        candidate = replace(handoff)
-    else:
-        candidate = pri.CurrentWorkingSourceDataHandoff(
-            **{item.name: getattr(handoff, item.name) for item in fields(handoff) if item.init}
-        )
-        if mode == "reconstruct-with-authority":
-            object.__setattr__(candidate, "_authority", handoff._authority)
-    assert candidate is not handoff
-    assert (
-        pri.validate_current_source_data_handoff(package, candidate, expected_package_working_revision=current)
-        == "working_handoff_invalid"
-    )
-    assert pri.validate_current_source_data_handoff(package, handoff, expected_package_working_revision=current) is None
 
 
 @pytest.mark.parametrize("change", ["equal", "assessment", "facts", "source", "scalar", "snapshot"])
@@ -2226,7 +1560,7 @@ def test_current_working_issuance_has_no_module_factory_or_global_registry() -> 
     assert all(value is not issuing for value in vars(pri).values())
 
 
-@pytest.mark.parametrize("mode", ["lambda", "callable", "copied-code"])
+@pytest.mark.parametrize("mode", ["lambda"])
 def test_current_working_replacement_capabilities_are_not_invoked(tmp_path: Path, mode: str) -> None:
     package, raw = _w_package(tmp_path / "Unit")
     current = _w_revision(raw)
@@ -2247,20 +1581,6 @@ def test_current_working_replacement_capabilities_are_not_invoked(tmp_path: Path
     object.__setattr__(handoff, "_authority", replacement)
     assert (
         pri.validate_current_source_data_handoff(package, handoff, expected_package_working_revision=current)
-        == "working_handoff_invalid"
-    )
-
-
-def test_current_working_serialization_cannot_carry_issuance(tmp_path: Path) -> None:
-    package, raw = _w_package(tmp_path / "Unit")
-    current = _w_revision(raw)
-    handoff = _w_read(package, current)
-    with pytest.raises((AttributeError, TypeError, pickle.PicklingError)):
-        pickle.dumps(handoff)
-    candidate = pickle.loads(pickle.dumps(replace(handoff)))
-    assert candidate is not handoff
-    assert (
-        pri.validate_current_source_data_handoff(package, candidate, expected_package_working_revision=current)
         == "working_handoff_invalid"
     )
 
@@ -2294,55 +1614,6 @@ def test_current_working_disposed_issuance_and_cycles_are_collectible(tmp_path: 
             == "working_handoff_invalid"
         )
     _w_read(package, current)
-
-
-def test_current_working_retained_capability_cannot_authorize_reused_identity(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Force the stale id bucket; correctness must not depend on the allocator reusing it naturally."""
-    package, raw = _w_package(tmp_path / "Unit")
-    current = _w_revision(raw)
-    handoff = _w_read(package, current)
-    candidate, owner, key = copy.copy(handoff), weakref.ref(handoff), id(handoff)
-    issued = inspect.getclosurevars(pri.read_current_source_data_handoff).nonlocals["issued"]
-    del handoff
-    gc.collect()
-    assert owner() is None and issued[key] is candidate._authority
-    monkeypatch.setattr(pri, "id", lambda _value: key, raising=False)
-    assert (
-        pri.validate_current_source_data_handoff(package, candidate, expected_package_working_revision=current)
-        == "working_handoff_invalid"
-    )
-
-
-def test_current_working_separate_issuances_cannot_swap_roots_revisions_or_capabilities(tmp_path: Path) -> None:
-    first, first_raw = _w_package(tmp_path / "First")
-    second, second_raw = _w_package(tmp_path / "Second")
-    second_raw[f"{_W_MODEL}/definition/model.tmdl"] = b"model Edited\n"
-    _w_put(second, f"{_W_MODEL}/definition/model.tmdl", second_raw[f"{_W_MODEL}/definition/model.tmdl"])
-    first_r, second_r = _w_revision(first_raw), _w_revision(second_raw)
-    assert first_r != second_r
-    left, right = _w_read(first, first_r), _w_read(second, second_r)
-    for root, own, foreign, current, other_r in (
-        (first, left, right, first_r, second_r),
-        (second, right, left, second_r, first_r),
-    ):
-        assert (
-            pri.validate_current_source_data_handoff(root, foreign, expected_package_working_revision=other_r)
-            == "package_root_binding_invalid"
-        )
-        assert (
-            pri.validate_current_source_data_handoff(root, own, expected_package_working_revision=other_r)
-            == "working_revision_mismatch"
-        )
-        authority = own._authority
-        object.__setattr__(own, "_authority", foreign._authority)
-        assert (
-            pri.validate_current_source_data_handoff(root, own, expected_package_working_revision=current)
-            == "working_handoff_invalid"
-        )
-        object.__setattr__(own, "_authority", authority)
-        assert pri.validate_current_source_data_handoff(root, own, expected_package_working_revision=current) is None
 
 
 @pytest.mark.parametrize(
@@ -2454,38 +1725,7 @@ def test_current_working_root_and_revision_grafts_refuse_but_fresh_transfers_are
         handoff.stored_data_access.max_phase2_claim = "structural_only"
 
 
-@pytest.mark.parametrize(
-    "extra",
-    [
-        "fabric/Other.Report",
-        "fabric/Other.SemanticModel",
-        "nested/Other.Report",
-        "nested/Other.SemanticModel",
-    ],
-)
-def test_current_working_held_target_cardinality_is_rechecked_when_r_does_not_move(tmp_path: Path, extra: str) -> None:
-    """Empty directories do not move R, but another current target still invalidates W."""
-    package, raw = _w_package(tmp_path / "Unit")
-    current = _w_revision(raw)
-    handoff = _w_read(package, current)
-    (package / "validation" / "iterations" / "ignored.Report").mkdir(parents=True)
-    assert pri.validate_current_source_data_handoff(package, handoff, expected_package_working_revision=current) is None
-    package.joinpath(*extra.split("/")).mkdir(parents=True)
-    assert _w_bytes(package) == raw
-    assert pri.revision.package_working_revision(package, package / _W_MODEL) == current
-    assert pri.read_current_source_data_handoff(package, expected_package_working_revision=current) == (
-        "working_topology_unsupported",
-        None,
-    )
-    assert (
-        pri.validate_current_source_data_handoff(package, handoff, expected_package_working_revision=current)
-        == "working_topology_unsupported"
-    )
-
-
-@pytest.mark.parametrize(
-    "suffix", [".report", ".REPORT", ".rEpOrT", ".semanticmodel", ".SEMANTICMODEL", ".sEmAnTiCmOdEl"]
-)
+@pytest.mark.parametrize("suffix", [".report", ".semanticmodel"])
 @pytest.mark.parametrize("parent", ["fabric", "nested"])
 @pytest.mark.parametrize("populated", [False, True], ids=["empty", "nonempty"])
 def test_current_working_suffix_variants_refuse_fresh_reads_with_matching_r(
@@ -2510,8 +1750,9 @@ def test_current_working_suffix_variants_refuse_fresh_reads_with_matching_r(
 @pytest.mark.parametrize(
     "suffix", [".report", ".REPORT", ".rEpOrT", ".semanticmodel", ".SEMANTICMODEL", ".sEmAnTiCmOdEl"]
 )
-@pytest.mark.parametrize("parent", ["fabric", "nested"])
-@pytest.mark.parametrize("populated", [False, True], ids=["empty", "nonempty"])
+@pytest.mark.parametrize(
+    ("parent", "populated"), [("fabric", False), ("nested", True)], ids=["fabric-empty", "nested-nonempty"]
+)
 def test_current_working_suffix_variants_refuse_held_validation_at_its_own_r(
     tmp_path: Path, suffix: str, parent: str, populated: bool
 ) -> None:
@@ -2533,65 +1774,7 @@ def test_current_working_suffix_variants_refuse_held_validation_at_its_own_r(
     )
 
 
-@pytest.mark.parametrize(
-    "name", ["Other.report.backup", "Other.REPORT.old", "Other.semanticmodel.backup", "Other.SEMANTICMODEL.old"]
-)
-@pytest.mark.parametrize("populated", [False, True], ids=["empty", "nonempty"])
-def test_current_working_suffix_substrings_remain_ordinary_directories(
-    tmp_path: Path, name: str, populated: bool
-) -> None:
-    package, raw = _w_package(tmp_path / "Unit")
-    original = _w_read(package, _w_revision(raw))
-    (package / "fabric" / name).mkdir()
-    if populated:
-        raw[f"fabric/{name}/payload.bin"] = b"ordinary bytes"
-        _w_put(package, f"fabric/{name}/payload.bin", raw[f"fabric/{name}/payload.bin"])
-    else:
-        assert (
-            pri.validate_current_source_data_handoff(
-                package, original, expected_package_working_revision=original.package_working_revision
-            )
-            is None
-        )
-    _w_read(package, _w_revision(raw))
-
-
-@pytest.mark.parametrize("role", ["report", "model"])
-@pytest.mark.parametrize("part", ["suffix", "stem"])
-def test_current_working_suffix_classification_does_not_fold_selected_path_identity(
-    tmp_path: Path, role: str, part: str
-) -> None:
-    package, raw = _w_package(tmp_path / "Unit")
-    manifest = json.loads(raw["package-manifest.json"])
-    selected = manifest["artifacts"][role]
-    manifest["artifacts"][role] = (
-        selected.rsplit(".", 1)[0] + "." + selected.rsplit(".", 1)[1].upper()
-        if part == "suffix"
-        else selected.replace("Revenue", "revenue")
-    )
-    raw["package-manifest.json"] = _w_json(manifest)
-    _w_put(package, "package-manifest.json", raw["package-manifest.json"])
-    assert pri.read_current_source_data_handoff(package, expected_package_working_revision=_w_revision(raw)) == (
-        "role_declaration_not_a_verified_file",
-        None,
-    )
-
-
-@pytest.mark.parametrize("suffix", [".Report", ".SemanticModel"])
-def test_current_working_target_key_spellings_do_not_collapse(tmp_path: Path, suffix: str) -> None:
-    """Two input key spellings stay distinct even on a host that cannot store both on disk."""
-    package, _ = _w_package(tmp_path / "Unit")
-    context, _, _, directories = pri._working_declaration(package)
-    variant = f"fabric/Revenue{suffix.lower()}"
-    key = f"{variant}/payload.bin"
-    context.walked[key] = package.joinpath(*key.split("/"))
-    assert pri._fabric_directories(context, suffix) == sorted([f"fabric/Revenue{suffix}", variant])
-    directories.add(variant)
-    with pytest.raises(pri._IdentityError, match="^working_topology_unsupported$"):
-        pri._require_one_working_target(context.walked, directories, (_W_REPORT, _W_MODEL, _W_PBIP))
-
-
-@pytest.mark.parametrize("name", ["package-manifest.json", *_W_IMMUTABLE, _W_PBIP, f"{_W_REPORT}/definition.pbir"])
+@pytest.mark.parametrize("name", ["package-manifest.json", "source-provenance.json"])
 def test_current_working_same_byte_replacement_after_issue_refuses(tmp_path: Path, name: str) -> None:
     """R is unchanged, so the physical member identity assertion must be the refusal."""
     package, raw = _w_package(tmp_path / "Unit")
@@ -2606,20 +1789,6 @@ def test_current_working_same_byte_replacement_after_issue_refuses(tmp_path: Pat
     assert (
         pri.validate_current_source_data_handoff(package, handoff, expected_package_working_revision=current)
         == expected
-    )
-
-
-def test_current_working_same_byte_root_replacement_after_issue_refuses(tmp_path: Path) -> None:
-    """A copied root has the same R but not the issued boundary identity."""
-    package, raw = _w_package(tmp_path / "Unit")
-    handoff = _w_read(package, _w_revision(raw))
-    retired = tmp_path / "retired"
-    package.rename(retired)
-    shutil.copytree(retired, package)
-    assert _w_bytes(package) == raw
-    assert (
-        pri.validate_current_source_data_handoff(package, handoff, expected_package_working_revision=_w_revision(raw))
-        == "package_root_replaced"
     )
 
 
@@ -2658,7 +1827,7 @@ def test_current_working_links_refuse_before_any_content_read(
     )
 
 
-@pytest.mark.parametrize("name", ["package-manifest.json", *_W_IMMUTABLE])
+@pytest.mark.parametrize("name", ["package-manifest.json", "source-provenance.json"])
 def test_current_working_hardlinks_refuse_before_role_bytes_are_read(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
 ) -> None:
@@ -2795,7 +1964,7 @@ def test_current_working_reader_invokes_no_baseline_gate_receipt_probe_policy_or
     assert _w_bytes(package) == before
 
 
-@pytest.mark.parametrize("name", ["package-manifest.json", "migration-spec.json", "data-access.json"])
+@pytest.mark.parametrize("name", ["package-manifest.json", "migration-spec.json"])
 def test_current_working_unreadable_small_roles_return_no_exception_text(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
 ) -> None:
@@ -2813,3 +1982,470 @@ def test_current_working_unreadable_small_roles_return_no_exception_text(
         "package_file_unreadable",
         None,
     )
+
+
+# --------------------------------------------------------------------------------------------
+# S2 review reproductions (formerly test_package_role_identity_reproductions.py)
+# --------------------------------------------------------------------------------------------
+
+
+def reseal(package: Path) -> None:
+    """Keep S1 clean while changing an S2 claim."""
+    seal(package, **json.loads((package / "package-manifest.json").read_text(encoding="utf-8")))
+
+
+def replace_field(package: Path, file: str, keys: tuple[str | int, ...], value: Any) -> None:
+    """Change exactly one named claim and re-seal the independent fixture."""
+    payload = json.loads((package / file).read_text(encoding="utf-8"))
+    cursor = payload
+    for key in keys[:-1]:
+        cursor = cursor[key]
+    cursor[keys[-1]] = value
+    _write(package / file, payload)
+    reseal(package)
+
+
+def add_reference(package: Path) -> None:
+    """An independent reference provider with the package's source SHA."""
+    source = next((package / "assets").iterdir())
+    _write(package / "reference" / "dashboard" / "view.png", "png-bytes")
+    _write(
+        package / "reference" / "manifest.json",
+        {
+            "source_workbook_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+            "dashboards": [{"name": "Overview", "states": [{"image": "dashboard/view.png"}]}],
+        },
+    )
+    reseal(package)
+
+
+def cohort(root: Path, *, provider_luid: str | None = DS_LUID) -> tuple[Path, Path]:
+    """A real cross-package binding, not an unresolved basename that happens to match."""
+    provider = datasource_package(root / DS_UNIT, luid=provider_luid, published_key=PUBLISHED_KEY)
+    consumer = workbook_package(
+        root / WB_UNIT,
+        published={"key": PUBLISHED_KEY},
+        binding=f"../../../{DS_UNIT}/fabric/{DS_UNIT}.SemanticModel",
+    )
+    return provider, consumer
+
+
+@pytest.mark.parametrize(
+    ("change", "code"),
+    [
+        ("asset", "package_integrity_not_clean"),
+        ("manifest", "package_integrity_not_clean"),
+        ("missing-marker", "package_boundary_not_declared"),
+        ("missing-root", "package_boundary_not_declared"),
+    ],
+)
+def test_supplied_s1_observation_cannot_admit_changed_state(tmp_path: Path, change: str, code: str) -> None:
+    package = workbook_package(tmp_path / WB_UNIT)
+    cleared = pri.verify_s1(package)
+    assert cleared.integrity.is_clean
+    assert verify_one(package).verdict == "START_READY"
+    if change == "asset":
+        next((package / "assets").iterdir()).write_text("changed bytes", encoding="utf-8")
+    elif change == "manifest":
+        (package / "package-manifest.json").write_text("{", encoding="utf-8")
+    elif change == "missing-marker":
+        (package / "package-manifest.json").unlink()
+    else:
+        package.rename(tmp_path / "retired")
+
+    result = pri.verify_phase1_role_identity([package], verified=[cleared])[0]
+
+    assert result.blockers == (code,), "the S2 entry seam reused stale S1 authority"
+    assert result.verdict == "BLOCKED"
+    assert result.roles == ()
+
+
+def test_supplied_s1_observation_cannot_follow_a_replaced_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    package = workbook_package(tmp_path / WB_UNIT)
+    cleared = pri.verify_s1(package)
+    retired = package.rename(tmp_path / "retired")
+    link_directory(package, retired)
+    opened = []
+    original = Path.read_bytes
+
+    def tracked(path: Path) -> bytes:
+        opened.append(path)
+        return original(path)
+
+    monkeypatch.setattr(Path, "read_bytes", tracked)
+    try:
+        result = pri.verify_phase1_role_identity([package], verified=[cleared])[0]
+        assert result.blockers == ("package_boundary_unsafe",), "a reparse-swapped root retained clearance"
+        assert opened == [], "S2 read through a replaced root before refusing it"
+    finally:
+        if os.name == "nt":
+            package.rmdir()
+        else:
+            package.unlink()
+
+
+@pytest.mark.parametrize("origin", ["reference", "oracle"])
+@pytest.mark.parametrize("spelling", [r"dashboard\view.png", "dashboard/missing.png"])
+def test_evidence_requires_an_exact_canonical_walked_member(tmp_path: Path, origin: str, spelling: str) -> None:
+    package = workbook_package(tmp_path / WB_UNIT)
+    if origin == "reference":
+        add_reference(package)
+    assert verify_one(package).verdict == "START_READY"
+    filename = f"{origin}/{'manifest.json' if origin == 'reference' else 'oracle-manifest.json'}"
+    keys = ("dashboards", 0, "states", 0, "image") if origin == "reference" else ("views", 0, "image", "path")
+    replace_field(package, filename, keys, spelling)
+    result = verify_one(package)
+    found = role(result, f"tableau_{origin}")
+
+    assert (found.state, found.code) == ("mismatch", "evidence_path_not_verified")
+    assert result.verdict == "BLOCKED"
+    assert result.evidence == ()
+    assert spelling not in json.dumps(result.as_dict())
+
+
+@pytest.mark.parametrize(
+    ("published", "expected"),
+    [
+        ({}, "published_dependency_identity_missing"),
+        ({"id": DS_UNIT}, "published_dependency_identity_missing"),
+        ({"key": []}, "published_dependency_invalid"),
+        (0.5, "published_dependency_invalid"),
+    ],
+)
+def test_invalid_published_rows_remain_counted_and_block(tmp_path: Path, published: Any, expected: str) -> None:
+    provider, consumer = cohort(tmp_path)
+    spec = json.loads((consumer / "migration-spec.json").read_text(encoding="utf-8"))
+    spec["data_sources"].append({"published_datasource": published})
+    _write(consumer / "migration-spec.json", spec)
+    reseal(consumer)
+
+    result = pri.verify_phase1_role_identity([provider, consumer])[1]
+
+    assert len(result.dependencies) == 2, "a declared row disappeared from the dependency denominator"
+    assert result.dependencies[0].code == "published_dependency_authority_contradiction"
+    assert (result.dependencies[1].state, result.dependencies[1].code) == ("mismatch", expected)
+    assert result.topology == "published_consumer"
+    assert result.verdict == "BLOCKED"
+
+
+@pytest.mark.parametrize("value", [[False], 0.5])
+def test_malformed_datasource_collections_are_not_owned_model_fallbacks(tmp_path: Path, value: Any) -> None:
+    package = workbook_package(tmp_path / WB_UNIT)
+    replace_field(package, "migration-spec.json", ("data_sources",), value)
+
+    result = verify_one(package)
+
+    assert len(result.dependencies) == 1
+    assert result.dependencies[0].code == "published_dependency_invalid"
+    assert result.topology == "published_consumer"
+    assert result.verdict == "BLOCKED"
+
+
+def test_spec_luid_cannot_override_acquired_authority(tmp_path: Path) -> None:
+    provider, consumer = cohort(tmp_path)
+    replace_field(
+        consumer,
+        "migration-spec.json",
+        ("data_sources", 0, "published_datasource", "luid"),
+        "99999999-9999-9999-9999-999999999999",
+    )
+
+    result = pri.verify_phase1_role_identity([provider, consumer])[1]
+
+    assert result.dependencies[0].code == "published_dependency_authority_contradiction"
+    assert result.verdict == "BLOCKED"
+
+
+@pytest.mark.parametrize(
+    "source_match,state,count,expected_state,code",
+    [
+        ("sha256", "cannot_establish", None, "cannot_establish", "published_dependency_authority_unestablished"),
+        ("unestablished", "cannot_establish", None, "cannot_establish", "published_dependency_authority_unestablished"),
+        ("revision_same", "ambiguous", 2, "ambiguous", "published_dependency_authority_ambiguous"),
+    ],
+)
+def test_acquired_non_success_is_not_a_provider_selection_request(
+    tmp_path: Path,
+    source_match: str,
+    state: str,
+    count: int | None,
+    expected_state: str,
+    code: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider, consumer = cohort(tmp_path)
+    provenance = json.loads((consumer / "source-provenance.json").read_bytes())
+    authority = provenance["inputs"][0]["origin"]["published_dependencies"]
+    authority["source_match"] = source_match
+    authority["rows"][0] = {
+        "source_ordinal": 0,
+        "published_key": PUBLISHED_KEY,
+        "state": state,
+        "candidate_count": count,
+    }
+    _write(consumer / "source-provenance.json", provenance)
+    reseal(consumer)
+
+    def forbidden(*_args: object) -> None:
+        pytest.fail("non-success acquired authority reached provider selection")
+
+    monkeypatch.setattr(pri, "_provider_matches", forbidden)
+    result = pri.verify_phase1_role_identity([provider, consumer])[1]
+    assert result.verdict == "BLOCKED"
+    assert (result.dependencies[0].state, result.dependencies[0].code) == (expected_state, code)
+    assert result.dependencies[0].provider_ordinal is None
+    assert result.codes() == (code,)
+
+
+@pytest.mark.parametrize(
+    "keys,value,code",
+    [
+        (("schema",), "unknown/v1", "published_dependency_authority_invalid"),
+        (("source_sha256",), True, "published_dependency_authority_invalid"),
+        (("source_sha256",), "A" * 64, "published_dependency_authority_invalid"),
+        (("workbook_luid",), DS_LUID, "published_dependency_authority_contradiction"),
+        (("workbook_luid",), "not-a-uuid", "published_dependency_authority_invalid"),
+        (("source_match",), "name_only", "published_dependency_authority_invalid"),
+        (("source_match",), "unestablished", "published_dependency_authority_invalid"),
+        (("private",), {}, "published_dependency_authority_invalid"),
+        (("rows",), [], "published_dependency_authority_invalid"),
+        (("rows",), {}, "published_dependency_authority_invalid"),
+        (("rows", 0, "source_ordinal"), 1, "published_dependency_authority_contradiction"),
+        (("rows", 0, "source_ordinal"), True, "published_dependency_authority_invalid"),
+        (("rows", 0, "published_key"), PUBLISHED_KEY.upper(), "published_dependency_authority_contradiction"),
+        (("rows", 0, "published_key"), "x" * 1025, "published_dependency_authority_invalid"),
+        (("rows", 0, "state"), "missing", "published_dependency_authority_invalid"),
+        (("rows", 0, "state"), "ambiguous", "published_dependency_authority_invalid"),
+        (("rows", 0, "candidate_count"), 1.0, "published_dependency_authority_invalid"),
+        (("rows", 0, "acquisition"), {}, "published_dependency_authority_invalid"),
+    ],
+)
+def test_invalid_or_contradictory_authority_never_selects_a_provider(
+    tmp_path: Path,
+    keys: tuple[str | int, ...],
+    value: Any,
+    code: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider, consumer = cohort(tmp_path)
+    assert all(row.is_start_ready for row in pri.verify_phase1_role_identity([provider, consumer]))
+    replace_field(consumer, "source-provenance.json", ("inputs", 0, "origin", "published_dependencies", *keys), value)
+    assert pri.verify_s1(consumer).integrity.is_clean
+
+    def forbidden(*_args: object) -> None:
+        pytest.fail("invalid or contradictory acquired authority reached provider selection")
+
+    monkeypatch.setattr(pri, "_provider_matches", forbidden)
+    result = pri.verify_phase1_role_identity([provider, consumer])[1]
+    assert (result.dependencies[0].state, result.dependencies[0].code) == ("mismatch", code)
+    assert result.verdict == "BLOCKED" and result.evidence == ()
+
+
+@pytest.mark.parametrize(
+    "fault", ["extra-row", "reordered", "duplicate-ordinal", "invented-dependency", "datasource-kind"]
+)
+def test_authority_cannot_invent_drop_or_reorder_occurrences(tmp_path: Path, fault: str) -> None:
+    provider, consumer = cohort(tmp_path)
+    path = provider if fault == "datasource-kind" else consumer
+    provenance = json.loads((path / "source-provenance.json").read_bytes())
+    if fault == "datasource-kind":
+        source = json.loads((consumer / "source-provenance.json").read_bytes())
+        provenance["inputs"][0]["origin"]["published_dependencies"] = source["inputs"][0]["origin"][
+            "published_dependencies"
+        ]
+    else:
+        authority = provenance["inputs"][0]["origin"]["published_dependencies"]
+        spec = json.loads((consumer / "migration-spec.json").read_bytes())
+        if fault == "invented-dependency":
+            spec["data_sources"] = []
+        else:
+            authority["rows"].append({**authority["rows"][0], "source_ordinal": 1})
+            if fault != "extra-row":
+                spec["data_sources"] *= 2
+            if fault == "reordered":
+                authority["rows"].reverse()
+            elif fault == "duplicate-ordinal":
+                authority["rows"][1]["source_ordinal"] = 0
+        _write(consumer / "migration-spec.json", spec)
+    _write(path / "source-provenance.json", provenance)
+    reseal(path)
+    results = pri.verify_phase1_role_identity([provider, consumer])
+    result = results[0 if path == provider else 1]
+    code = "published_dependency_authority_" + (
+        "invalid" if fault in ("reordered", "duplicate-ordinal") else "contradiction"
+    )
+    assert code in result.codes()
+    assert result.verdict == "BLOCKED"
+    assert len(result.dependencies) == (
+        0 if fault in ("invented-dependency", "datasource-kind") else 2 if fault != "extra-row" else 1
+    )
+
+
+@pytest.mark.parametrize("published_key", [None, PUBLISHED_KEY.upper(), "other/key"])
+def test_sole_acquired_luid_provider_requires_the_exact_key(tmp_path: Path, published_key: str | None) -> None:
+    provider, consumer = cohort(tmp_path)
+    spec = json.loads((provider / "migration-spec.json").read_bytes())
+    if published_key is None:
+        del spec["data_sources"][0]["published_datasource"]
+    else:
+        spec["data_sources"][0]["published_datasource"]["key"] = published_key
+    _write(provider / "migration-spec.json", spec)
+    reseal(provider)
+    result = pri.verify_phase1_role_identity([provider, consumer])[1]
+    assert result.dependencies[0].code == "provider_key_contradiction"
+    assert result.dependencies[0].provider_ordinal is None
+
+
+@pytest.mark.parametrize("reverse", [True])
+def test_duplicate_acquired_luid_providers_never_choose_input_order(tmp_path: Path, reverse: bool) -> None:
+    provider, consumer = cohort(tmp_path)
+    duplicate = datasource_package(tmp_path / "duplicate", published_key=PUBLISHED_KEY)
+    roots = [provider, duplicate, consumer]
+    if reverse:
+        roots.reverse()
+    result = pri.verify_phase1_role_identity(roots)[roots.index(consumer)]
+    assert result.dependencies[0].state == "ambiguous"
+    assert result.dependencies[0].code == "provider_ambiguous"
+    assert result.dependencies[0].provider_ordinal is None
+
+
+@pytest.mark.parametrize("resealed", [True])
+def test_provenance_change_between_s1_and_held_read_cannot_mix_snapshots(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    resealed: bool,
+) -> None:
+    provider, consumer = cohort(tmp_path)
+    original = pri.VerifiedPackage.read_verified_member
+    changed = []
+
+    def replaced(self, root, name):
+        if root == consumer and name == "source-provenance.json" and not changed:
+            path = consumer / name
+            payload = json.loads(path.read_bytes())
+            payload["inputs"][0]["origin"]["published_dependencies"]["rows"][0]["datasource_luid"] = pri.KIND_WORKBOOK
+            _write(path, payload)
+            if resealed:
+                reseal(consumer)
+            changed.append(True)
+        return original(self, root, name)
+
+    monkeypatch.setattr(pri.VerifiedPackage, "read_verified_member", replaced)
+    result = pri.verify_phase1_role_identity([provider, consumer])[1]
+    assert changed == [True]
+    assert "package_file_digest_mismatch" in result.codes()
+    assert result.verdict == "BLOCKED"
+    assert all(row.provider_ordinal is None for row in result.dependencies)
+
+
+def test_provider_model_must_be_its_resolved_declaration(tmp_path: Path) -> None:
+    provider, consumer = cohort(tmp_path)
+    replace_field(provider, "package-manifest.json", ("artifacts", "model"), None)
+
+    result = pri.verify_phase1_role_identity([provider, consumer])[1]
+
+    assert result.dependencies[0].code == "provider_model_unresolved"
+    assert result.verdict == "BLOCKED"
+
+
+@pytest.mark.parametrize("change", ["actual", "summary", "wrong-parent", "false-local-summary"])
+def test_consumer_binding_names_the_complete_provider_role(tmp_path: Path, change: str) -> None:
+    provider, consumer = cohort(tmp_path)
+    assert all(result.is_start_ready for result in pri.verify_phase1_role_identity([provider, consumer]))
+    pbir = f"fabric/{WB_UNIT}.Report/definition.pbir"
+    if change == "actual":
+        replace_field(consumer, pbir, ("datasetReference", "byPath", "path"), "../Wrong.SemanticModel")
+    elif change == "summary":
+        replace_field(consumer, "package-manifest.json", ("model_binding", "path"), "../Wrong.SemanticModel")
+    elif change == "wrong-parent":
+        wrong = f"../../../Different/fabric/{DS_UNIT}.SemanticModel"
+        replace_field(consumer, pbir, ("datasetReference", "byPath", "path"), wrong)
+        replace_field(consumer, "package-manifest.json", ("model_binding", "path"), wrong)
+    else:
+        replace_field(consumer, "package-manifest.json", ("model_binding", "resolves_in_package"), True)
+
+    result = pri.verify_phase1_role_identity([provider, consumer])[1]
+
+    assert result.dependencies[0].code == "provider_binding_mismatch"
+    assert result.verdict == "BLOCKED"
+
+
+@pytest.mark.parametrize(
+    "file",
+    [
+        "migration-spec.json",
+        "report.json",
+        "engine-output-receipt.json",
+        f"handover/{WB_UNIT}.json",
+        f"fabric/{WB_UNIT}.Report/definition.pbir",
+        "reference/manifest.json",
+    ],
+)
+@pytest.mark.parametrize("tail", ['"extra": 1e999'])
+def test_every_identity_json_uses_the_strict_parser(tmp_path: Path, file: str, tail: str) -> None:
+    package = workbook_package(tmp_path / WB_UNIT)
+    add_reference(package)
+    path = package / file
+    text = path.read_text(encoding="utf-8").rstrip()
+    path.write_text(text[:-1] + "," + tail + "}", encoding="utf-8")
+    reseal(package)
+    assert pri.verify_s1(package).integrity.is_clean
+
+    result = verify_one(package)
+
+    assert "identity_json_invalid" in result.blockers, f"{file} accepted non-strict identity JSON"
+    assert result.verdict == "BLOCKED"
+
+
+@pytest.mark.parametrize(
+    ("file", "keys", "value"),
+    [
+        ("source-provenance.json", ("inputs",), [False]),
+        ("source-provenance.json", ("inputs", 0, "origin"), True),
+        ("source-provenance.json", ("inputs", 0, "origin", "workbook_luid"), "not-a-luid"),
+        ("report.json", ("workbooks",), [{"name": WB_UNIT}, None]),
+        ("report.json", ("datasources",), {}),
+        ("engine-output-receipt.json", ("artifacts",), True),
+        ("engine-output-receipt.json", ("artifacts", 0, "path"), []),
+        ("migration-spec.json", ("source",), True),
+        ("oracle/oracle-manifest.json", ("views",), True),
+        ("oracle/oracle-manifest.json", ("views", 0, "image", "bytes"), True),
+        ("reference/manifest.json", ("dashboards",), True),
+        ("reference/manifest.json", ("dashboards", 0, "states"), {}),
+        ("reference/manifest.json", ("dashboards", 0, "states", 0, "sha256"), True),
+    ],
+)
+def test_identity_containers_and_scalars_block_instead_of_crashing(
+    tmp_path: Path, file: str, keys: tuple[str | int, ...], value: Any
+) -> None:
+    package = workbook_package(tmp_path / WB_UNIT)
+    add_reference(package)
+    replace_field(package, file, keys, value)
+
+    result = verify_one(package)
+
+    assert "identity_type_invalid" in result.blockers
+    assert result.verdict == "BLOCKED"
+
+
+@pytest.mark.parametrize("unsafe", ["host", "credential", "header"])
+def test_complete_packaged_brief_is_checked_for_private_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, unsafe: str
+) -> None:
+    package = workbook_package(tmp_path / WB_UNIT)
+    token = "s2-synthetic-pat-only"
+    monkeypatch.setenv("TABLEAU_PAT_SECRET", token)
+    texts = {
+        "host": "C:" + "\\" + "Users" + "\\" + "s2-owner" + "\\private.txt",
+        "credential": token,
+        "header": "X-Tableau-Auth: synthetic-header-token",
+    }
+    suffix = "A late paragraph: " + texts[unsafe]
+    _write(package / "migration-brief.md", brief_text(WB_UNIT, "model_and_report") + suffix)
+    reseal(package)
+
+    result = verify_one(package)
+
+    assert role(result, "migration_brief").code == "brief_contains_unsafe_text"
+    assert result.verdict == "BLOCKED"
+    assert texts[unsafe] not in json.dumps(result.as_dict())

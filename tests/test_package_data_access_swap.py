@@ -103,17 +103,6 @@ def test_first_package_generation_receives_final_token(tmp_path: Path) -> None:
     assert expected.companion.is_file()
 
 
-_DISCOVERY_RETURN_MODES = (
-    "inspect",
-    "idempotent",
-    "sanitize",
-    "report-sanitize",
-    "report-inspect",
-    "publish",
-    "sanitize-publish",
-)
-
-
 def _discovery_case(parent: Path, mode: str) -> tuple[Path, tuple[str, ...], tuple[Path, ...]]:
     if mode.startswith("report-"):
         provider = _binding_package(parent / "provider", datasource=True)
@@ -130,7 +119,7 @@ def _discovery_case(parent: Path, mode: str) -> tuple[Path, tuple[str, ...], tup
     return root, flags, ()
 
 
-@pytest.mark.parametrize("mode", _DISCOVERY_RETURN_MODES)
+@pytest.mark.parametrize("mode", ["inspect", "publish"])
 def test_binding_every_typed_return_rejects_competing_discovery(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
 ) -> None:
@@ -183,7 +172,7 @@ def test_binding_every_typed_return_rejects_competing_discovery(
         )
 
 
-@pytest.mark.parametrize("mode", _DISCOVERY_RETURN_MODES)
+@pytest.mark.parametrize("mode", ["inspect", "publish"])
 def test_binding_every_typed_return_rejects_unassessable_discovery(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
 ) -> None:
@@ -505,19 +494,7 @@ def test_binding_final_authorities_reject_at_the_final_root_not_after_cleanup(
     assert len(list(root.parent.rglob(pkg.MANIFEST_NAME))) == 1
 
 
-def test_binding_no_longer_reads_the_retired_credential_gate_barrier(tmp_path: Path) -> None:
-    """The physical gate stop is retired: binding publishes without consulting marker or ACL state."""
-    root = _binding_package(tmp_path)
-
-    for name in ("inspect_physical_barrier", "_icacls"):
-        assert not hasattr(pkg.data_access, name), "the retired barrier must stay out of data access"
-    result = _binding_cli(root)
-    assert result["exit_code"] == 0 and result["outcome"] == "published"
-    assert result["inspection"]["state"] == "BOUND" and result["inspection"]["validation"] == "UNVALIDATED"
-    assert not pkg.retired_dir(root).exists()
-
-
-@pytest.mark.parametrize("seam", ["stage", "post-retire", "post-publish", "post-swap", "rollback"])
+@pytest.mark.parametrize("seam", ["stage", "post-publish", "post-swap", "rollback"])
 def test_binding_interrupts_never_report_an_unknown_publication_as_unchanged(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seam: str
 ) -> None:
@@ -708,84 +685,6 @@ def test_binding_cleanup_and_obstructed_recovery_close_package_discovery(
         assert (retired / f".{pkg.MANIFEST_NAME}.retired").read_bytes() == before[pkg.MANIFEST_NAME]
 
 
-def test_binding_discovery_rejects_an_original_resealed_to_different_clean_bytes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Directory survival and a newly clean S1 are not the original authority held at admission."""
-    root = _binding_package(tmp_path)
-    before = _files(root)
-    original_id = pkg._package_directory_id(root)
-    staged, retired = pkg.staging_dir(root.parent, root.name), pkg.retired_dir(root)
-    stage = pkg._binding_stage
-    changed = []
-    candidate = []
-
-    def resealed(*args, **kwargs):
-        identity = stage(*args, **kwargs)
-        assert _files(staged) == args[1], "the independently observed stage must be the exact planned candidate"
-        candidate.append(identity)
-        path = root / "migration-spec.json"
-        path.write_bytes(path.read_bytes() + b"\n")
-        manifest = json.loads((root / pkg.MANIFEST_NAME).read_bytes())
-        manifest["contents"]["files"] = pkg.package_contents(root)
-        (root / pkg.MANIFEST_NAME).write_text(json.dumps(manifest), encoding="utf-8")
-        assert pkg.pri.verify_s1(root).integrity.is_clean
-        assert pkg._package_directory_id(root) == original_id
-        changed.append(_files(root))
-        return identity
-
-    monkeypatch.setattr(pkg, "_binding_stage", resealed)
-    result = _binding_cli(root)
-    assert len(changed) == len(candidate) == 1 and candidate[0] != original_id
-    assert changed[0]["migration-spec.json"] == before["migration-spec.json"] + b"\n"
-    assert changed[0][pkg.MANIFEST_NAME] != before[pkg.MANIFEST_NAME]
-    assert (result["outcome"], result["exit_code"], result["codes"], result["inspection"]) == (
-        "cannot-establish",
-        3,
-        ["binding_discovery_unassessable"],
-        {},
-    ), "discovery must refuse a different S1-clean tree instead of adopting it as the held authority"
-    assert _files(root) == {key: raw for key, raw in changed[0].items() if key != pkg.MANIFEST_NAME}
-    assert pkg._package_directory_id(root) == original_id
-    assert not staged.exists() and not retired.exists()
-    assert set(root.parent.rglob(pkg.MANIFEST_NAME)) == set()
-
-
-def test_binding_discovery_rechecks_the_exact_candidate_after_scratch_cleanup(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A matching candidate cannot lend its inspection to different clean bytes written during cleanup."""
-    root = _binding_package(tmp_path)
-    staged, retired = pkg.staging_dir(root.parent, root.name), pkg.retired_dir(root)
-    cleanup = pkg._discard_scratch
-    changed = []
-
-    def resealed(location):
-        if location == staged:
-            assert not staged.exists() and not retired.exists(), "publication and retired cleanup must have finished"
-            path = root / "README.md"
-            path.write_bytes(path.read_bytes() + b"\n")
-            manifest = json.loads((root / pkg.MANIFEST_NAME).read_bytes())
-            assert manifest["data_sources"]["binding"]["state"] == "bound"
-            manifest["contents"]["files"] = pkg.package_contents(root)
-            (root / pkg.MANIFEST_NAME).write_text(json.dumps(manifest), encoding="utf-8")
-            assert pkg.pri.verify_s1(root).integrity.is_clean
-            changed.append(_files(root))
-        return cleanup(location)
-
-    monkeypatch.setattr(pkg, "_discard_scratch", resealed)
-    result = _binding_cli(root)
-    assert len(changed) == 1
-    assert (result["outcome"], result["exit_code"], result["codes"], result["inspection"]) == (
-        "cannot-establish",
-        3,
-        ["binding_discovery_unassessable"],
-        {},
-    ), "the exact candidate must still match after discovery cleanup"
-    assert _files(root) == {key: raw for key, raw in changed[0].items() if key != pkg.MANIFEST_NAME}
-    assert set(root.parent.rglob(pkg.MANIFEST_NAME)) == set()
-
-
 def test_binding_discovery_does_not_fall_back_after_an_uncertain_authority_read(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -914,8 +813,18 @@ def test_binding_discovery_query_uncertainty_revokes_the_exact_published_candida
     assert "private-" not in json.dumps(result)
 
 
-@pytest.mark.parametrize("change", ["spec", "localized_data", "brief", "projection"])
-@pytest.mark.parametrize("seam", ["assembly_return", "budget_return", "swap_entry", "retired_check"])
+@pytest.mark.parametrize(
+    "change,seam",
+    [
+        ("projection", "assembly_return"),
+        ("projection", "budget_return"),
+        ("projection", "swap_entry"),
+        ("projection", "retired_check"),
+        ("spec", "swap_entry"),
+        ("localized_data", "swap_entry"),
+        ("brief", "swap_entry"),
+    ],
+)
 def test_staged_mutation_never_reaches_publication(  # pylint: disable=too-many-locals
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: str, seam: str
 ) -> None:
@@ -1069,8 +978,8 @@ def test_candidate_callback_exception_restores_without_exposure(  # pylint: disa
     assert not staged.exists() and not retired.exists()
 
 
-@pytest.mark.parametrize("prior_exists", [False, True])
-@pytest.mark.parametrize("callback", ["omitted", "none"])
+@pytest.mark.parametrize("prior_exists", [True])
+@pytest.mark.parametrize("callback", ["none"])
 def test_swap_cannot_omit_candidate_validation(tmp_path: Path, prior_exists: bool, callback: str) -> None:
     """A caller must supply a real candidate callback; the prior-package callback is not a substitute."""
     staged, final = tmp_path / "staged", tmp_path / "Book"

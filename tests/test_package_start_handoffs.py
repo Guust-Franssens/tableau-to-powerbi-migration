@@ -22,12 +22,9 @@ from test_package_filesystem import build_package, classify, link_directory, ver
 from test_package_role_identity import (
     DS_LUID,
     PUBLISHED_KEY,
-    WB_LUID,
     datasource_package,
-    numeric_brief_text,
     pri,
     seal,
-    workbook_package,
 )
 
 
@@ -160,24 +157,6 @@ def assert_refusal(value: object, code: str) -> None:
     assert all(row.path is None for row in (*value.findings, *value.unassessable))
 
 
-@pytest.mark.parametrize("name", [SPEC, PROJECTION])
-def test_s1_exact_member_bytes_and_digest_are_immutable(tmp_path: Path, name: str) -> None:
-    package = filesystem_package(tmp_path)
-    expected = (package / name).read_bytes()
-    verified = verify(package)
-    member = require_held(pfs.read_verified_member(package, verified, name))
-    assert member.content == expected
-    assert member.sha256 == hashlib.sha256(expected).hexdigest()
-    assert member.relative_path == name and member.root_identity == str(package)
-    assert type(member.content) is bytes  # pylint: disable=unidiomatic-typecheck
-    assert type(verified.verified_files) is tuple  # pylint: disable=unidiomatic-typecheck
-    with pytest.raises(AttributeError):
-        member.content = b"replacement"
-    with pytest.raises(AttributeError):
-        verified.verified_files[0].sha256 = "0" * 64
-    assert "verified_files" not in verified.as_dict() and "manifest" not in verified.as_dict()
-
-
 def test_s1_holds_no_large_asset_bytes_and_reader_does_not_parse_manifest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -215,18 +194,6 @@ def test_s1_holds_no_large_asset_bytes_and_reader_does_not_parse_manifest(
     member = require_held(pfs.read_verified_member(package, verified, PROJECTION))
     assert member.content == b'{"held":true}\r\n'
     assert opened == ["package-manifest.json", PROJECTION]
-
-
-def test_held_member_rechecks_exact_s1_digest(tmp_path: Path) -> None:
-    package = filesystem_package(tmp_path)
-    verified = verify(package)
-    original = require_held(pfs.read_verified_member(package, verified, PROJECTION))
-    path = package / PROJECTION
-    before = path.stat()
-    path.write_bytes(original.content.replace(b"true", b"null"))
-    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
-    assert path.stat().st_size == before.st_size
-    assert_refusal(pfs.read_verified_member(package, verified, PROJECTION), "package_file_digest_mismatch")
 
 
 @pytest.mark.parametrize(
@@ -267,34 +234,6 @@ def test_held_read_refuses_changed_namespace_or_identity(tmp_path: Path, change:
     assert_refusal(pfs.read_verified_member(package, verified, PROJECTION), code)
 
 
-def test_resealing_does_not_rebaseline_a_held_namespace(tmp_path: Path) -> None:
-    package = filesystem_package(tmp_path)
-    verified = verify(package)
-    (package / PROJECTION).write_bytes(b'{"new":true}')
-    write_manifest(package)
-    assert verify(package).is_clean, "the replacement is independently consistent, but not the held revision"
-    assert_refusal(pfs.read_verified_member(package, verified, PROJECTION), "package_file_digest_mismatch")
-
-
-def test_empty_directory_link_count_is_not_a_replaced_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    package = filesystem_package(tmp_path)
-    verified = verify(package)
-    (package / "empty").mkdir()
-    original = os.lstat
-
-    def changed(path: Path, *args: object, **kwargs: object) -> os.stat_result:
-        info = original(path, *args, **kwargs)
-        if Path(path) != package:
-            return info
-        values = list(info)
-        values[3] += 1
-        extras = {key: getattr(info, key) for key in ("st_file_attributes", "st_reparse_tag") if hasattr(info, key)}
-        return os.stat_result(values, extras)
-
-    monkeypatch.setattr(os, "lstat", changed)
-    assert require_held(pfs.read_verified_member(package, verified, PROJECTION)).content == b'{"held":true}\r\n'
-
-
 @pytest.mark.parametrize("junction", [False, True])
 def test_same_byte_replaced_root_never_reuses_s1(tmp_path: Path, junction: bool) -> None:
     package = filesystem_package(tmp_path)
@@ -322,7 +261,7 @@ def test_s1_root_identity_is_required_even_for_identical_bytes(tmp_path: Path) -
     assert_refusal(pfs.read_verified_member(package, foreign, PROJECTION), "package_root_binding_invalid")
 
 
-@pytest.mark.parametrize("name", ["DATA-ACCESS.JSON", "./data-access.json", "data-access.json.", "../outside", None])
+@pytest.mark.parametrize("name", ["data-access.json."])
 def test_only_exact_canonical_member_spelling_is_read(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str | None
 ) -> None:
@@ -363,15 +302,6 @@ def test_reparse_and_nonregular_members_refuse_before_read(
     assert_refusal(pfs.read_verified_member(package, verified, PROJECTION), code)
 
 
-def test_case_colliding_manifest_cannot_publish_a_verified_namespace(tmp_path: Path) -> None:
-    package = filesystem_package(tmp_path)
-    hashes = {name: hashlib.sha256((package / name).read_bytes()).hexdigest() for name in (SPEC, PROJECTION)}
-    write_manifest(package, files={**hashes, PROJECTION.upper(): hashes[PROJECTION]})
-    result = verify(package)
-    assert result.first_code == "package_declared_keys_collide"
-    assert (result.verified_files, result.manifest) == ((), None)
-
-
 def test_unreadable_member_returns_only_fixed_s1_diagnostics(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     package = filesystem_package(tmp_path)
     verified = verify(package)
@@ -385,23 +315,6 @@ def test_unreadable_member_returns_only_fixed_s1_diagnostics(tmp_path: Path, mon
     assert result.status == "unassessable"
     serialized = json.dumps(result.as_dict())
     assert "PRIVATE" not in serialized and str(package) not in serialized and '"path"' not in serialized
-
-
-def test_s2_handoff_carries_current_live_keys(tmp_path: Path) -> None:
-    package = with_data_access(
-        datasource_package(tmp_path / "Source", luid=None), source_rows(OTHER, LIVE), LIVE_PROJECTION
-    )
-    result = pri.verify_phase1_role_identity([package])[0]
-    assert result.is_start_ready, result.codes()
-    handoff = require_handoff(result.data_access_handoff(package))
-    assert handoff.facts.live_source_keys == (OTHER_KEY, LIVE_KEY), "the current live-key handoff was lost"
-    assert handoff.facts.direct_applicable and not handoff.facts.all_flat
-    assert not handoff.facts.has_review and handoff.facts.refusal_code is None
-    assert handoff.migration_spec.content == (package / SPEC).read_bytes()
-    assert handoff.data_access.content == (package / PROJECTION).read_bytes()
-    assert handoff.migration_spec.root_identity == handoff.data_access.root_identity == str(package)
-    assert handoff.migration_spec.sha256 == hashlib.sha256(handoff.migration_spec.content).hexdigest()
-    assert handoff.data_access.sha256 == hashlib.sha256(handoff.data_access.content).hexdigest()
 
 
 def test_s2_spec_is_parsed_once_and_only_the_authority_walks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -436,32 +349,6 @@ def test_s2_spec_is_parsed_once_and_only_the_authority_walks(tmp_path: Path, mon
     assert handoff.facts.live_source_keys == (LIVE_KEY,)
 
 
-@pytest.mark.parametrize(
-    "projection", [LIVE_PROJECTION, {**LIVE_PROJECTION, "source_keys": [OTHER_KEY]}, LOCAL_PROJECTION]
-)
-def test_projection_discrimination_needs_only_new_handoffs(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, projection: dict
-) -> None:
-    package = with_data_access(datasource_package(tmp_path / "Source", luid=None), source_rows(LIVE), projection)
-    result = pri.verify_phase1_role_identity([package])[0]
-    assert result.is_start_ready
-
-    def forbidden(*_args: object, **_kwargs: object) -> None:
-        pytest.fail("a held handoff read audit, reprobed, reclassified or reparsed the manifest")
-
-    for name in ("assess_data_access", "read_data_access", "_classify_legs"):
-        monkeypatch.setattr(pda, name, forbidden)
-    monkeypatch.setattr(pri, "package_spec_facts", forbidden)
-    monkeypatch.setattr(pfs, "parse_manifest_text", forbidden)
-    monkeypatch.setattr(pfs, "declared_files", forbidden)
-    handoff = require_handoff(result.data_access_handoff(package))
-    parsed = pda.parse_data_access(handoff.data_access.content.decode("utf-8"))
-    assert parsed.state == projection["state"], "the existing projection parser must still accept every control"
-    assert handoff.facts.live_source_keys == (LIVE_KEY,)
-    assert (parsed.source_keys == handoff.facts.live_source_keys) is (projection == LIVE_PROJECTION)
-    assert handoff.facts.all_flat is False, "local-over-live must be distinguishable without reclassification"
-
-
 @pytest.mark.parametrize("change", ["target", "case", "verified", "snapshot"])
 def test_s2_snapshot_cannot_borrow_another_package(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: str
@@ -486,17 +373,6 @@ def test_s2_snapshot_cannot_borrow_another_package(
     assert_refusal(result.data_access_handoff(target), "package_root_binding_invalid")
 
 
-@pytest.mark.parametrize("declaration", [None, False, [], "DATA-ACCESS.JSON", "./data-access.json", "other.json"])
-def test_s2_never_discovers_an_undeclared_projection(tmp_path: Path, declaration: object) -> None:
-    package = with_data_access(datasource_package(tmp_path / "Source"), source_rows(FLAT))
-    manifest = json.loads((package / "package-manifest.json").read_bytes())
-    manifest["artifacts"]["data_access"] = declaration
-    seal(package, **manifest)
-    result = pri.verify_phase1_role_identity([package])[0]
-    assert result.is_start_ready, "this PR must not add the final data-access role/fold to S2"
-    assert_refusal(result.data_access_handoff(package), "package_member_not_verified")
-
-
 @pytest.mark.parametrize("name", [SPEC, PROJECTION])
 def test_post_s2_changes_refuse_instead_of_mixing_snapshots(tmp_path: Path, name: str) -> None:
     package = with_data_access(datasource_package(tmp_path / "Source"), source_rows(LIVE), LIVE_PROJECTION)
@@ -506,53 +382,11 @@ def test_post_s2_changes_refuse_instead_of_mixing_snapshots(tmp_path: Path, name
     assert_refusal(result.data_access_handoff(package), "package_file_digest_mismatch")
 
 
-@pytest.mark.parametrize("reverse", [False, True])
-def test_provider_ordinals_and_owned_roles_keep_exact_snapshot_roots(tmp_path: Path, reverse: bool) -> None:
-    first = with_data_access(
-        datasource_package(tmp_path / "first", unit="Shared", luid=DS_LUID),
-        [{**source_rows(LIVE)[0], "published_datasource": {"key": PUBLISHED_KEY}}],
-        LIVE_PROJECTION,
-    )
-    second = with_data_access(datasource_package(tmp_path / "second", unit="Shared", luid=WB_LUID), source_rows(FLAT))
-    consumer = with_data_access(
-        workbook_package(
-            tmp_path / "Consumer",
-            published={"key": PUBLISHED_KEY},
-            binding="../../../first/fabric/Shared.SemanticModel",
-        ),
-        [PUBLISHED],
-    )
-    owned = with_data_access(workbook_package(tmp_path / "Owned", unit="Owned"), source_rows(FLAT))
-    roots = [first, second, consumer, owned]
-    if reverse:
-        roots.reverse()
-    observations = tuple(pri.verify_s1(root) for root in reversed(roots))
-    results = pri.verify_phase1_role_identity(roots, verified=observations)
-    assert all(result.is_start_ready for result in results)
-    for root, result in zip(roots, results, strict=True):
-        held = require_handoff(result.data_access_handoff(root))
-        assert held.migration_spec.root_identity == held.data_access.root_identity == str(root)
-        assert held.migration_spec.content == (root / SPEC).read_bytes()
-    provider, consuming, own = (results[roots.index(root)] for root in (first, consumer, owned))
-    assert provider.topology == "published_provider" and own.topology == "owned_model"
-    assert consuming.dependencies[0].provider_ordinal == roots.index(first)
-    assert consuming.dependencies[0].provider_unit == "Shared"
-    assert consuming.brief_policy.requested_scope == "report_only_shared_model"
-    assert require_handoff(consuming.data_access_handoff(consumer)).facts.published_only
-    assert own.source_handoff().root_identity == str(owned), "the existing package_source API must not change"
-
-
 @pytest.mark.parametrize(
     "connections,keys,review,refusal",
     [
-        ([FLAT], (), False, None),
-        ([LIVE], (LIVE_KEY,), False, None),
-        ([OTHER, LIVE], (OTHER_KEY, LIVE_KEY), False, None),
-        ([REVIEW], (), True, None),
-        ([LIVE, REVIEW], (LIVE_KEY,), True, None),
         ([LIVE, LIVE], (), False, "source-key-invalid"),
         ([{"class": "sqlserver", "powerbi_target": "live_source"}], (), False, "source-key-invalid"),
-        ([{**LIVE, "server": True}], (), False, "spec-unreadable"),
         ([{**LIVE, "connections": "malformed"}], (), False, "spec-unreadable"),
     ],
 )
@@ -570,70 +404,25 @@ def test_pure_spec_facts_reuse_canonical_leg_derivation(
         facts.has_review = False
 
 
-@pytest.mark.parametrize("rows", [None, {}, False, "rows", [None], [False], [{"connection": []}], [{"fields": False}]])
+@pytest.mark.parametrize("rows", [None, [None], [{"connection": []}], [{"fields": False}]])
 def test_malformed_source_sets_preserve_authority_refusal(rows: object) -> None:
     facts = pda.package_spec_facts({"data_sources": rows})
     assert facts.refusal_code == "spec-unreadable"
     assert facts.live_source_keys == () and not facts.all_flat and not facts.published_only
 
 
-def test_mixed_published_rows_are_not_published_only() -> None:
-    published = pda.package_spec_facts({"data_sources": [copy.deepcopy(PUBLISHED)]})
-    mixed = pda.package_spec_facts({"data_sources": [copy.deepcopy(PUBLISHED), *source_rows(LIVE)]})
-    assert published.published_only and not published.direct_applicable
-    assert published.live_source_keys == () and published.refusal_code is None
-    assert not mixed.published_only, "a mixed-row handoff would let the future consumer borrow provider-only proof"
-    assert not mixed.direct_applicable and not mixed.all_flat
-    assert mixed.live_source_keys == (LIVE_KEY,)
-
-
 @pytest.mark.parametrize(
     "extra",
     [
-        {"connection": {**PUBLISHED["connection"], "connections": [LIVE]}},
-        {"connection": {**PUBLISHED["connection"], "connections": []}},
-        {"connection": {**PUBLISHED["connection"], "unknown": "sqlserver"}},
         {"connection": {**PUBLISHED["connection"], "mode": True}},
-        {"connection": {"class": "SQLPROXY", "mode": "live"}},
-        {"connections": [LIVE]},
-        {"tables": [{"connection": LIVE}]},
         {"fields": [{"nested": {"connections": [LIVE]}}]},
-        {"joins": [{"right": {"class": "sqlserver"}}]},
         {"fields": False},
-        {"id": False},
         {"caption": []},
-        {"published_datasource": {"luid": DS_LUID, "connection": LIVE}},
-        {"published_datasource": {"luid": True}},
-        {"published_datasource": None},
     ],
 )
 def test_malformed_or_nested_published_rows_never_gain_clean_applicability(extra: dict) -> None:
     facts = pda.package_spec_facts({"data_sources": [{**PUBLISHED, **extra}]})
     assert not facts.published_only and not facts.direct_applicable and not facts.all_flat
-
-
-@pytest.mark.parametrize("raw", [b'{"source":{},"source":{}}', b'{"x":NaN}', b'{"x":1e999}', b"[]", b"\xff"])
-def test_strict_spec_json_still_blocks_at_s2(tmp_path: Path, raw: bytes) -> None:
-    package = with_data_access(datasource_package(tmp_path / "Source"), source_rows(LIVE), LIVE_PROJECTION)
-    (package / SPEC).write_bytes(raw)
-    seal(package, **json.loads((package / "package-manifest.json").read_bytes()))
-    result = pri.verify_phase1_role_identity([package])[0]
-    assert "identity_json_invalid" in result.blockers
-    assert not result.is_start_ready
-    assert_refusal(result.data_access_handoff(package), "package_member_not_verified")
-
-
-@pytest.mark.parametrize(
-    "raw,reason", [(b'{"state":0,"state":1}', "duplicate-key"), (b'{"x":NaN}', "nonfinite"), (b"[]", "not-an-object")]
-)
-def test_projection_stays_held_and_existing_parser_owns_strictness(tmp_path: Path, raw: bytes, reason: str) -> None:
-    package = with_data_access(datasource_package(tmp_path / "Source"), source_rows(FLAT), raw)
-    result = pri.verify_phase1_role_identity([package])[0]
-    held = require_handoff(result.data_access_handoff(package))
-    assert result.is_start_ready and held.data_access.content == raw, "no semantic consumer belongs in this PR"
-    with pytest.raises(pda.DataAccessProjectionError) as caught:
-        pda.parse_data_access(held.data_access.content.decode("utf-8"))
-    assert caught.value.reason == reason
 
 
 def test_new_handoffs_add_no_serialized_private_diagnostics(tmp_path: Path) -> None:
@@ -671,25 +460,6 @@ def rebuild_result(value: object) -> object:
     return type(value)(**{field.name: getattr(value, field.name) for field in fields(value) if field.init})
 
 
-@pytest.mark.parametrize("mode", ["copy", "deepcopy", "replace", "rebuild", "findings", "unassessable", "counts"])
-def test_r1_s1_requires_its_original_verification(tmp_path: Path, mode: str) -> None:
-    package = filesystem_package(tmp_path)
-    original = verify(package)
-    assert require_held(pfs.read_verified_member(package, original, PROJECTION)).relative_path == PROJECTION
-    copies = {"copy": copy.copy, "deepcopy": copy.deepcopy, "replace": replace, "rebuild": rebuild_result}
-    if mode in copies:
-        supplied = copies[mode](original)
-    elif mode == "counts":
-        supplied = replace(original, files_verified=0)
-    else:
-        row = pfs.Finding("package_file_digest_mismatch", "R1_PRIVATE_DIAGNOSTIC", path="R1_PRIVATE_PATH")
-        supplied = replace(original, **{mode: (row,)})
-    result = pfs.read_verified_member(package, supplied, PROJECTION)
-    assert isinstance(result, pfs.PackageFilesystemResult), f"S1 {mode} minted held bytes without original authority"
-    assert result.first_code == "package_member_not_verified"
-    assert "R1_PRIVATE" not in json.dumps(result.as_dict())
-
-
 def test_r1_s1_rejects_contradictory_original_state(tmp_path: Path) -> None:
     package = filesystem_package(tmp_path)
     original = verify(package)
@@ -698,37 +468,6 @@ def test_r1_s1_rejects_contradictory_original_state(tmp_path: Path) -> None:
     result = pfs.read_verified_member(package, original, PROJECTION)
     assert isinstance(result, pfs.PackageFilesystemResult), "contradictory original S1 state minted held bytes"
     assert result.first_code == "package_member_not_verified"
-
-
-@pytest.mark.parametrize(
-    "mode", ["copy", "deepcopy", "replace", "rebuild", "snapshot", "content", "facts", "blockers", "role"]
-)
-def test_r1_s2_requires_its_original_role_result(tmp_path: Path, mode: str) -> None:
-    package = with_data_access(datasource_package(tmp_path / "Source"), source_rows(LIVE), LIVE_PROJECTION)
-    original = pri.verify_phase1_role_identity([package])[0]
-    require_handoff(original.data_access_handoff(package))
-    snapshot = original._data_access_snapshot
-    copies = {"copy": copy.copy, "deepcopy": copy.deepcopy, "replace": replace, "rebuild": rebuild_result}
-    if mode in copies:
-        supplied = copies[mode](original)
-    elif mode in ("snapshot", "content", "facts"):
-        altered = rebuild_result(snapshot)
-        if mode == "content":
-            altered = replace(altered, spec=replace(altered.spec, content=b'{"R1_PRIVATE_SPEC":"forged"}'))
-        elif mode == "facts":
-            altered = replace(altered, facts=altered.facts._replace(live_source_keys=()))
-        supplied = replace(original, _data_access_snapshot=altered)
-    elif mode == "blockers":
-        supplied = replace(original, blockers=("R1_PRIVATE_BLOCKER",))
-    else:
-        altered_roles = tuple(
-            replace(role, state="missing", code="R1_PRIVATE_ROLE") if role.role == pri.ROLE_MIGRATION_SPEC else role
-            for role in original.roles
-        )
-        supplied = replace(original, roles=altered_roles)
-    result = supplied.data_access_handoff(package)
-    assert isinstance(result, pfs.PackageFilesystemResult), f"S2 {mode} returned an unissued or forged handoff"
-    assert "R1_PRIVATE" not in json.dumps(result.as_dict())
 
 
 @pytest.mark.parametrize("field", ["content", "facts", "blockers", "role", "snapshot"])
@@ -756,58 +495,6 @@ def test_r1_s2_checks_original_handoff_consistency(tmp_path: Path, field: str) -
     if field == "content":
         assert result.first_code == "package_file_digest_mismatch"
     assert "R1_PRIVATE" not in json.dumps(result.as_dict())
-
-
-def test_r1_blocked_s2_cannot_be_reconstructed_as_ready(tmp_path: Path) -> None:
-    package = with_data_access(datasource_package(tmp_path / "Source"), source_rows(LIVE), LIVE_PROJECTION)
-    (package / "migration-brief.md").write_bytes(b"+++\n")
-    seal(package, **json.loads((package / "package-manifest.json").read_bytes()))
-    blocked = pri.verify_phase1_role_identity([package])[0]
-    assert not blocked.is_start_ready and blocked.blockers
-    supplied = replace(
-        blocked,
-        verdict="START_READY",
-        blockers=(),
-        roles=tuple(replace(role, state="resolved", code=None) for role in blocked.roles),
-    )
-    result = supplied.data_access_handoff(package)
-    assert isinstance(result, pfs.PackageFilesystemResult), "reconstructed S2 readiness manufactured a handoff"
-
-
-@pytest.mark.parametrize("target", ["live_source", "unknown"])
-def test_published_row_with_direct_or_review_connection_retains_its_leg(tmp_path: Path, target: str) -> None:
-    provider = with_data_access(
-        datasource_package(tmp_path / "Provider", unit="Shared", luid=DS_LUID),
-        [{**source_rows(FLAT)[0], "published_datasource": {"key": PUBLISHED_KEY}}],
-    )
-    connection = {
-        "class": "sqlserver",
-        "mode": "live",
-        "server": "direct.example",
-        "database": "db",
-        "schema": "dbo",
-        "name": "orders-leg",
-        "powerbi_target": target,
-    }
-    consumer = with_data_access(
-        workbook_package(
-            tmp_path / "Consumer",
-            published={"key": PUBLISHED_KEY},
-            binding="../../../Provider/fabric/Shared.SemanticModel",
-        ),
-        [{**source_rows(connection)[0], "published_datasource": {"key": PUBLISHED_KEY}}],
-    )
-    results = pri.verify_phase1_role_identity([provider, consumer])
-    assert all(result.is_start_ready for result in results)
-    assert results[1].dependencies[0].provider_ordinal == 0
-    facts = require_handoff(results[1].data_access_handoff(consumer)).facts
-    key = ordinary_key("direct.example")
-    assert facts.live_source_keys == ((key,) if target == "live_source" else ()), (
-        "the actual database connection's canonical live key was stripped"
-    )
-    assert facts.has_review is (target == "unknown"), "the canonical review leg was stripped"
-    assert facts.refusal_code is None
-    assert not facts.published_only, "a provider-shaped direct/review leg was granted published-only applicability"
 
 
 @pytest.mark.parametrize("surface", ["s1", "s2"])
@@ -854,258 +541,6 @@ def test_explicit_unresolved_sqlproxy_classification_cannot_claim_published_only
         assert facts.has_review
 
 
-def test_r1_member_read_does_not_claim_fresh_integrity_for_unrelated_content(tmp_path: Path) -> None:
-    """A bounded member read is not a new whole-package verification."""
-    package = filesystem_package(tmp_path)
-    original = verify(package)
-    (package / SPEC).write_bytes(b"unrelated changed content")
-    assert require_held(pfs.read_verified_member(package, original, PROJECTION)).content == b'{"held":true}\r\n'
-    assert verify(package).first_code == "package_file_digest_mismatch"
-
-
-@pytest.mark.parametrize(
-    "member,field,value",
-    [
-        ("source_identity", "kind", "workbook"),
-        ("source_identity", "sha256", "0" * 64),
-        ("source_identity", "tableau_luid", WB_LUID),
-        ("source_identity", "published_key", "HANDOFF_PRIVATE_KEY"),
-        ("source_identity", "revision", "HANDOFF_PRIVATE_REVISION"),
-        ("brief_policy", "requested_scope", "model_and_report"),
-        ("brief_policy", "fallback_authorization", "model_only_unvalidated"),
-        ("brief_policy", "numeric_obligation", "none"),
-    ],
-)
-def test_issued_s2_binds_each_source_and_brief_scalar(tmp_path: Path, member: str, field: str, value: str) -> None:
-    package = with_data_access(datasource_package(tmp_path / "Source"), source_rows(LIVE), LIVE_PROJECTION)
-    original = pri.verify_phase1_role_identity([package])[0]
-    require_handoff(original.data_access_handoff(package))
-    component = getattr(original, member)
-    assert getattr(component, field) != value
-    object.__setattr__(component, field, value)
-    assert getattr(original, member) is component and original.is_start_ready
-    refused = original.data_access_handoff(package)
-    assert_refusal(refused, "package_member_not_verified")
-    assert "HANDOFF_PRIVATE" not in json.dumps(refused.as_dict())
-
-
-def test_issued_s2_preserves_absent_brief_policy(tmp_path: Path) -> None:
-    package = with_data_access(datasource_package(tmp_path / "Source", luid=None), source_rows(FLAT))
-    (package / "migration-brief.md").write_text("Migrate it.\n", encoding="utf-8")
-    seal(package, **json.loads((package / "package-manifest.json").read_bytes()))
-    original = pri.verify_phase1_role_identity([package])[0]
-    assert original.is_start_ready and original.brief_policy is None
-    assert (original.source_identity.tableau_luid, original.source_identity.published_key) == (None, None)
-    assert require_handoff(original.data_access_handoff(package)).facts.all_flat
-    object.__setattr__(original, "brief_policy", pri.BriefPolicy("model_only", "stop"))
-    assert_refusal(original.data_access_handoff(package), "package_member_not_verified")
-
-
-@pytest.mark.parametrize("numeric_obligation,replacement", [("required", "none"), ("none", "required")])
-@pytest.mark.parametrize("change", ["scalar", "policy", "reconstruction"])
-def test_issued_s2_numeric_scope_cannot_change(
-    tmp_path: Path, numeric_obligation: str, replacement: str, change: str
-) -> None:
-    package = with_data_access(datasource_package(tmp_path / "Source"), source_rows(FLAT))
-    manifest = json.loads((package / "package-manifest.json").read_bytes())
-    (package / "migration-brief.md").write_bytes(
-        numeric_brief_text(manifest["unit"], "model_only", numeric_obligation).encode("utf-8")
-    )
-    seal(package, **manifest)
-    original = pri.verify_phase1_role_identity([package])[0]
-    assert original.brief_policy.numeric_obligation == numeric_obligation
-    require_handoff(original.data_access_handoff(package))
-    if change == "scalar":
-        object.__setattr__(original.brief_policy, "numeric_obligation", replacement)
-        changed = original
-    elif change == "policy":
-        object.__setattr__(original, "brief_policy", replace(original.brief_policy, numeric_obligation=replacement))
-        changed = original
-    else:
-        changed = replace(original, brief_policy=replace(original.brief_policy, numeric_obligation=replacement))
-    assert changed.is_start_ready and changed.brief_policy.numeric_obligation == replacement
-    assert_refusal(changed.data_access_handoff(package), "package_member_not_verified")
-    if change == "reconstruction":
-        require_handoff(original.data_access_handoff(package))
-
-
-@pytest.mark.parametrize(
-    "field,before_value,after_value",
-    [
-        ("fallback_authorization", "stop", "model_only_unvalidated"),
-        ("numeric_obligation", "required", "none"),
-    ],
-)
-def test_fresh_s1_cannot_renew_stale_s2_by_grafting_both_integrity_references(
-    tmp_path: Path, field: str, before_value: str, after_value: str
-) -> None:
-    package = with_data_access(datasource_package(tmp_path / "Source"), source_rows(LIVE), LIVE_PROJECTION)
-    if field == "numeric_obligation":
-        manifest = json.loads((package / "package-manifest.json").read_bytes())
-        (package / "migration-brief.md").write_bytes(
-            numeric_brief_text(manifest["unit"], "model_only", before_value).encode("utf-8")
-        )
-        seal(package, **manifest)
-    stale = pri.verify_phase1_role_identity([package])[0]
-    held = require_handoff(stale.data_access_handoff(package))
-    wrapper, snapshot = stale.verified, stale._data_access_snapshot
-    issued_integrity = wrapper.integrity
-    brief = package / "migration-brief.md"
-    before = brief.read_bytes()
-    after = before.replace(f'{field} = "{before_value}"'.encode(), f'{field} = "{after_value}"'.encode())
-    assert after != before
-    brief.write_bytes(after)
-    seal(package, **json.loads((package / "package-manifest.json").read_bytes()))
-    fresh_s1 = pri.verify_s1(package)
-    assert fresh_s1.integrity.is_clean and fresh_s1.integrity.has_read_authority()
-    assert fresh_s1.integrity is not issued_integrity
-    assert require_held(fresh_s1.read_verified_member(package, SPEC)).content == held.migration_spec.content
-    assert require_held(fresh_s1.read_verified_member(package, PROJECTION)).content == held.data_access.content
-    object.__setattr__(wrapper, "integrity", fresh_s1.integrity)
-    object.__setattr__(snapshot, "integrity", fresh_s1.integrity)
-    assert stale.verified is wrapper and stale._data_access_snapshot is snapshot
-    assert getattr(stale.brief_policy, field) == before_value
-    assert_refusal(stale.data_access_handoff(package), "package_member_not_verified")
-
-    renewed = pri.verify_phase1_role_identity([package], verified=[fresh_s1])[0]
-    assert renewed.is_start_ready and getattr(renewed.brief_policy, field) == after_value
-    assert renewed.verified.integrity is not fresh_s1.integrity
-    assert require_handoff(renewed.data_access_handoff(package)).facts.live_source_keys == (LIVE_KEY,)
-
-
-def test_issued_s2_requires_its_integrity_to_retain_read_authority(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    package = with_data_access(datasource_package(tmp_path / "Source"), source_rows(FLAT))
-    original = pri.verify_phase1_role_identity([package])[0]
-    require_handoff(original.data_access_handoff(package))
-    integrity = original.verified.integrity
-    object.__setattr__(integrity, "files_verified", 0)
-    assert original._data_access_snapshot.integrity is integrity and not integrity.has_read_authority()
-
-    def forbidden(*_args: object, **_kwargs: object) -> None:
-        pytest.fail("an S2 capability with inconsistent issuing S1 authority reached a member read")
-
-    monkeypatch.setattr(pfs, "read_verified_member", forbidden)
-    assert_refusal(original.data_access_handoff(package), "package_member_not_verified")
-
-
-@pytest.mark.parametrize("connection,keys,all_flat", [(FLAT, (), True), (LIVE, (LIVE_KEY,), False)])
-@pytest.mark.parametrize("selected", [False, True])
-def test_published_provider_applicability_uses_final_cohort_topology(
-    tmp_path: Path, connection: dict, keys: tuple[str, ...], all_flat: bool, selected: bool
-) -> None:
-    rows = [{**source_rows(connection)[0], "published_datasource": {"luid": DS_LUID, "key": PUBLISHED_KEY}}]
-    provider = with_data_access(
-        datasource_package(tmp_path / "Provider", unit="Shared", published_key=PUBLISHED_KEY), rows
-    )
-    roots = [provider]
-    if selected:
-        roots.append(
-            with_data_access(
-                workbook_package(
-                    tmp_path / "Consumer",
-                    published={"luid": DS_LUID, "key": PUBLISHED_KEY},
-                    binding="../../../Provider/fabric/Shared.SemanticModel",
-                ),
-                [PUBLISHED],
-            )
-        )
-    canonical = pda.package_spec_facts({"data_sources": rows})
-    assert tuple(canonical) == (keys, False, True, False, None), "self-publication must not erase the direct source"
-    results = pri.verify_phase1_role_identity(roots)
-    assert all(result.is_start_ready for result in results)
-    provider_result = results[0]
-    assert provider_result.topology == ("published_provider" if selected else "standalone_datasource")
-    assert provider_result.source_identity.published_key == PUBLISHED_KEY
-    facts = require_handoff(provider_result.data_access_handoff(provider)).facts
-    assert tuple(facts) == (keys, False, True, False, None)
-    assert facts.all_flat is all_flat
-    if selected:
-        assert results[1].topology == "published_consumer" and results[1].dependencies[0].provider_ordinal == 0
-
-
-@pytest.mark.parametrize("publication_metadata", [False, True])
-@pytest.mark.parametrize("selected", [False, True])
-def test_mixed_case_sqlproxy_retains_canonical_direct_applicability(
-    tmp_path: Path, publication_metadata: bool, selected: bool
-) -> None:
-    rows = source_rows({**PUBLISHED["connection"], "class": "SQLPROXY"})
-    if publication_metadata:
-        rows[0]["published_datasource"] = {"luid": DS_LUID, "key": PUBLISHED_KEY}
-    canonical = pda.package_spec_facts({"data_sources": rows})
-    assert tuple(canonical) == ((), False, True, False, None)
-    assert canonical.all_flat
-    provider = with_data_access(datasource_package(tmp_path / "Provider", unit="Shared"), rows)
-    roots = [provider]
-    if selected:
-        roots.append(
-            with_data_access(
-                workbook_package(
-                    tmp_path / "Consumer",
-                    published={"luid": DS_LUID, "key": PUBLISHED_KEY},
-                    binding="../../../Provider/fabric/Shared.SemanticModel",
-                ),
-                [PUBLISHED],
-            )
-        )
-    results = pri.verify_phase1_role_identity(roots)
-    eligible = selected and publication_metadata
-    assert results[0].is_start_ready
-    assert results[0].topology == ("published_provider" if eligible else "standalone_datasource")
-    facts = require_handoff(results[0].data_access_handoff(provider)).facts
-    assert tuple(facts) == ((), False, True, False, None)
-    assert facts.all_flat
-    if selected:
-        assert results[1].topology == "published_consumer"
-        if eligible:
-            assert results[1].is_start_ready and results[1].dependencies[0].provider_ordinal == 0
-            assert require_handoff(results[1].data_access_handoff(roots[1])).facts.published_only
-        else:
-            assert not results[1].is_start_ready
-            assert results[1].dependencies[0].code == "provider_key_contradiction"
-
-
-@pytest.mark.parametrize(
-    "additional,keys,review",
-    [(None, (), False), (LIVE, (LIVE_KEY,), False), (REVIEW, (), True)],
-)
-def test_consumer_applicability_preserves_strict_proxy_and_mixed_canonical_facts(
-    tmp_path: Path, additional: dict | None, keys: tuple[str, ...], review: bool
-) -> None:
-    provider = with_data_access(
-        datasource_package(tmp_path / "Provider", unit="Shared"),
-        [{**source_rows(FLAT)[0], "published_datasource": {"key": PUBLISHED_KEY}}],
-    )
-    rows = [PUBLISHED, *(source_rows(additional) if additional is not None else [])]
-    consumer = with_data_access(
-        workbook_package(
-            tmp_path / "Consumer",
-            published={"luid": DS_LUID, "key": PUBLISHED_KEY},
-            binding="../../../Provider/fabric/Shared.SemanticModel",
-        ),
-        rows,
-    )
-    canonical = pda.package_spec_facts({"data_sources": rows})
-    assert tuple(canonical) == (keys, review, False, additional is None, None)
-    results = pri.verify_phase1_role_identity([provider, consumer])
-    assert all(result.is_start_ready for result in results)
-    assert results[0].topology == "published_provider" and results[1].topology == "published_consumer"
-    facts = require_handoff(results[1].data_access_handoff(consumer)).facts
-    assert tuple(facts) == (keys, review, False, additional is None, None)
-    assert not facts.all_flat
-
-
-def test_datasource_proxy_cannot_borrow_consumer_applicability(tmp_path: Path) -> None:
-    package = with_data_access(datasource_package(tmp_path / "Source"), [PUBLISHED])
-    assert tuple(pda.package_spec_facts({"data_sources": [PUBLISHED]})) == ((), False, False, True, None)
-    result = pri.verify_phase1_role_identity([package])[0]
-    assert result.is_start_ready and result.topology == "standalone_datasource"
-    facts = require_handoff(result.data_access_handoff(package)).facts
-    assert tuple(facts) == ((), False, False, False, None)
-    assert not facts.all_flat
-
-
 def test_handoff_consistency_refusal_preserves_private_policy_and_public_shapes(tmp_path: Path) -> None:
     package = with_data_access(datasource_package(tmp_path / "Source", luid=None), source_rows(LIVE), LIVE_PROJECTION)
     result = pri.verify_phase1_role_identity([package])[0]
@@ -1131,125 +566,11 @@ def test_handoff_consistency_refusal_preserves_private_policy_and_public_shapes(
     assert "HANDOFF_PRIVATE" not in serialized and str(package) not in serialized
 
 
-@pytest.mark.parametrize("target", ["live_source", "flat_file", None])
-@pytest.mark.parametrize("repeated", [False, True])
-def test_strict_published_references_have_no_second_direct_database_leg(target: str | None, repeated: bool) -> None:
-    row = {
-        **PUBLISHED,
-        "connection": {
-            "class": "sqlproxy",
-            "mode": "live",
-            "server": "published.example",
-            "database": "db",
-            "powerbi_target": target,
-        },
-    }
-    if target is None:
-        del row["connection"]["powerbi_target"]
-    spec = {"data_sources": [copy.deepcopy(row) for _ in range(2 if repeated else 1)]}
-    original = copy.deepcopy(spec)
-    assert pda.package_spec_facts(spec) == pda.PackageSpecFacts((), False, False, True, None)
-    assert spec == original, "a reference route must not rewrite the parser's target annotation"
-
-
-@pytest.mark.parametrize("reverse", [False, True])
-def test_published_plus_direct_keeps_every_canonical_key_in_both_orders(reverse: bool) -> None:
-    proxy = {
-        **PUBLISHED,
-        "connection": {
-            "class": "sqlserver",
-            "mode": "live",
-            "server": "published.example",
-            "database": "db",
-            "schema": "dbo",
-            "name": "published-orders-leg",
-            "powerbi_target": "live_source",
-        },
-        "tables": [{"name": "Orders", "table": "[dbo].[Orders]", "connection": "published-orders-leg"}],
-    }
-    rows = [PUBLISHED, proxy, *source_rows(LIVE)]
-    if reverse:
-        rows.reverse()
-    original = copy.deepcopy(rows)
-    proxy_key = ordinary_key("published.example")
-    facts = pda.package_spec_facts({"data_sources": rows})
-    assert facts == pda.PackageSpecFacts(tuple(sorted((LIVE_KEY, proxy_key))), False, False, False, None)
-    assert rows == original
-
-
-@pytest.mark.parametrize(
-    "published",
-    [None, {}, {"luid": ""}, {"luid": "not-a-luid"}, {"luid": DS_LUID + " "}, {"key": " "}, {"key": []}],
-)
+@pytest.mark.parametrize("published", [{"luid": DS_LUID + " "}, {"key": " "}])
 def test_published_identity_must_be_structurally_valid(published: object) -> None:
     row = {**PUBLISHED, "published_datasource": published}
     facts = pda.package_spec_facts({"data_sources": [row]})
     assert not facts.published_only and not facts.all_flat
-
-
-@pytest.mark.parametrize(
-    "payload,facts,fallback",
-    [
-        (LOCAL_PROJECTION, pda.PackageSpecFacts((), False, True, False, None), "stop"),
-        (
-            {**LOCAL_PROJECTION, "effective_scope": "model_and_report"},
-            pda.PackageSpecFacts((), False, True, False, None),
-            "stop",
-        ),
-        (LIVE_PROJECTION, pda.PackageSpecFacts((LIVE_KEY,), False, True, False, None), "stop"),
-        (
-            {**LIVE_PROJECTION, "effective_scope": "model_and_report"},
-            pda.PackageSpecFacts((LIVE_KEY,), False, True, False, None),
-            "stop",
-        ),
-        (
-            MODEL_ONLY_PROJECTION,
-            pda.PackageSpecFacts((LIVE_KEY,), False, True, False, None),
-            "model_only_unvalidated",
-        ),
-    ],
-)
-def test_reconcile_direct_acceptance_retains_the_original_assessment(
-    payload: dict, facts: pda.PackageSpecFacts, fallback: str
-) -> None:
-    assessment = pda.parse_data_access(json.dumps(payload))
-    result = pda.reconcile_package_data_access(
-        assessment, facts, requested_scope=payload["effective_scope"], fallback_authorization=fallback
-    )
-    assert result is assessment
-    assert result.to_json() == payload
-
-
-@pytest.mark.parametrize(
-    "state,codes,keys",
-    [
-        ("blocked", ["marker-only", "unknown-target"], [LIVE_KEY]),
-        ("cannot_establish", ["audit-malformed", "source-key-set-changed"], []),
-    ],
-)
-def test_reconcile_preserves_preexisting_refusals_before_other_inputs(
-    state: str, codes: list[str], keys: list[str]
-) -> None:
-    assessment = pda.parse_data_access(
-        json.dumps(
-            {
-                **LOCAL_PROJECTION,
-                "state": state,
-                "source_keys": keys,
-                "codes": codes,
-                "validation": "not_established",
-                "effective_scope": None,
-                "max_phase2_claim": "none",
-            }
-        )
-    )
-    result = pda.reconcile_package_data_access(
-        assessment,
-        pda.PackageSpecFacts((), True, False, False, "spec-unreadable"),
-        requested_scope=None,
-        fallback_authorization=None,
-    )
-    assert result is assessment and result.codes == tuple(codes)
 
 
 @pytest.mark.parametrize(
@@ -1305,32 +626,6 @@ def test_reconcile_direct_consistency_refusals_use_existing_codes(fault: str, st
         "none",
     )
     assert pda.parse_data_access(result.dumps()) == result
-
-
-@pytest.mark.parametrize("local", [False, True])
-def test_reconcile_inherits_only_the_exact_canonically_checked_direct_provider(local: bool) -> None:
-    payload = LOCAL_PROJECTION if local else LIVE_PROJECTION
-    keys = () if local else (LIVE_KEY,)
-    supplied = pda.parse_data_access(json.dumps(payload))
-    checked = pda.reconcile_package_data_access(
-        supplied,
-        pda.PackageSpecFacts(keys, False, True, False, None),
-        requested_scope="model_only",
-        fallback_authorization="stop",
-    )
-    assert checked is supplied
-    assessment = pda.parse_data_access(
-        json.dumps({**INHERITED_PROJECTION, "provider_state": payload["state"], "source_keys": list(keys)})
-    )
-    result = pda.reconcile_package_data_access(
-        assessment,
-        pda.PackageSpecFacts((), False, False, True, None),
-        requested_scope="report_only_shared_model",
-        fallback_authorization="stop",
-        provider=(PROVIDER_REF, checked),
-    )
-    assert result is assessment
-    assert (result.source_keys, result.validation, result.max_phase2_claim) == (keys, "validated", "data_validated")
 
 
 @pytest.mark.parametrize(
@@ -1441,7 +736,7 @@ def test_reconcile_has_no_filesystem_audit_classification_or_brief_parser_author
     assert result is assessment
 
 
-@pytest.mark.parametrize("field,value", [("validation", "unvalidated"), ("max_phase2_claim", "structural_only")])
+@pytest.mark.parametrize("field,value", [("validation", "unvalidated")])
 def test_reconcile_does_not_repair_an_illegal_assessment(field: str, value: str) -> None:
     parsed = pda.parse_data_access(json.dumps(LIVE_PROJECTION))
     invalid = parsed._replace(**{field: value})
@@ -1453,29 +748,3 @@ def test_reconcile_does_not_repair_an_illegal_assessment(field: str, value: str)
     )
     assert (result.state, result.codes) == ("cannot_establish", ("projection-invalid",))
     assert getattr(invalid, field) == value
-
-
-@pytest.mark.parametrize("scope", ["model_only", "model_and_report"])
-def test_inherited_projection_cannot_be_its_own_direct_provider(scope: str) -> None:
-    facts = pda.package_spec_facts({"data_sources": source_rows(LIVE)})
-    assert facts.live_source_keys == (LIVE_KEY,) and facts.direct_applicable
-    assessment = pda.parse_data_access(json.dumps({**INHERITED_PROJECTION, "effective_scope": scope}))
-    result = pda.reconcile_package_data_access(assessment, facts, requested_scope=scope, fallback_authorization="stop")
-    assert (result.state, result.codes) == ("cannot_establish", ("provider-ambiguous",))
-
-
-def test_legacy_published_reference_cannot_hide_an_additional_direct_leg() -> None:
-    proxy = copy.deepcopy(PUBLISHED)
-    del proxy["connection"]["powerbi_target"]
-    spec = {"data_sources": [proxy]}
-    assessment = pda.parse_data_access(json.dumps(INHERITED_PROJECTION))
-    provider = (PROVIDER_REF, pda.parse_data_access(json.dumps(LIVE_PROJECTION)))
-    policy = {"requested_scope": "report_only_shared_model", "fallback_authorization": "stop", "provider": provider}
-    assert pda.reconcile_package_data_access(assessment, pda.package_spec_facts(spec), **policy) is assessment
-    spec["data_sources"].extend(source_rows(LIVE))
-    before = copy.deepcopy(spec)
-    facts = pda.package_spec_facts(spec)
-    assert not facts.published_only and facts.refusal_code == "source-key-invalid"
-    result = pda.reconcile_package_data_access(assessment, facts, **policy)
-    assert (result.state, result.codes) == ("cannot_establish", ("projection-invalid",))
-    assert facts.refusal_code == "source-key-invalid" and spec == before

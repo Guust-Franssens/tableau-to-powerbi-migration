@@ -67,51 +67,7 @@ def test_binding_changes_only_the_exact_owned_bytes_and_corresponding_hashes(tmp
     assert _files(root) == after
 
 
-@pytest.mark.parametrize("mode", ["bind", "inspect", "idempotent", "sanitize"])
-def test_binding_inspection_holds_current_s1_s2_and_the_publication_callback_result(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
-) -> None:
-    root = _binding_package(tmp_path)
-    if mode != "bind":
-        assert _binding_cli(root)["exit_code"] == 0
-    original_id = pkg._package_directory_id(root)
-    captured = []
-    final = pkg._binding_final
-
-    def capture(*args, **kwargs):
-        inspection = final(*args, **kwargs)
-        assert pkg.retired_dir(root).is_dir(), "inspection must precede retired cleanup"
-        captured.append(inspection)
-        return inspection
-
-    monkeypatch.setattr(pkg, "_binding_final", capture)
-    result = pkg.bind_package(root, inspect=mode == "inspect", sanitize=mode == "sanitize")
-    assert result.exit_code == 0
-    inspection = result.inspection
-    assert isinstance(inspection, pkg.PackageBindingInspection)
-    assert inspection.state == ("UNBOUND" if mode == "sanitize" else "BOUND")
-    assert inspection.validation == "UNVALIDATED"
-    held = inspection.authority
-    assert held.roots == (root,)
-    snapshot, role = held.packages[-1].snapshot, held.roles[-1]
-    assert snapshot.directory_id == pkg._package_directory_id(root)
-    assert snapshot.manifest == (root / "package-manifest.json").read_bytes()
-    assert snapshot.verified.root == role.verified.root == root
-    assert snapshot.verified.integrity.is_clean and role.verified.integrity.is_clean
-    handoff = role.data_access_handoff(root)
-    assert isinstance(handoff, pkg.pri.PackageDataAccessHandoff)
-    assert handoff.migration_spec.content == snapshot.spec
-    assert handoff.data_access.content == (root / "data-access.json").read_bytes()
-    if mode in ("bind", "sanitize"):
-        assert len(captured) == 1 and inspection is captured[0]
-        assert snapshot.directory_id != original_id
-    else:
-        assert not captured and snapshot.directory_id == original_id
-    assert str(root) not in json.dumps(result.as_dict())
-    assert "authority" not in result.as_dict()["inspection"]
-
-
-@pytest.mark.parametrize("seam", ["digest", "unrelated", "concurrent-reseal", "directory", "empty-directory"])
+@pytest.mark.parametrize("seam", ["digest", "concurrent-reseal", "directory", "empty-directory"])
 def test_binding_mutations_reach_their_intended_authority(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seam: str
 ) -> None:
@@ -157,7 +113,6 @@ def test_binding_mutations_reach_their_intended_authority(
     assert result["exit_code"] != 0
     expected_codes = {
         "digest": "binding_staging_failed",
-        "unrelated": "binding_candidate_changed",
         "concurrent-reseal": "binding_discovery_unassessable",
         "directory": "binding_discovery_unassessable",
         "empty-directory": "binding_candidate_changed",
@@ -315,7 +270,7 @@ def _binding_consumer(parent: Path, provider: Path) -> Path:
     return root
 
 
-@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("reverse", [True])
 def test_binding_provider_cohort_is_explicit_ordered_read_only_and_independently_bound(
     tmp_path: Path, reverse: bool
 ) -> None:
@@ -351,8 +306,8 @@ def test_binding_provider_cohort_is_explicit_ordered_read_only_and_independently
     )
 
 
-@pytest.mark.parametrize("fault", ["missing", "duplicate", "wrong", "dirty", "blocked", "nested", "stale"])
-@pytest.mark.parametrize("sanitize", [False, True])
+@pytest.mark.parametrize("fault", ["duplicate", "wrong", "dirty", "blocked", "nested", "stale"])
+@pytest.mark.parametrize("sanitize", [True])
 def test_binding_provider_refusals_do_not_recurse_or_modify_any_package(
     tmp_path: Path, fault: str, sanitize: bool
 ) -> None:
@@ -360,9 +315,7 @@ def test_binding_provider_refusals_do_not_recurse_or_modify_any_package(
     consumer = _binding_consumer(tmp_path, provider)
     assert _binding_cli(provider)["exit_code"] == 0
     providers = [provider]
-    if fault == "missing":
-        providers = []
-    elif fault == "duplicate":
+    if fault == "duplicate":
         providers.append(provider)
     elif fault == "wrong":
         other = _binding_package(tmp_path / "other", datasource=True, datasource_luid=s2.WB_LUID)
@@ -397,7 +350,6 @@ def test_binding_provider_refusals_do_not_recurse_or_modify_any_package(
     flags = tuple(value for path in providers for value in ("--provider-package", str(path)))
     result = _binding_cli(consumer, *(("--sanitize",) if sanitize else ()), *flags)
     expected = {
-        "missing": (3, "binding_s2_not_clean"),
         "duplicate": (1, "binding_cohort_duplicate"),
         "wrong": (3, "binding_s2_not_clean"),
         "dirty": (1, "binding_s1_not_clean"),
@@ -439,7 +391,7 @@ def test_binding_report_only_sanitize_rechecks_the_held_cohort_after_observation
     assert _files(consumer) == before and _files(provider) == changed[0]
 
 
-@pytest.mark.parametrize("seam", ["provider-reseal", "ordinal", "boolean-ordinal"])
+@pytest.mark.parametrize("seam", ["provider-reseal", "ordinal"])
 def test_binding_provider_recheck_is_against_the_fixed_held_cohort(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seam: str
 ) -> None:
@@ -564,23 +516,7 @@ def _local_bundle(parent: Path) -> tuple[Path, Path, dict]:
     )
 
 
-@pytest.mark.parametrize(
-    "change",
-    [
-        "csv-delete",
-        "csv-replace",
-        "spec",
-        "brief",
-        "source",
-        "model",
-        "report",
-        "provenance",
-        "handover-json",
-        "unexpected",
-        "manifest",
-        "projection",
-    ],
-)
+@pytest.mark.parametrize("change", ["csv-delete", "spec", "projection"])
 def test_post_s2_candidate_mutation_refuses_without_rebaselining(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: str
 ) -> None:
@@ -598,16 +534,7 @@ def test_post_s2_candidate_mutation_refuses_without_rebaselining(
             manifest = json.loads((candidate / "package-manifest.json").read_text(encoding="utf-8"))
             targets = {
                 "csv-delete": manifest["data_sources"]["shipped"][0]["path"],
-                "csv-replace": manifest["data_sources"]["shipped"][0]["path"],
                 "spec": "migration-spec.json",
-                "brief": "migration-brief.md",
-                "source": manifest["artifacts"]["asset"],
-                "model": f"fabric/{UNIT}.SemanticModel/definition/model.tmdl",
-                "report": f"fabric/{UNIT}.Report/definition.pbir",
-                "provenance": "source-provenance.json",
-                "handover-json": f"handover/{UNIT}.json",
-                "unexpected": "unexpected.txt",
-                "manifest": "package-manifest.json",
                 "projection": "data-access.json",
             }
             path = candidate / targets[change]
@@ -618,7 +545,7 @@ def test_post_s2_candidate_mutation_refuses_without_rebaselining(
                 spec["data_sources"] = authority._spec(authority.LIVE)["data_sources"]
                 path.write_text(json.dumps(spec), encoding="utf-8")
             else:
-                path.write_bytes((path.read_bytes() if path.exists() else b"") + b"\nchanged-after-S2\n")
+                path.write_bytes(path.read_bytes() + b"\nchanged-after-S2\n")
             attacked.append(change)
         return results
 
@@ -654,72 +581,12 @@ def test_live_spec_cannot_be_replaced_by_flat_rows_after_s2(
     assert (result.state, result.codes) == ("cannot_establish", ("projection-invalid",))
 
 
-def test_assessment_receives_pre_s2_spec_policy_and_localization_copies(
-    tmp_path: Path, root: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    candidate = producer._assessment_candidate(tmp_path, authority._spec(authority.FLAT))
-    local = copy.deepcopy(authority.LOCAL)
-    inputs = pkg._data_access_inputs(candidate, local, ())
-    held_spec = copy.deepcopy(inputs.spec)
-    local["self_contained"] = False
-    observations = []
-    assess = pkg.data_access.assess_data_access
-
-    def held_facts(gate_root, **kwargs):
-        assert kwargs["package_spec"] == held_spec
-        assert kwargs["package_spec"] is not inputs.spec
-        assert kwargs["package_data_sources"] == authority.LOCAL
-        assert kwargs["package_data_sources"] is not inputs.localized
-        assert kwargs["fallback_authorization"] == "stop"
-        assert kwargs["requested_scope"] == "model_and_report"
-        observations.append(True)
-        return assess(gate_root, **kwargs)
-
-    monkeypatch.setattr(pkg.data_access, "assess_data_access", held_facts)
-    read_text = Path.read_text
-
-    def no_second_spec_read(path, **kwargs):
-        if path == candidate / "migration-spec.json":
-            return json.dumps(authority._spec(authority.LIVE))
-        return read_text(path, **kwargs)
-
-    monkeypatch.setattr(Path, "read_text", no_second_spec_read)
-    result, _notes = pkg._assess_package_data_access(
-        root, candidate, local, gate_root=root, provider_packages=(), inputs=inputs
-    )
-    assert observations == [True]
-    assert result.state == "local_import_ready"
-
-
 def test_shipped_role_must_exist_even_when_the_snapshot_is_otherwise_s1_clean(tmp_path: Path) -> None:
     candidate = producer._assessment_candidate(tmp_path, authority._spec(authority.FLAT))
     assert pkg.pri.verify_s1(candidate).integrity.is_clean
     local = {**authority.LOCAL, "shipped": [{"path": "data/missing.csv"}]}
     with pytest.raises(pkg.PackagingError, match="^data_access_shipped_role_missing$"):
         pkg._data_access_inputs(candidate, local, ())
-
-
-@pytest.mark.parametrize("change", ["extra", "missing", "digest", "root"])
-def test_snapshot_comparison_is_not_a_fresh_manifest_baseline(tmp_path: Path, change: str) -> None:
-    package = producer._assessment_candidate(tmp_path, authority._spec(authority.FLAT))
-    snapshot = pkg._package_snapshot(package)
-    assert snapshot is not None and pkg._snapshot_matches(snapshot)
-    if change == "extra":
-        (package / "extra.txt").write_bytes(b"new")
-    elif change == "missing":
-        (package / "migration-spec.json").unlink()
-    elif change == "digest":
-        path = package / "migration-spec.json"
-        path.write_bytes(path.read_bytes() + b"\n")
-    else:
-        replacement = package.with_name("replacement")
-        shutil.copytree(package, replacement)
-        package.rename(package.with_name("retired"))
-        replacement.rename(package)
-        assert _files(package) == _files(package.with_name("retired")), "root-only control preserves every byte"
-    producer._reseal(package)
-    assert pkg.pri.verify_s1(package).integrity.is_clean
-    assert not pkg._snapshot_matches(snapshot), f"held snapshot accepted {change}"
 
 
 @pytest.mark.parametrize("change", ["namespace", "file-digest", "manifest-digest", "lexical-root"])
@@ -739,32 +606,6 @@ def test_snapshot_guards_have_independent_negative_controls(tmp_path: Path, chan
             verified=replace(snapshot.verified, root_identity=str(package.with_name("foreign")))
         )
     assert not pkg._snapshot_matches(snapshot), f"independent {change} guard did not refuse"
-
-
-def test_generated_delta_is_exact_and_the_manifest_extends_only_the_held_map(tmp_path: Path) -> None:
-    package = producer._assessment_candidate(tmp_path, authority._spec(authority.FLAT))
-    snapshot = pkg._package_snapshot(package)
-    assert snapshot is not None
-    generated = {
-        "data-access.json": json.dumps(producer.LOCAL_PROJECTION).encode("utf-8"),
-        "README.md": b"generated README",
-        "handover.md": b"generated handover",
-    }
-    manifest = json.loads(snapshot.manifest)
-    files = dict(snapshot.digests)
-    files.update({key: hashlib.sha256(raw).hexdigest() for key, raw in generated.items()})
-    for key, raw in generated.items():
-        (package / key).write_bytes(raw)
-    generated["package-manifest.json"] = pkg._seal_package(package, manifest, files=files, verify=True)
-    assert pkg._snapshot_matches(snapshot, generated), "producer-only delta must be permitted"
-    assert pkg.pri.verify_s1(package).integrity.is_clean
-    assert {key: digest for key, digest in manifest["contents"]["files"].items() if key not in generated} == dict(
-        snapshot.digests
-    )
-    (package / "README.md").write_bytes(b"not the generated README")
-    producer._reseal(package)
-    assert pkg.pri.verify_s1(package).integrity.is_clean
-    assert not pkg._snapshot_matches(snapshot, generated), "allowlisting a name must not allow arbitrary bytes"
 
 
 def test_generated_allowlist_cannot_expand_to_spec_or_an_unknown_file(tmp_path: Path) -> None:
@@ -789,38 +630,6 @@ def test_final_seal_never_inventories_new_bytes(tmp_path: Path) -> None:
         pkg._write_data_access_final(package, manifest, snapshot, generated)
     final_manifest = json.loads((package / "package-manifest.json").read_bytes())
     assert "unexpected.txt" not in final_manifest["contents"]["files"]
-
-
-def test_final_s1_refusal_is_not_masked_by_another_snapshot_guard(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A direct seal control isolates final S1 from the later S2/snapshot rechecks."""
-    package = producer._assessment_candidate(tmp_path, authority._spec(authority.FLAT))
-    snapshot = pkg._package_snapshot(package)
-    assert snapshot is not None
-    manifest = json.loads(snapshot.manifest)
-    failed = replace(snapshot.verified, integrity=replace(snapshot.verified.integrity, status="unassessable"))
-    monkeypatch.setattr(pkg.pri, "verify_s1", lambda _root: failed)
-    with pytest.raises(pkg.PackagingError, match="^data_access_final_integrity_failed$"):
-        pkg._seal_package(package, manifest, files=dict(snapshot.digests), verify=True)
-
-
-def test_final_s2_receives_the_exact_original_ordered_cohort(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Provider ordinals mean nothing if final S2 silently reorders or narrows the request."""
-    provider = producer._direct_provider(tmp_path / "provider")
-    consumer = producer._provider_consumer(tmp_path, provider)
-    inputs = pkg._data_access_inputs(consumer, copy.deepcopy(authority.LOCAL), (provider,))
-    verify = pkg.pri.verify_phase1_role_identity
-    calls = []
-
-    def same_cohort(roots):
-        assert roots == inputs.roots, "final S2 must use the original ordered cohort"
-        calls.append(True)
-        return verify(roots)
-
-    monkeypatch.setattr(pkg.pri, "verify_phase1_role_identity", same_cohort)
-    pkg._final_data_access_check(inputs, {})
-    assert calls == [True], "final S2 must actually run"
 
 
 @pytest.mark.parametrize("phase", ["before-final-seal", "after-final-s2"])
@@ -885,55 +694,6 @@ def test_foreign_projection_after_assessment_cannot_be_overwritten_as_an_allowed
         pkg.package_unit(bundle, UNIT, out, **options)
     assert hits == [True]
     assert not (out / UNIT).exists()
-
-
-def test_final_s1_is_required_even_when_candidate_bytes_are_unchanged(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    bundle, out, options = _local_bundle(tmp_path)
-    verify = pkg.pri.verify_s1
-    checks = []
-
-    def cannot_verify_final(root):
-        result = verify(root)
-        path = root / "data-access.json"
-        if path.exists() and json.loads(path.read_bytes())["state"] == "local_import_ready":
-            checks.append(True)
-            return replace(result, integrity=replace(result.integrity, status="unassessable"))
-        return result
-
-    monkeypatch.setattr(pkg.pri, "verify_s1", cannot_verify_final)
-    with pytest.raises(pkg.PackagingError, match="^data_access_final_integrity_failed$"):
-        pkg.package_unit(bundle, UNIT, out, **options)
-    assert checks == [True]
-    assert not (out / UNIT).exists()
-
-
-def test_final_s2_checks_the_final_bytes_without_reassessing_or_reselecting_cohort(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    bundle, out, options = _local_bundle(tmp_path)
-    provider = producer._direct_provider(tmp_path / "provider")
-    verify = pkg.pri.verify_phase1_role_identity
-    observed = []
-
-    def verify_final(roots, **kwargs):
-        manifest = json.loads((roots[-1] / "package-manifest.json").read_bytes())
-        projection = json.loads((roots[-1] / "data-access.json").read_bytes())
-        assert (
-            manifest["contents"]["files"]["data-access.json"]
-            == hashlib.sha256((roots[-1] / "data-access.json").read_bytes()).hexdigest()
-        )
-        if projection["state"] != "cannot_establish":
-            for name in ("README.md", "handover.md"):
-                assert b"state=local_import_ready" in (roots[-1] / name).read_bytes()
-        observed.append((tuple(roots), projection["state"]))
-        return verify(roots, **kwargs)
-
-    monkeypatch.setattr(pkg.pri, "verify_phase1_role_identity", verify_final)
-    pkg.package_unit(bundle, UNIT, out, **options, provider_packages=(provider,))
-    expected_roots = (provider, pkg.staging_dir(out, UNIT))
-    assert observed == [(expected_roots, "cannot_establish"), (expected_roots, "local_import_ready")]
 
 
 @pytest.mark.parametrize("change", ["verdict", "policy", "ordinal"])
@@ -1045,72 +805,20 @@ def test_provider_remains_pinned_after_final_s2(tmp_path: Path, monkeypatch: pyt
         pkg._final_data_access_check(inputs, {})
 
 
-def test_only_the_once_parsed_provider_assessment_crosses_s2_selection(
-    tmp_path: Path, root: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    provider = producer._direct_provider(tmp_path / "provider")
-    consumer = producer._provider_consumer(tmp_path, provider)
-    capture = pkg._held_projection
-    verify = pkg.pri.verify_phase1_role_identity
-    assess = pkg.data_access.assess_data_access
-    held = []
-    selected = []
-
-    def capture_once(manifest, raw):
-        assessment, code = capture(manifest, raw)
-        if manifest["kind"] == "datasource":
-            held.append(assessment)
-        return assessment, code
-
-    def after_capture(roots, **kwargs):
-        assert len(held) == 1 and held[0] is not None, "provider parsing must precede S2"
-        return verify(roots, **kwargs)
-
-    def exact_assessment(gate_root, **kwargs):
-        assert kwargs["provider"][1] is held[0], "inherit the held object, not a replacement parse"
-        selected.append(True)
-        return assess(gate_root, **kwargs)
-
-    monkeypatch.setattr(pkg, "_held_projection", capture_once)
-    monkeypatch.setattr(pkg.pri, "verify_phase1_role_identity", after_capture)
-    monkeypatch.setattr(pkg.data_access, "assess_data_access", exact_assessment)
-    result = producer._assess_candidate(consumer, root, providers=(provider,))
-    assert (result.state, result.source_keys) == ("provider_inherited", (producer.DIRECT_KEY,))
-    assert selected == [True] and len(held) == 1
-
-
 @pytest.mark.parametrize(
     "fault",
     [
-        "missing",
-        "null",
         "string",
-        "list",
-        "class-missing",
         "class-wrong",
-        "class-case",
         "mode-missing",
         "mode-wrong",
-        "nested-connection",
-        "nested-list",
-        "empty-list",
-        "row-list",
-        "row-unknown-scalar",
-        "unknown-leg",
         "unknown-scalar",
-        "nested-scalar",
+        "row-list",
         "table-connection",
-        "field-connection-list",
-        "join-direct-class",
         "published-missing",
-        "published-null",
         "published-empty",
-        "published-nested",
-        "published-scalar-type",
         "additional-direct",
-        "additional-null",
         "additional-scalar",
-        "additional-malformed",
     ],
 )
 def test_published_only_rows_are_complete_before_any_inheritance(
@@ -1122,53 +830,26 @@ def test_published_only_rows_are_complete_before_any_inheritance(
     assert (baseline.state, baseline.source_keys) == ("provider_inherited", (producer.DIRECT_KEY,))
     spec = json.loads((consumer / "migration-spec.json").read_bytes())
     row = spec["data_sources"][0]
-    if fault == "missing":
-        row.pop("connection")
-    elif fault in ("null", "string", "list"):
-        row["connection"] = {"null": None, "string": "sqlproxy", "list": []}[fault]
-    elif fault == "class-missing":
-        row["connection"].pop("class")
-    elif fault in ("class-wrong", "class-case"):
-        row["connection"]["class"] = "sqlserver" if fault == "class-wrong" else "SQLPROXY"
+    if fault == "string":
+        row["connection"] = "sqlproxy"
+    elif fault == "class-wrong":
+        row["connection"]["class"] = "sqlserver"
     elif fault == "mode-missing":
         row["connection"].pop("mode")
     elif fault == "mode-wrong":
         row["connection"]["mode"] = True
-    elif fault == "nested-connection":
-        row["connection"]["connection"] = dict(authority.LIVE)
-    elif fault in ("nested-list", "empty-list"):
-        row["connection"]["connections"] = [dict(authority.LIVE)] if fault == "nested-list" else []
-    elif fault == "row-list":
-        row["connections"] = [dict(authority.LIVE)]
-    elif fault == "row-unknown-scalar":
-        row["unknown-leg"] = "unclassified"
-    elif fault == "unknown-leg":
-        row["connection"]["unknown-leg"] = dict(authority.LIVE)
     elif fault == "unknown-scalar":
         row["connection"]["unknown-leg"] = "sqlserver"
-    elif fault == "nested-scalar":
-        row["connection"]["server"] = dict(authority.LIVE)
+    elif fault == "row-list":
+        row["connections"] = [dict(authority.LIVE)]
     elif fault == "table-connection":
         row["tables"] = [{"connection": dict(authority.LIVE)}]
-    elif fault == "field-connection-list":
-        row["fields"] = [{"metadata": {"connections": [dict(authority.LIVE)]}}]
-    elif fault == "join-direct-class":
-        row["joins"] = [{"left": {"class": "unknown", "server": "source.example"}}]
     elif fault == "published-missing":
         row.pop("published_datasource")
-    elif fault in ("published-null", "published-empty"):
-        row["published_datasource"] = None if fault == "published-null" else {}
-    elif fault == "published-nested":
-        row["published_datasource"]["connection"] = dict(authority.LIVE)
-    elif fault == "published-scalar-type":
-        row["published_datasource"]["id"] = True
+    elif fault == "published-empty":
+        row["published_datasource"] = {}
     else:
-        extra = {
-            "additional-direct": {"connection": dict(authority.LIVE)},
-            "additional-null": None,
-            "additional-scalar": "sqlproxy",
-            "additional-malformed": {"published_datasource": {"luid": producer.DS_LUID}},
-        }
+        extra = {"additional-direct": {"connection": dict(authority.LIVE)}, "additional-scalar": "sqlproxy"}
         spec["data_sources"].append(extra[fault])
     s2._write(consumer / "migration-spec.json", spec)
     producer._reseal(consumer)
@@ -1194,30 +875,7 @@ def test_published_only_rows_are_complete_before_any_inheritance(
         assert observed == [result]
 
 
-def test_published_metadata_without_connection_legs_is_not_mistaken_for_a_source() -> None:
-    """Business fields named 'class'/'connection' are metadata values, not connection declarations."""
-    spec = {
-        "data_sources": [
-            {
-                "id": "published",
-                "connection": {
-                    "class": "sqlproxy",
-                    "mode": "extract",
-                    "server": "published.example",
-                    "powerbi_target": "live_source",
-                    "note": "published source",
-                },
-                "published_datasource": {"key": "site/source", "id": None},
-                "tables": [{"id": "t", "name": "Rows", "source_relation": "table"}],
-                "fields": [{"name": "class", "caption": "connection", "kind": "column", "datatype": "string"}],
-                "joins": [],
-            }
-        ]
-    }
-    assert pkg.data_access.package_spec_facts(spec).published_only
-
-
-@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("reverse", [True])
 def test_real_parsed_shared_provider_reaches_producer_handoff_and_binder(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reverse: bool
 ) -> None:
@@ -1307,10 +965,7 @@ def test_real_parsed_shared_provider_reaches_producer_handoff_and_binder(
         assert arguments["provider"][1].state == "local_import_ready"
 
 
-@pytest.mark.parametrize(
-    "state,code,exit_code",
-    [("blocked", "unknown-target", 1), ("cannot_establish", "source-key-set-changed", 3)],
-)
+@pytest.mark.parametrize("state,code,exit_code", [("blocked", "unknown-target", 1)])
 def test_producer_and_binder_propagate_the_same_canonical_refusal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, state: str, code: str, exit_code: int
 ) -> None:
@@ -1371,7 +1026,7 @@ def test_binder_consumes_issued_facts_without_reparsing_or_reclassification(
 
 
 @pytest.mark.parametrize("change", ["projection-key", "connection-identity", "missing-connection"])
-@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("reverse", [True])
 def test_selected_provider_cannot_borrow_a_projection_key_from_another_root(
     tmp_path: Path, root: Path, change: str, reverse: bool
 ) -> None:

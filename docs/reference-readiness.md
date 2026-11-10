@@ -675,7 +675,8 @@ observation and exposes `source_handoff()` for the next slice, without reopening
 Direct tests are `tests/test_package_role_identity.py`, which asserts a named **role and state** for
 every control rather than a bare "not clean"; the producer half is in `tests/test_package_unit.py`
 and `tests/test_package_unit_gates.py`. The correction controls are in
-`tests/test_package_role_identity_reproductions.py`, `tests/test_package_unit_reproductions.py` and
+the S2 review reproductions section of `tests/test_package_role_identity.py`, in
+`tests/test_package_unit_reproductions.py` and
 `tests/test_check_reference_readiness.py`, including both `[clean, blocked]` and `[blocked, clean]`
 target orders and the exact structured S2 finding.
 
