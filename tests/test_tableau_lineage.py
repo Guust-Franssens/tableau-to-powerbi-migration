@@ -442,6 +442,15 @@ def test_the_printed_plan_states_the_precedence_rule_and_attributes_each_edge(
     assert f"{SALES_DS}: Metadata API saw 0 consumer(s), survey saw 2" in output
     assert f"-> {REVENUE_WB:<44} [survey]" in output
     assert f"-> {ADMIN_WB:<44} [both]" in output
+    assert "3 published data source(s) feed 4 workbook(s). 1 are SHARED by more than one workbook." in output
+    assert "the Metadata API alone saw 1 data source(s) feeding 1 workbook(s); the survey raised that to 3 and 4." in (
+        output
+    )
+    assert "NO downstream workbooks in EITHER source" in output
+    assert "these may be abandoned" in output
+    orphans = output.split("EITHER source")[1]
+    assert UNUSED_DS in orphans
+    assert SALES_DS not in orphans
 
 
 def test_the_precedence_rule_is_stated_even_when_the_two_sources_agree(
@@ -461,18 +470,6 @@ def test_the_precedence_rule_is_stated_even_when_the_two_sources_agree(
     assert "DISAGREEMENTS" not in output
 
 
-def test_headline_counts_come_from_the_merged_graph(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
-    """The summary line is what gets quoted at a decision point, so it must reflect the merge."""
-    datasources, survey_path = _sqlproxy_estate(tmp_path)
-    survey = load_survey(survey_path)
-    output = _rendered(caplog, build_plan(datasources, "", survey), survey)
-
-    assert "3 published data source(s) feed 4 workbook(s). 1 are SHARED by more than one workbook." in output
-    assert "the Metadata API alone saw 1 data source(s) feeding 1 workbook(s); the survey raised that to 3 and 4." in (
-        output
-    )
-
-
 def test_without_a_survey_the_output_never_says_abandoned(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     """The wording guard. Without a survey the tool cannot support the word at all.
 
@@ -486,21 +483,6 @@ def test_without_a_survey_the_output_never_says_abandoned(tmp_path: Path, caplog
     assert "no downstream usage VISIBLE TO THE METADATA API" in output
     assert "NO --survey WAS SUPPLIED" in output
     assert "python scripts/tableau_lineage.py --plan --survey" in output
-
-
-def test_with_a_complete_survey_a_genuine_orphan_may_be_called_abandoned(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
-    """With both sources agreeing there is no consumer, the stronger claim IS supported."""
-    datasources, survey_path = _sqlproxy_estate(tmp_path)
-    survey = load_survey(survey_path)
-    output = _rendered(caplog, build_plan(datasources, "", survey), survey)
-
-    assert "NO downstream workbooks in EITHER source" in output
-    assert "these may be abandoned" in output
-    orphans = output.split("EITHER source")[1]
-    assert UNUSED_DS in orphans
-    assert SALES_DS not in orphans
 
 
 def test_an_incomplete_survey_withholds_the_stronger_claim(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:

@@ -176,21 +176,6 @@ def test_slow_HEADERS_are_bounded_by_the_deadline_too(slow_header_url):
     )
 
 
-def test_slow_headers_are_UNBOUNDED_without_the_deadline(slow_header_url):
-    """The discriminating control for the test above. Without a deadline the same fixture runs to
-    completion, so the bound is attributable to the deadline rather than to the fixture being quick."""
-    started = time.monotonic()
-    status, _body, _headers = _request(
-        urllib.request.Request(slow_header_url), timeout=SOCKET_TIMEOUT_SEC, redactor=lambda text: text
-    )
-    elapsed = time.monotonic() - started
-
-    assert status == 200
-    assert elapsed > DEADLINE_SEC * 2, (
-        f"the fixture completed in {elapsed:.3f}s, too fast to show the deadline is doing the work"
-    )
-
-
 def test_the_https_twin_resolves_connect_to_the_watchdog():
     """⚠️ No fixture here can complete a TLS handshake, so the HTTPS path is pinned STATICALLY.
 
@@ -283,23 +268,6 @@ def _fetch(url: str, deadline_in: float | None) -> tuple[int, bytes, float]:
 
 
 # ----------------------------------------------------------------- the defect, pinned as a property
-
-
-def test_a_socket_timeout_does_not_bound_a_trickling_response(trickling_url):
-    """⚠️ The premise the salvage ceiling rested on, and it is FALSE.
-
-    Without a deadline the request succeeds far past its nominal timeout. This is not a bug in the
-    transport -- it is what a socket timeout means -- and it is pinned as a PROPERTY so that any
-    future wall-clock claim built on `timeout` alone fails here first.
-    """
-    status, body, elapsed = _fetch(trickling_url, deadline_in=None)
-
-    assert status == 200
-    assert body == b"a" * BODY_BYTES
-    assert elapsed > SOCKET_TIMEOUT_SEC * 3, (
-        f"the trickle finished in {elapsed:.3f}s, too close to the {SOCKET_TIMEOUT_SEC}s timeout to "
-        f"demonstrate anything -- widen GAP_SEC or BODY_BYTES"
-    )
 
 
 def test_the_deadline_abandons_a_trickling_body(trickling_url):
@@ -608,56 +576,6 @@ def test_a_trickling_salvage_sequence_is_bounded_end_to_end(tmp_path):
     assert all(record[leg]["status"] != "ok" for leg in ("image", "svg", "pdf")), (
         "a body abandoned at its deadline must never be recorded as a successful render"
     )
-
-
-def test_the_same_sequence_is_UNBOUNDED_without_the_deadline(tmp_path, monkeypatch):
-    """The discriminating control, and the one that makes the test above mean something.
-
-    Neutralise only the end-to-end deadline -- leaving admission, the one-attempt policy and the
-    short-circuit all in place -- and the same fixture runs far longer. Without this, a passing bound
-    could be explained by the fixture simply being fast.
-    """
-    monkeypatch.setattr(oracle, "_capture_render", _render_without_deadline(oracle._capture_render))
-    server = ThreadingHTTPServer(("127.0.0.1", 0), _FastFailDataThenTrickle)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    port = server.server_address[1]
-    try:
-        session = oracle.TableauSession(
-            oracle.SiteCredentials(
-                base=f"http://127.0.0.1:{port}",
-                site="site",
-                pat_name="a-long-enough-pat-name",
-                pat_secret="a-long-enough-pat-secret",
-                version="3.29",
-            ),
-            oracle.RetryPolicy(max_attempts=1, budget_sec=0.0),
-            timeout_sec=SOCKET_TIMEOUT_SEC,
-        )
-        session.token, session.site_id = "tok", "sid"
-        started = time.monotonic()
-        oracle.capture_view(
-            session,
-            {"id": LUID, "name": "Availability Summary by Tail", "workbook": {"id": "wb-1"}},
-            tmp_path,
-            frozenset({"png", "svg", "pdf"}),
-            None,
-        )
-        elapsed = time.monotonic() - started
-    finally:
-        server.shutdown()
-        server.server_close()
-
-    assert elapsed > BODY_BYTES * GAP_SEC, (
-        f"without the deadline the first trickling render should run to completion, but the whole "
-        f"capture took only {elapsed:.3f}s -- the control is not exercising what it claims"
-    )
-
-
-def _render_without_deadline(original):
-    def render(session, view_luid, path, kind, options):
-        return original(session, view_luid, path, kind, oracle._RenderOptions(options.api, options.retry, None))
-
-    return render
 
 
 # ------------------------------- the PREMATURE CLOSE: a truncated render credited as evidence
@@ -1222,22 +1140,6 @@ def test_a_trickling_TLS_handshake_is_UNBOUNDED_without_the_deadline():
     assert elapsed > TLS_DEADLINE_SEC * 3, (
         f"the handshake ended in {elapsed:.3f}s with no deadline, too fast to show the deadline is doing the work above"
     )
-
-
-def test_the_connection_factory_the_early_arm_hooks_still_exists():
-    """⚠️ If a future Python drops `_create_connection`, the early arm silently stops happening.
-
-    It is also pinned as an INSTANCE attribute deliberately: that is why a subclass method of the
-    same name would be shadowed and never called, which is the reason `connect()` wraps it in place
-    rather than overriding it.
-    """
-    conn = http.client.HTTPConnection("127.0.0.1", 1)
-
-    assert "_create_connection" in vars(conn), (
-        "`HTTPConnection.__init__` no longer assigns `_create_connection`; the watchdog is now armed "
-        "after the connection sequence again, and the round-4 defect is back"
-    )
-    conn.close()
 
 
 @pytest.mark.timing

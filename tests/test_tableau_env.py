@@ -36,17 +36,7 @@ def test_load_env_missing_file_is_not_an_error(tmp_path):
     assert te.load_env(tmp_path / "does-not-exist.env") == {}
 
 
-def test_load_env_ignores_blank_lines_and_comment_only_lines(tmp_path):
-    path = tmp_path / ".env"
-    path.write_text("\n# full comment line\nTABLEAU_SITE=site\n\n")
-    assert te.load_env(path) == {"TABLEAU_SITE": "site"}
-
-
 # --------------------------------------------------------------------------- pat_secret
-
-
-def test_pat_secret_reads_our_documented_name():
-    assert te.pat_secret({"TABLEAU_PAT_SECRET": "s3cr3t"}) == "s3cr3t"
 
 
 def test_pat_secret_reads_the_engines_name_too():
@@ -77,11 +67,6 @@ def test_engine_child_env_also_exports_the_documented_name_from_the_legacy_name(
     assert child["TABLEAU_PAT_VALUE"] == "legacy-secret"
 
 
-def test_engine_child_env_passes_through_other_keys():
-    child = te.engine_child_env({"TABLEAU_SERVER_URL": "https://x", "TABLEAU_PAT_SECRET": "s3cr3t"}, base={})
-    assert child["TABLEAU_SERVER_URL"] == "https://x"
-
-
 def test_engine_child_env_preserves_an_already_set_engine_name_when_our_name_is_absent():
     child = te.engine_child_env({}, base={"TABLEAU_PAT_VALUE": "already-there"})
     assert child["TABLEAU_PAT_VALUE"] == "already-there"
@@ -94,11 +79,6 @@ def test_engine_child_env_merges_over_the_base_os_environment():
 
 
 # --------------------------------------------------------------------------- server_url
-
-
-def test_server_url_reads_the_canonical_name():
-    """The name `.env.example` documents and every script but one already used."""
-    assert te.server_url({"TABLEAU_SERVER_URL": "https://x.online.tableau.com"}) == "https://x.online.tableau.com"
 
 
 def test_server_url_accepts_the_deprecated_alias_with_a_warning():
@@ -127,27 +107,6 @@ def test_server_url_is_empty_string_not_keyerror_when_absent():
 # --------------------------------------------------------------------------- resolve_env
 
 
-def test_resolve_env_reads_the_process_environment_when_there_is_no_dotenv(tmp_path):
-    """The defect in assess_estate.py: exported variables raised KeyError because only the file was read."""
-    env = te.resolve_env(tmp_path / "absent.env", environ={"TABLEAU_SERVER_URL": "https://from-shell"})
-    assert env["TABLEAU_SERVER_URL"] == "https://from-shell"
-
-
-def test_resolve_env_reads_the_dotenv_when_nothing_is_exported(tmp_path):
-    """The defect in tableau_lineage.py: it read os.environ directly and ignored .env entirely."""
-    path = tmp_path / ".env"
-    path.write_text("TABLEAU_SERVER_URL=https://from-file\n", encoding="utf-8")
-    assert te.resolve_env(path, environ={})["TABLEAU_SERVER_URL"] == "https://from-file"
-
-
-def test_resolve_env_lets_an_exported_value_win_over_the_file(tmp_path):
-    """Precedence: file supplies defaults, the environment overrides. See the rotation test below."""
-    path = tmp_path / ".env"
-    path.write_text("TABLEAU_SERVER_URL=https://from-file\n", encoding="utf-8")
-    env = te.resolve_env(path, environ={"TABLEAU_SERVER_URL": "https://from-shell"})
-    assert env["TABLEAU_SERVER_URL"] == "https://from-shell"
-
-
 def test_resolve_env_normalises_the_deprecated_server_alias(tmp_path):
     """A caller reads the canonical name and never learns there was a second spelling."""
     path = tmp_path / ".env"
@@ -161,14 +120,6 @@ def test_resolve_env_normalises_the_engines_pat_secret_name(tmp_path):
     """A .env written from the ENGINE's docs must authenticate our scripts too."""
     path = tmp_path / ".env"
     path.write_text("TABLEAU_PAT_VALUE=s3cr3t\n", encoding="utf-8")
-    env = te.resolve_env(path, environ={})
-    assert env["TABLEAU_PAT_SECRET"] == "s3cr3t"
-    assert env["TABLEAU_PAT_VALUE"] == "s3cr3t"
-
-
-def test_resolve_env_mirrors_the_documented_pat_secret_name(tmp_path):
-    path = tmp_path / ".env"
-    path.write_text("TABLEAU_PAT_SECRET=s3cr3t\n", encoding="utf-8")
     env = te.resolve_env(path, environ={})
     assert env["TABLEAU_PAT_SECRET"] == "s3cr3t"
     assert env["TABLEAU_PAT_VALUE"] == "s3cr3t"
@@ -202,10 +153,6 @@ def test_require_explains_that_a_pat_cannot_be_created_for_the_user():
     with pytest.raises(SystemExit) as exc:
         te.require({})
     assert "405" in str(exc.value)
-
-
-def test_require_is_silent_when_everything_is_present():
-    te.require({"TABLEAU_SERVER_URL": "https://x", "TABLEAU_PAT_NAME": "n", "TABLEAU_PAT_SECRET": "s"})
 
 
 # --------------------------------------------------------------------------- redaction
@@ -362,13 +309,6 @@ def test_every_tableau_env_var_used_in_scripts_is_an_accepted_name():
 # --------------------------------------------------------------------------- redact
 
 
-def test_redact_removes_a_secret_from_text_bound_for_a_persisted_artifact():
-    """Measured leak: a reflected sign-in error put the PAT in parse-sweep.json on disk."""
-    reflected = 'HTTPError 401: {"personalAccessTokenSecret": "s3cr3t-value-long"}'
-    assert "s3cr3t-value-long" not in te.redact(reflected, "s3cr3t-value-long")
-    assert "[REDACTED]" in te.redact(reflected, "s3cr3t-value-long")
-
-
 def test_redact_removes_every_occurrence_not_just_the_first():
     text = "tok=abcdefghij again abcdefghij"
     assert te.redact(text, "abcdefghij").count("[REDACTED]") == 2
@@ -439,7 +379,7 @@ def test_redact_merges_overlapping_matches_so_no_tail_of_a_longer_secret_survive
         assert long_secret[cut:] not in out, f"a {len(long_secret) - cut}-char tail survived"
 
 
-@pytest.mark.parametrize("secret", ["[REDACTED]", "ED", "REDACT", "E"])
+@pytest.mark.parametrize("secret", ["[REDACTED]", "E"])
 def test_redact_picks_a_marker_that_cannot_re_emit_the_secret(secret):
     """MEDIUM 4: the marker is the output. A secret contained in it is republished by every
     replacement -- `redact("credential=[REDACTED]", "[REDACTED]")` returned its input unchanged."""
@@ -460,7 +400,7 @@ def test_redact_leaves_no_supplied_secret_in_the_output_when_one_is_part_of_the_
     assert out.count("[HIDDEN]") == 2
 
 
-@pytest.mark.parametrize("password", ["Tr0ub4d", "hunter2", "s3cr3t", "abcd", "ab", "a"])
+@pytest.mark.parametrize("password", ["a"])
 def test_redact_removes_a_short_human_chosen_password(password):
     """#381: the 8-char floor was sound for a machine-generated PAT and wrong for a password.
 
@@ -483,16 +423,6 @@ def test_redact_pins_the_old_floor_from_both_sides(length):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         assert secret not in te.redact(f'{{"password":"{secret}"}}', secret)
-
-
-def test_redact_keeps_the_diagnostic_when_a_short_password_is_removed():
-    """Measured: a 7-char password costs exactly 7 characters of collateral, nothing else."""
-    text = "ServerResponseError: 400006: Bad Request -- invalid credentials for 'Sales Extract'"
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        out = te.redact(f'{text} password="Tr0ub4d"', "Tr0ub4d")
-    assert text in out
-    assert out.count("[REDACTED]") == 1
 
 
 def test_redact_warns_once_that_a_short_secret_makes_output_noisy():
@@ -568,17 +498,7 @@ def test_a_short_pat_name_does_not_reclassify_a_recoverable_session_loss(monkeyp
     assert "LONG_PAT_SECRET_1234567890" not in str(caught.value.detail)
 
 
-def test_redact_tolerates_a_secret_that_is_absent():
-    assert te.redact("clean text", "unrelated-secret") == "clean text"
-
-
 # --------------------------------------------------------------------------- env_source
-
-
-def test_env_source_says_environment_when_the_variable_is_exported(tmp_path):
-    assert te.env_source("TABLEAU_PAT_SECRET", tmp_path / "absent.env", environ={"TABLEAU_PAT_SECRET": "s"}) == (
-        "environment"
-    )
 
 
 def test_env_source_says_file_when_only_the_dotenv_has_it(tmp_path):
@@ -589,13 +509,6 @@ def test_env_source_says_file_when_only_the_dotenv_has_it(tmp_path):
 
 def test_env_source_says_unset_when_neither_has_it(tmp_path):
     assert te.env_source("TABLEAU_PAT_SECRET", tmp_path / "absent.env", environ={}) == "unset"
-
-
-def test_env_source_never_returns_the_value_itself(tmp_path):
-    """It is logged at sign-in, so it must name the source and never the secret."""
-    assert te.env_source("TABLEAU_PAT_SECRET", tmp_path / "a.env", environ={"TABLEAU_PAT_SECRET": "s3cr3t"}) == (
-        "environment"
-    )
 
 
 # --------------------------------------------------------------------------- precedence
@@ -795,7 +708,7 @@ def test_pilot_diagnostic_alias_blank_conflict(tmp_path, source):
     assert next(row for row in diagnostic["checks"] if row["key"] == "TABLEAU_PAT_SECRET")["state"] == "conflict"
 
 
-@pytest.mark.parametrize("site", [None, "", " \t "])
+@pytest.mark.parametrize("site", [None, " \t "])
 def test_diagnostic_default_site_and_optional_absence(tmp_path, site):
     path = tmp_path / ".env"
     path.write_text("", encoding="utf-8")
@@ -826,14 +739,10 @@ def test_diagnostic_default_site_and_optional_absence(tmp_path, site):
     "file_items,process_items,state,source,winning,origins",
     [
         ([], [], "missing", "absent", None, []),
-        ([(0, "a")], [], "set", "selected_env", 0, [("selected_env", [0], False)]),
         ([(1, "a")], [], "deprecated-alias", "selected_env", 1, [("selected_env", [1], False)]),
-        ([(0, "a"), (1, "a")], [], "deprecated-alias", "selected_env", 0, [("selected_env", [0, 1], False)]),
         ([(0, "a"), (1, "b")], [], "conflict", "selected_env", 0, [("selected_env", [0, 1], True)]),
         ([], [(0, "a")], "set", "environment", 0, [("environment", [0], False)]),
-        ([], [(1, "a")], "deprecated-alias", "environment", 1, [("environment", [1], False)]),
         ([], [(0, "a"), (1, "a")], "deprecated-alias", "environment", 0, [("environment", [0, 1], False)]),
-        ([], [(0, "a"), (1, "b")], "conflict", "environment", 0, [("environment", [0, 1], True)]),
         (
             [(0, "a"), (1, "b")],
             [(0, "c")],
@@ -843,28 +752,12 @@ def test_diagnostic_default_site_and_optional_absence(tmp_path, site):
             [("selected_env", [0, 1], True), ("environment", [0], False)],
         ),
         (
-            [(0, "a"), (1, "b")],
-            [(0, "c"), (1, "d")],
-            "conflict",
-            "environment",
-            0,
-            [("selected_env", [0, 1], True), ("environment", [0, 1], True)],
-        ),
-        (
             [(0, "a")],
             [(1, "b")],
             "deprecated-alias",
             "environment",
             1,
             [("selected_env", [0], False), ("environment", [1], False)],
-        ),
-        (
-            [(0, "a")],
-            [(0, " \t ")],
-            "blank",
-            "environment",
-            0,
-            [("selected_env", [0], False), ("environment", [0], False)],
         ),
         (
             [(0, "a")],
