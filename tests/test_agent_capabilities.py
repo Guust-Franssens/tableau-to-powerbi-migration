@@ -5,6 +5,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
@@ -43,15 +45,19 @@ def _write_agent(root: Path, text: str = "example-flag") -> Path:
     return agent
 
 
-def _write_usage_script(root: Path, name: str, docstring_lines: list[str] | None = None) -> Path:
-    script = root / "scripts" / name
-    script.parent.mkdir()
-    lines = docstring_lines or [
-        "purpose: Exercise the script capability inventory.",
-        f"usage:   python scripts/{name}",
-    ]
-    script.write_text('"""\n' + "\n".join(lines) + '\n"""\n\nVALUE = 1\n', encoding="utf-8")
-    return script
+def _write_file(root: Path, relative: str, text: str = "VALUE = 1\n") -> Path:
+    path = root / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def _tier_fixture(tmp_path: Path, script_rows: str) -> Path:
+    registry = _write_registry(
+        tmp_path, "Use example-flag only after the model edit cannot change source rows.", script_rows=script_rows
+    )
+    _write_agent(tmp_path, "# Agent\n\nReach for example-flag only for formula-only work.\n")
+    return registry
 
 
 def test_registry_is_wired_in_current_tree() -> None:
@@ -111,88 +117,86 @@ def test_present_empty_script_inventory_passes_without_candidate_scripts(tmp_pat
     assert cac.validate(repo_root=tmp_path, registry_path=registry) == []
 
 
-def test_usage_script_without_agent_reachable_wiring_fails(tmp_path: Path) -> None:
-    """A usage-declared script cannot be silently absent from the routing surface."""
-    registry = _write_registry(
-        tmp_path,
-        "Use example-flag only after the model edit cannot change source rows.",
-        script_rows="| `scripts/forgotten_tool.py` | `agent-facing` | Should be documented. |\n",
-    )
-    _write_agent(tmp_path, "# Agent\n\nReach for example-flag only for formula-only work.\n")
-    _write_usage_script(tmp_path, "forgotten_tool.py")
+@pytest.mark.parametrize(
+    ("files", "rows", "expected"),
+    [
+        pytest.param(
+            ["tool.ps1"], "", "scripts/tool.ps1 has no tier row in docs/agent-capability-wiring.md", id="unlisted-ps1"
+        ),
+        pytest.param(
+            ["lib.py"], "", "scripts/lib.py has no tier row in docs/agent-capability-wiring.md", id="unlisted-library"
+        ),
+        pytest.param(
+            ["lib.py"],
+            "| `scripts/lib.py` | `internal` | |\n| `scripts/lib.py` | `internal` | |\n",
+            "scripts/lib.py is listed twice in the script capability inventory",
+            id="duplicate-row",
+        ),
+        pytest.param(
+            ["lib.py"],
+            "| `scripts/lib.py` | `agent-facing` | Old status. |\n",
+            "scripts/lib.py has unknown tier 'agent-facing'",
+            id="retired-tier",
+        ),
+        pytest.param(
+            [],
+            "| `scripts/gone.py` | `internal` | |\n",
+            "scripts/gone.py has a tier row but is not a tracked script",
+            id="stale-row",
+        ),
+    ],
+)
+def test_every_tracked_script_needs_one_valid_tier_row(
+    tmp_path: Path, files: list[str], rows: str, expected: str
+) -> None:
+    """R1: every tracked .py/.ps1 script, with or without usage:, has exactly one valid tier row."""
+    registry = _tier_fixture(tmp_path, rows)
+    for name in files:
+        _write_file(tmp_path, f"scripts/{name}")
 
     errors = cac.validate(repo_root=tmp_path, registry_path=registry)
 
-    assert len(errors) == 1
-    assert "scripts/forgotten_tool.py declares usage:" in errors[0]
-    assert "not wired into agent-reachable script guidance" in errors[0]
+    assert len(errors) == 1, errors
+    assert expected in errors[0]
 
 
-def test_usage_script_absent_from_inventory_fails_before_wiring(tmp_path: Path) -> None:
-    """A usage-declared script must be registered before wiring can be credited."""
-    registry = _write_registry(tmp_path, "Use example-flag only after the model edit cannot change source rows.")
-    _write_agent(tmp_path, "# Agent\n\nReach for example-flag only for formula-only work.\n")
-    _write_usage_script(tmp_path, "forgotten_tool.py")
-    readme = tmp_path / "scripts" / "README.md"
-    readme.write_text("| `forgotten_tool.py` | Does the documented thing. | agent |\n", encoding="utf-8")
+def test_core_script_named_only_in_scripts_readme_fails(tmp_path: Path) -> None:
+    """R2: the full script catalog is not a default route, so it cannot carry a core script."""
+    registry = _tier_fixture(tmp_path, "| `scripts/core_tool.py` | `core` | |\n")
+    _write_file(tmp_path, "scripts/core_tool.py")
+    _write_file(tmp_path, "scripts/README.md", "| `core_tool.py` | Does the core thing. | agent |\n")
 
     errors = cac.validate(repo_root=tmp_path, registry_path=registry)
 
-    assert len(errors) == 1
-    assert "scripts/forgotten_tool.py declares usage:" in errors[0]
-    assert "absent from" in errors[0]
-    assert "script capability inventory" in errors[0]
-
-
-def test_usage_script_wired_in_scripts_readme_passes(tmp_path: Path) -> None:
-    """Visible script guidance is the registered present-and-empty success state."""
-    registry = _write_registry(
-        tmp_path,
-        "Use example-flag only after the model edit cannot change source rows.",
-        script_rows="| `scripts/documented_tool.py` | `agent-facing` | Documented script. |\n",
-    )
-    _write_agent(tmp_path, "# Agent\n\nReach for example-flag only for formula-only work.\n")
-    _write_usage_script(tmp_path, "documented_tool.py")
-    readme = tmp_path / "scripts" / "README.md"
-    readme.write_text("| `documented_tool.py` | Does the documented thing. | agent |\n", encoding="utf-8")
-
+    assert errors == ["core script scripts/core_tool.py is not named in AGENTS.md or docs/INDEX.md"]
+    _write_file(tmp_path, "AGENTS.md", "Run `python scripts/core_tool.py`.\n")
     assert cac.validate(repo_root=tmp_path, registry_path=registry) == []
 
 
-def test_internal_usage_script_needs_reason(tmp_path: Path) -> None:
-    """Internal is an explicit reasoned state, not another spelling of absent."""
-    registry = _write_registry(tmp_path, "Use example-flag only after the model edit cannot change source rows.")
-    _write_agent(tmp_path, "# Agent\n\nReach for example-flag only for formula-only work.\n")
-    _write_usage_script(
+def test_advanced_script_in_dispatcher_doc_fails_even_inside_a_fence(tmp_path: Path) -> None:
+    """R4: agents read fenced commands, so a fence still routes; an HTML comment does not."""
+    registry = _tier_fixture(tmp_path, "| `scripts/adv_tool.py` | `advanced` | |\n")
+    _write_file(tmp_path, "scripts/adv_tool.py")
+    index = _write_file(tmp_path, "docs/INDEX.md", "# Index\n\n<!-- python scripts/adv_tool.py -->\n")
+    assert cac.validate(repo_root=tmp_path, registry_path=registry) == []
+
+    index.write_text("# Index\n\n```text\npython scripts/adv_tool.py\n```\n", encoding="utf-8")
+    errors = cac.validate(repo_root=tmp_path, registry_path=registry)
+
+    assert errors == ["advanced script scripts/adv_tool.py named in docs/INDEX.md"]
+
+
+def test_persona_may_name_advanced_but_not_internal(tmp_path: Path) -> None:
+    """R3: personas are specialised on-demand routes for advanced scripts, never for internal ones."""
+    registry = _write_registry(
         tmp_path,
-        "private_tool.py",
-        [
-            "purpose: Exercise the script capability inventory.",
-            "usage:   python scripts/private_tool.py",
-            "internal: true",
-        ],
+        "Use example-flag only after the model edit cannot change source rows.",
+        script_rows="| `scripts/adv_tool.py` | `advanced` | |\n| `scripts/int_tool.py` | `internal` | |\n",
     )
+    _write_agent(tmp_path, "# Agent\n\nUse example-flag. Run `adv_tool.py`, never `scripts/int_tool.py`.\n")
+    _write_file(tmp_path, "scripts/adv_tool.py")
+    _write_file(tmp_path, "scripts/int_tool.py")
 
     errors = cac.validate(repo_root=tmp_path, registry_path=registry)
 
-    assert len(errors) == 1
-    assert "scripts/private_tool.py declares usage: and internal: true" in errors[0]
-    assert "has no internal-reason line" in errors[0]
-
-
-def test_internal_usage_script_with_reason_passes(tmp_path: Path) -> None:
-    """A reasoned internal marker is the deliberate-exclusion state."""
-    registry = _write_registry(tmp_path, "Use example-flag only after the model edit cannot change source rows.")
-    _write_agent(tmp_path, "# Agent\n\nReach for example-flag only for formula-only work.\n")
-    _write_usage_script(
-        tmp_path,
-        "private_tool.py",
-        [
-            "purpose: Exercise the script capability inventory.",
-            "usage:   python scripts/private_tool.py",
-            "internal: true",
-            "internal-reason: called only by a generated fixture harness.",
-        ],
-    )
-
-    assert cac.validate(repo_root=tmp_path, registry_path=registry) == []
+    assert errors == ["internal script scripts/int_tool.py named in .github/agents/pbi-semantic-builder.agent.md"]

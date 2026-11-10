@@ -1,8 +1,6 @@
 """
 purpose: Invalidate stale issue routing and reject changed targets before gh-aw publishes.
 usage: python scripts/issue_intake_guard.py prepare|check
-internal: true
-internal-reason: Actions-only helper for .github/workflows/issue-intake.md, not a migration command.
 """
 
 import argparse

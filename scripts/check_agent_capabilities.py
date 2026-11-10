@@ -1,11 +1,10 @@
 """
-purpose: Verify shipped capabilities are wired into agent-reachable guidance.
+purpose: Verify shipped capabilities are wired into agent-reachable guidance and every script has a tier.
 usage:   python scripts/check_agent_capabilities.py
 """
 
 from __future__ import annotations
 
-import ast
 import re
 import subprocess
 import sys
@@ -20,9 +19,10 @@ VISIBLE_TEXT_PATTERNS = (
     re.compile(r"<!--.*?-->", re.DOTALL),
     re.compile(r"^```.*?^```", re.DOTALL | re.MULTILINE),
 )
-USAGE_LINE_RE = re.compile(r"^\s*usage\s*:", re.IGNORECASE | re.MULTILINE)
-INTERNAL_MARKER_RE = re.compile(r"^\s*internal\s*:\s*true\s*$", re.IGNORECASE | re.MULTILINE)
-INTERNAL_REASON_RE = re.compile(r"^\s*internal-reason\s*:\s*(\S.*)$", re.IGNORECASE | re.MULTILINE)
+HTML_COMMENT_RE = VISIBLE_TEXT_PATTERNS[0]
+TIERS = ("core", "advanced", "internal")
+CORE_ROUTES = ("AGENTS.md", "docs/INDEX.md")
+DISPATCHER_DOCS = ("AGENTS.md", ".github/copilot-instructions.md", "docs/INDEX.md")
 
 
 @dataclass(frozen=True)
@@ -38,19 +38,11 @@ class Capability:
 
 
 @dataclass(frozen=True)
-class ScriptCapability:
-    """One runnable script declared by its module docstring."""
+class ScriptClassification:
+    """One registry row assigning a tracked script its tier."""
 
     path: str
-    internal: bool
-    internal_reason: str | None
-
-
-@dataclass(frozen=True)
-class ScriptClassification:
-    """One registry row classifying a runnable script."""
-
-    status: str
+    tier: str
     reason: str
     line_number: int
 
@@ -101,9 +93,9 @@ def parse_registry(registry_path: Path = REGISTRY_PATH) -> list[Capability]:
     return capabilities
 
 
-def parse_script_inventory(registry_path: Path = REGISTRY_PATH) -> dict[str, ScriptClassification]:
-    """Read explicit script-capability classifications from the registry."""
-    classifications: dict[str, ScriptClassification] = {}
+def parse_script_inventory(registry_path: Path = REGISTRY_PATH) -> list[ScriptClassification]:
+    """Read every script tier row from the registry, keeping duplicates so the gate can name them."""
+    rows: list[ScriptClassification] = []
     in_inventory = False
     for line_number, line in enumerate(registry_path.read_text(encoding="utf-8").splitlines(), start=1):
         stripped = line.strip()
@@ -117,28 +109,20 @@ def parse_script_inventory(registry_path: Path = REGISTRY_PATH) -> dict[str, Scr
         cells = _split_table_row(stripped)
         if len(cells) != 3 or cells[0] in {"Script", "---"} or set(cells[0]) == {"-"}:
             continue
-        classifications[_normalise_slashes(_strip_inline_code(cells[0]))] = ScriptClassification(
-            status=_strip_inline_code(cells[1]).lower(),
-            reason=cells[2],
-            line_number=line_number,
+        rows.append(
+            ScriptClassification(
+                path=_normalise_slashes(_strip_inline_code(cells[0])),
+                tier=_strip_inline_code(cells[1]).lower(),
+                reason=cells[2],
+                line_number=line_number,
+            )
         )
-    return classifications
+    return rows
 
 
 def _is_agent_reachable(path: str) -> bool:
     """Files a subagent can be directed to read or receives in its persona."""
     return path in {"AGENTS.md", "docs/INDEX.md"} or bool(AGENT_FILE_RE.match(path))
-
-
-def _script_wiring_paths(repo_root: Path) -> list[Path]:
-    """Files whose visible prose can route agents to runnable script capabilities."""
-    paths = [
-        repo_root / "AGENTS.md",
-        repo_root / "docs" / "INDEX.md",
-        repo_root / "scripts" / "README.md",
-    ]
-    paths.extend(sorted((repo_root / ".github" / "agents").glob("*.agent.md")))
-    return paths
 
 
 def _visible_text(text: str) -> str:
@@ -149,96 +133,69 @@ def _visible_text(text: str) -> str:
     return visible
 
 
-def _tracked_script_paths(repo_root: Path) -> list[Path]:
-    """Return tracked Python scripts, falling back to the filesystem for fixture repos."""
+def _tracked_script_paths(repo_root: Path) -> list[str]:
+    """Return tracked scripts, falling back to the filesystem for fixture repos."""
     result = subprocess.run(
-        ["git", "-C", str(repo_root), "ls-files", "scripts/*.py"],
+        ["git", "-C", str(repo_root), "ls-files", "scripts/*.py", "scripts/*.ps1"],
         capture_output=True,
         text=True,
         check=False,
     )
     if result.returncode == 0 and result.stdout.strip():
-        return [repo_root / Path(path) for path in result.stdout.splitlines()]
-    return sorted((repo_root / "scripts").glob("*.py"))
+        return sorted(_normalise_slashes(path) for path in result.stdout.splitlines())
+    scripts_dir = repo_root / "scripts"
+    return sorted(f"scripts/{path.name}" for pattern in ("*.py", "*.ps1") for path in scripts_dir.glob(pattern))
 
 
-def _module_docstring(path: Path) -> str:
-    """Return a Python file's module docstring, or an empty string when it has none."""
-    try:
-        return ast.get_docstring(ast.parse(path.read_text(encoding="utf-8"))) or ""
-    except (OSError, SyntaxError):
-        return ""
+def _routing_texts(repo_root: Path) -> dict[str, str]:
+    """Dispatcher docs and personas as an agent reads them: fences count, HTML comments do not."""
+    paths = list(DISPATCHER_DOCS)
+    paths.extend(
+        f".github/agents/{path.name}" for path in sorted((repo_root / ".github" / "agents").glob("*.agent.md"))
+    )
+    return {
+        path: HTML_COMMENT_RE.sub("", (repo_root / path).read_text(encoding="utf-8"))
+        for path in paths
+        if (repo_root / path).is_file()
+    }
 
 
-def _declared_script_capabilities(repo_root: Path) -> list[ScriptCapability]:
-    """Find scripts whose docstring declares a runnable usage line."""
-    scripts: list[ScriptCapability] = []
-    for script_path in _tracked_script_paths(repo_root):
-        docstring = _module_docstring(script_path)
-        if not USAGE_LINE_RE.search(docstring):
-            continue
-        reason_match = INTERNAL_REASON_RE.search(docstring)
-        scripts.append(
-            ScriptCapability(
-                path=_normalise_slashes(str(script_path.relative_to(repo_root))),
-                internal=bool(INTERNAL_MARKER_RE.search(docstring)),
-                internal_reason=reason_match.group(1).strip() if reason_match else None,
-            )
-        )
-    return scripts
+def _names_script(text: str, script_path: str) -> bool:
+    """Whether text names the script file, bare or behind a path prefix."""
+    return re.search(r"(?<![\w.-])" + re.escape(Path(script_path).name), text) is not None
 
 
-def _agent_reachable_script_text(repo_root: Path) -> str:
-    """Concatenate visible prose from script-routing documents that exist in this checkout."""
-    chunks: list[str] = []
-    for path in _script_wiring_paths(repo_root):
-        if path.is_file():
-            chunks.append(_visible_text(path.read_text(encoding="utf-8")))
-    return "\n".join(chunks)
-
-
-def _script_is_wired(script: ScriptCapability, visible_text: str) -> bool:
-    """Whether a runnable script is named in visible script-routing prose."""
-    return script.path in visible_text or Path(script.path).name in visible_text
-
-
-def _validate_script_capabilities(repo_root: Path, registry_path: Path) -> list[str]:
-    """Require every runnable script to be wired or explicitly internal."""
+def _validate_script_tiers(repo_root: Path, registry_path: Path) -> list[str]:
+    """R1 one valid tier row per tracked script; R2-R4 tiers decide where a script may be named."""
     errors: list[str] = []
-    visible_text = _agent_reachable_script_text(repo_root)
-    scripts = _declared_script_capabilities(repo_root)
-    classifications = parse_script_inventory(registry_path)
-    for script in scripts:
-        classification = classifications.get(script.path)
-        if classification is None and not script.internal:
-            errors.append(
-                f"{script.path} declares usage: in its module docstring, but is absent from "
-                f"{registry_path.relative_to(repo_root)}'s script capability inventory"
-            )
+    registry_name = _normalise_slashes(str(registry_path.relative_to(repo_root)))
+    tracked = _tracked_script_paths(repo_root)
+    rows = parse_script_inventory(registry_path)
+    tiers: dict[str, str] = {}
+    listed: set[str] = set()
+    for row in rows:
+        if row.path in listed:
+            errors.append(f"line {row.line_number}: {row.path} is listed twice in the script capability inventory")
+        elif row.tier not in TIERS:
+            errors.append(f"line {row.line_number}: {row.path} has unknown tier {row.tier!r}; use {', '.join(TIERS)}")
+        else:
+            tiers[row.path] = row.tier
+        listed.add(row.path)
+        if row.path not in tracked:
+            errors.append(f"line {row.line_number}: {row.path} has a tier row but is not a tracked script")
+    texts = _routing_texts(repo_root)
+    for script in tracked:
+        if script not in listed:
+            errors.append(f"{script} has no tier row in {registry_name}'s script capability inventory")
+        tier = tiers.get(script)
+        if tier is None:
             continue
-        if script.internal:
-            if not script.internal_reason:
-                errors.append(f"{script.path} declares usage: and internal: true, but has no internal-reason line")
-            continue
-        if classification.status not in {"agent-facing", "internal"}:
-            errors.append(
-                f"line {classification.line_number}: {script.path} has unknown script inventory status "
-                f"{classification.status!r}; use agent-facing or internal"
-            )
-            continue
-        if not classification.reason:
-            errors.append(f"line {classification.line_number}: {script.path} has no script inventory reason")
-            continue
-        if classification.status == "internal":
-            continue
-        if not _script_is_wired(script, visible_text):
-            errors.append(
-                f"{script.path} declares usage: in its module docstring, but is not wired into "
-                "agent-reachable script guidance and is not marked internal with an internal-reason"
-            )
-    declared_paths = {script.path for script in scripts}
-    for script_path in sorted(set(classifications) - declared_paths):
-        errors.append(f"{script_path} is listed in the script capability inventory but is not a usage-declared script")
+        if tier == "core" and not any(_names_script(texts.get(doc, ""), script) for doc in CORE_ROUTES):
+            errors.append(f"core script {script} is not named in AGENTS.md or docs/INDEX.md")
+        forbidden = {"internal": list(texts), "advanced": list(DISPATCHER_DOCS)}.get(tier, [])
+        for doc in forbidden:
+            if doc in texts and _names_script(texts[doc], script):
+                errors.append(f"{tier} script {script} named in {doc}")
     return errors
 
 
@@ -276,7 +233,7 @@ def validate(repo_root: Path = REPO_ROOT, registry_path: Path | None = None) -> 
                 f"Suggested visible wording: {capability.wording}"
             )
     if SCRIPT_INVENTORY_HEADING in registry_text:
-        errors.extend(_validate_script_capabilities(repo_root, registry))
+        errors.extend(_validate_script_tiers(repo_root, registry))
     return errors
 
 

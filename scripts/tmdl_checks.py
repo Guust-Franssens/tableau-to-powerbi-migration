@@ -1,10 +1,6 @@
 """
 purpose: TMDL structural checks - the half of the model gate that reads TMDL rather than M.
 usage:   imported by scripts/check_datamodel.py (which re-exports these names)
-internal: true
-internal-reason: a library with no CLI of its own. Agents reach every check here by running
-                 `python scripts/check_datamodel.py`, which is the agent-facing entry point and is
-                 already named in scripts/README.md.
 
 Split out of check_datamodel.py so neither half needs a `too-many-lines` waiver. The two halves
 share only the shape of their output: this module reports `TmdlFinding`, the M scanner reports

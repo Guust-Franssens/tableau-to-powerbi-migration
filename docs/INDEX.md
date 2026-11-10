@@ -7,7 +7,7 @@ Map of maps for agent-facing knowledge. Start here, then open the matching index
 
 ## Start here for a migration unit
 
-1. `python scripts/check_reference_readiness.py <package> [...]` — **after deterministic emission and applicable binding, before agentic dispatch**. The final Phase-1 package-only verdict is **`START_READY / 0`** only when boundary, current S1/S2, issued v2 brief, source, canonical data access, reference policy and fresh binding inspection all pass. Bind separately with `set_data_folder.py --package <absolute-package>`; supply a shared provider and consumer in **ONE final check**, never a consumer alone. Established findings exit 1; `CANNOT_ESTABLISH` exits 3; neither permits dispatch. Ordinary `<bundle>` targets retain reference-only `READY`/engine-earned `NOT_APPLICABLE`, never package START_READY. Reference grades and `limitations_encountered` remain unchanged; BOUND stays UNVALIDATED. See [final START_READY](reference-readiness.md#final-package-start_ready-562-622) and the authoritative [conversion, dispatch, and fidelity boundaries](reference-readiness.md#conversion-dispatch-and-fidelity-boundaries).
+1. `python scripts/check_reference_readiness.py <package> [...]` — **after deterministic emission, `package_unit.py` packaging and applicable binding, before agentic dispatch**. The final Phase-1 package-only verdict is **`START_READY / 0`** only when boundary, current S1/S2, issued v2 brief, source, canonical data access, reference policy and fresh binding inspection all pass. Bind separately with `set_data_folder.py --package <absolute-package>`; supply a shared provider and consumer in **ONE final check**, never a consumer alone. Established findings exit 1; `CANNOT_ESTABLISH` exits 3; neither permits dispatch. Ordinary `<bundle>` targets retain reference-only `READY`/engine-earned `NOT_APPLICABLE`, never package START_READY. Reference grades and `limitations_encountered` remain unchanged; BOUND stays UNVALIDATED. See [final START_READY](reference-readiness.md#final-package-start_ready-562-622) and the authoritative [conversion, dispatch, and fidelity boundaries](reference-readiness.md#conversion-dispatch-and-fidelity-boundaries).
 2. `python scripts/check_unit.py <unit-or-bundle> --scope <model|report|integration|all>` — diagnostics. **Sole COMPLETE authority:** `python scripts/check_unit.py <package> --scope all --receipt-sha256 <H>`, with exact caller-supplied lowercase 64-hex H, no prefix or token discovery. Tokenless all-scope stays non-success; layers never COMPLETE. Current v2 numeric `none` waives comparison only; required/unknown remains `CANNOT_ESTABLISH(NUMERIC)`. [Evidence, exact disclosures and current-snapshot limits](../scripts/README.md#phase-2-complete--one-caller-pinned-current-snapshot-check); direct gates isolate findings.
 3. `python scripts/read_handover.py <bundle> --workbook <name>` — residual work queue and engine-block reason.
 4. Live database sources: run the `live-source-reachability` skill **before builders start**. It delegates to `pbip-model-refresh`'s existing automatic-source procedure on the shipped working copy with named canaries; any sign-in or other dialog is a human stop. START_READY can admit `live_unproven`; a live unit reaches COMPLETE only with `check_unit`'s same-run PASS `data-evidence` row and independent fidelity sign-off.
@@ -17,9 +17,9 @@ Map of maps for agent-facing knowledge. Start here, then open the matching index
    `powerbi-ai-readiness` for Copilot/Q&A metadata.
 6. `python scripts/promote_unit.py --package <package> --slug <slug> --receipt-sha256 <H>` — **the last hop** from the checked package, forwarding identical caller H to the public all-scope checker and preserving its result/disclosures. A stored token is observation, never future authority. `--force` conflicts with H before effects; force alone prints/records exactly **PROMOTED unchecked; Phase-2 COMPLETE was not established.** Content, resolved containment, external-data, host-path, model-reference and transaction guards remain non-forceable. Shared/report-free shipment mechanics do not become COMPLETE-supported classes. Exits: 0 promoted / 1 gate refusal / 2 CANNOT_ASSESS / 3 content refusal / 4 promotion failure / 5 external-data refusal / 6 host-path refusal / 64 usage. [Phase-3 mechanics](migration-phases.md#phase-3--ship); promotion is not deployment, durable persistence or receiving-machine proof.
 
-After a machine-wide Power BI sign-in, rerun the skill's refresh for each live unit that stopped on a dialog. Run trees made before the credential gate was retired may still deny writes; `python scripts/disarm_credential_gate.py <root> --apply` removes that.
+After a machine-wide Power BI sign-in, rerun the skill's refresh for each live unit that stopped on a dialog. Run trees made before the credential gate was retired may still deny writes; [runbook §4.14](operator-runbook.md#414-an-old-run-folder-refuses-writes-after-the-credential-gate-was-retired) removes that.
 
-Toolkit-maintenance scripts live in `scripts/README.md`, outside the per-unit route.
+Every other script is advanced or internal, outside the per-unit route; tiers live in the [script capability inventory](agent-capability-wiring.md#script-capability-inventory).
 
 ## Retrospective targets
 
@@ -29,7 +29,7 @@ orchestration-specific.
 
 | Learning about | Put it here |
 |---|---|
-| Every agent | `AGENTS.md` conventions block, then run `scripts/sync_agent_conventions.py` |
+| Every agent | `AGENTS.md` conventions block, then re-run the conventions sync (CI flags drift) |
 | Live-source reachability / credential stops | `.github/skills/live-source-reachability/SKILL.md` or `docs/data-source-credentials.md` |
 | PBIR / visual / Desktop craft | `.github/skills/powerbi-report-gotchas/SKILL.md` |
 | TMDL / DAX / modeling craft | `.github/skills/powerbi-semantic-model-gotchas/SKILL.md` |
@@ -41,13 +41,13 @@ orchestration-specific.
 | Explicit migration engineering feedback | `.github/skills/migration-feedback/SKILL.md` — private evidence and public-safe payload, never publication |
 | Upstream engine behaviour | fresh empty-output run first; then upstream issue + credential-free reproducer |
 
-If you edit a skill bundle that is also published, re-run `scripts/build_plugin.py` or preflight flags
+If you edit a skill bundle that is also published, rebuild the published plugin or preflight flags
 the drift. If a learning is one-off or already caught by a gate, say "nothing worth recording" rather
 than inventing durable knowledge.
 
 ## Inclusion rule
 
-Eligible files: tracked Markdown knowledge/navigation files, `.github/pbi.kb/**/*.json` visual fixtures, and `scripts/check_*.py` gates. Each appears once below or in explicit exclusions. Run `python scripts/check_navigation_index.py` after eligible file changes.
+Eligible files: tracked Markdown knowledge/navigation files, `.github/pbi.kb/**/*.json` visual fixtures. Each appears once below or in explicit exclusions; CI's navigation-index gate enforces this.
 
 ## Indexed maps and direct entries
 
@@ -59,7 +59,7 @@ Eligible files: tracked Markdown knowledge/navigation files, `.github/pbi.kb/**/
 | Triage incoming issues | [`.github/workflows/issue-intake.md`](../.github/workflows/issue-intake.md) | Template review, cloud/local routing and plan/readiness-gated Copilot assignment; setup in CONTRIBUTING. |
 | Open a focused PR | [`.github/PULL_REQUEST_TEMPLATE.md`](../.github/PULL_REQUEST_TEMPLATE.md) | Behavioral/mechanical paths, plan-review evidence, validation exits and exact blind-reviewed head SHA. |
 | Use VS Code Copilot | [`.github/copilot-instructions.md`](../.github/copilot-instructions.md) | VS Code entry instructions. |
-| Run or choose scripts | [`scripts/README.md`](../scripts/README.md) | Map of scripts; `test_repo_layout.py` owns script-list completeness. |
+| Advanced script reference | [`scripts/README.md`](../scripts/README.md) | Advanced and implementation usage, not the ordinary route; core commands are under Start here. `test_repo_layout.py` owns completeness. |
 | Capture migration feedback | [`.github/skills/migration-feedback/SKILL.md`](../.github/skills/migration-feedback/SKILL.md) | Explicit workbook/datasource or script/feature escalation: private evidence, controlled fictitious reproduction, engine/local/external/cannot-establish route; stops at `issue-payload.json`. |
 | Author PBIR visuals | [`.github/pbi.kb/visual-cookbook.md`](../.github/pbi.kb/visual-cookbook.md) | Map of visual files with confidence tiers and Tableau idioms. |
 | Inspect examples | [`examples/README.md`](../examples/README.md) | Map of example migrations, provenance, screenshots, and evidence files. |
@@ -72,7 +72,7 @@ Eligible files: tracked Markdown knowledge/navigation files, `.github/pbi.kb/**/
 | Handle security reports | [`SECURITY.md`](../SECURITY.md) | Security disclosure routing. |
 | Find migration guidance | [`docs/agent-architecture.md`](../docs/agent-architecture.md) | Root sessions, subagents, skill visibility. |
 | Operate delegated agents | [`docs/agent-operations.md`](../docs/agent-operations.md) | Authority and evidence for monitoring claims, host V8-heap/Desktop RAM budgets and post-crash file forensics. |
-| Find migration guidance | [`docs/agent-capability-wiring.md`](../docs/agent-capability-wiring.md) | Registry of shipped capabilities that must be visible to agents. |
+| Find migration guidance | [`docs/agent-capability-wiring.md`](../docs/agent-capability-wiring.md) | Registry of shipped capabilities that must be visible to agents, and every script's core/advanced/internal tier. |
 | Find migration guidance | [`docs/ai-instructions-authoring-guide.md`](../docs/ai-instructions-authoring-guide.md) | AI-instruction authoring redirect. |
 | Find migration guidance | [`docs/capabilities-and-limitations.md`](../docs/capabilities-and-limitations.md) | Automation capability boundaries. |
 | Review the unified CLI consensus | [`docs/cli-consensus/consensus.md`](cli-consensus/consensus.md) | Four independent designs plus one red-team report, synthesized into a narrow `t2p start`/`status` pilot, authority boundaries, path contract, deferrals and blind-run acceptance (Refs #734). |
@@ -179,34 +179,6 @@ zoom-slider.md
 zoom-slider.visual.json
 ```
 
-### Validation gate implementations
-Reason: prefer `check_unit --scope <layer>`; `scripts/README.md` indexes direct gates for isolation.
-Base: `scripts/`
-```text
-check_agent_capabilities.py
-check_ai_readiness.py
-check_blank_placeholders.py
-check_bundle_sources.py
-check_connection_fidelity.py
-check_datamodel.py
-check_desktop_orphans.py
-check_empty_model.py
-check_engine_receipts.py
-check_field_bindings.py
-check_identity_normalization.py
-check_m_syntax.py
-check_migration_progress.py
-check_navigation_index.py
-check_path_ceiling.py
-check_pbir_layout.py
-check_pbir_valid.py
-check_reference_readiness.py
-check_relationship_health.py
-check_sqlproxy_connections.py
-check_stub_measures.py
-check_unit.py
-```
-
 ### Example evidence files
 Reason: `examples/README.md` carries provenance, artifact context, screenshots, and nested evidence links.
 Base: ``
@@ -261,5 +233,5 @@ Base: ``
 <!-- Narrow CLI pilot is opt-in; direct-script guidance remains authoritative. -->
 
 The opt-in `scripts/t2p.py` doctor/start/status pilot is documented in
-[`scripts/README.md`](../scripts/README.md). It adds no readiness authority or dispatcher replacement;
+[`scripts/README.md`](../scripts/README.md#narrow-t2ppy-pilot-refs-749--773). It adds no readiness authority or dispatcher replacement;
 the approved bounds remain [`docs/t2p-pilot-plan.md`](t2p-pilot-plan.md).

@@ -1,8 +1,6 @@
 """
 purpose: validate assessment evidence and publish one deterministic offline HTML inventory.
 usage:   python -B scripts/assessment_report.py --run <assessment-run>
-internal: true
-internal-reason: invoked only as the fourth child of the assessment-only front door.
 """
 
 from __future__ import annotations
