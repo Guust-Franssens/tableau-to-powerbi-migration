@@ -41,6 +41,9 @@ jobs:
         # resolves fresh rather than restoring a committed lockfile.
         run: uv sync --all-extras
 
+      - name: Install Chromium for offline HTML tests
+        run: uv run playwright install --with-deps chromium
+
       - name: Lint (ruff)
         # `.github/skills/*/scripts` is code that MOVED out of `scripts/` to make each skill a
         # self-contained copyable unit; without naming it here it would be linted by nobody.
@@ -67,7 +70,7 @@ jobs:
           uv run pylint conftest.py
 
       - name: Tests
-        run: T2P_ENGINE_TESTS_NOT_CHECKED_REASON=covered-by-pinned-engine-integration-job uv run pytest -q
+        run: T2P_REQUIRE_BROWSER_TESTS=1 T2P_ENGINE_TESTS_NOT_CHECKED_REASON=covered-by-pinned-engine-integration-job uv run pytest -q
 
       - name: Migration spec contract gate
         run: uv run python scripts/validate_spec.py --all --check

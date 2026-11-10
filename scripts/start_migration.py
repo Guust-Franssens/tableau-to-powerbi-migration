@@ -3,6 +3,8 @@ purpose: start one supported Tableau site/project/workbook migration through ref
 usage:   python -B scripts/start_migration.py [--project NAME|LUID] [--workbook NAME|LUID]
                                                [--env PATH] [--runs-parent PATH]
                                                [--storage-decision PATH] [--session-id UUID]
+         python -B scripts/start_migration.py --assess-only [--env PATH] [--runs-parent PATH]
+                                               [--session-id UUID]
 
 This is a thin pre-bundle front door. Exit 0 means only that the supported scope has both a bundle
 and Tableau references; it does not establish fidelity, START_READY, COMPLETE or deployability.
@@ -55,6 +57,12 @@ FRONT_DOOR_ARTIFACTS = (
     "bundle/pbip/reference.json",
 )
 FRONT_DOOR_HINT = "Fix: use `--runs-parent <short path>` for a new run; never bypass the output guard."
+ASSESSMENT_ARTIFACTS = ("assessment/admin_insights.json", "assessment/assessment-report.html")
+DEFAULT_SITE_NOTE = (
+    "NOTE: TABLEAU_SITE is empty, so the Default site of a Tableau Server is used. On Tableau Cloud or any "
+    "named site set TABLEAU_SITE in {env_file} to the site contentUrl (the segment after /site/ in the "
+    "browser URL), then re-run."
+)
 
 
 class EvidenceError(ValueError):
@@ -79,6 +87,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--runs-parent", type=Path, help="parent root for _runs (default: toolkit repository)")
     parser.add_argument("--storage-decision", type=Path, help="engine-owned datasource storage policy JSON")
     parser.add_argument("--session-id", help="Copilot session UUID for run-cost attribution")
+    parser.add_argument(
+        "--assess-only", action="store_true", help="assess a site and write offline HTML; do not migrate"
+    )
     return parser
 
 
@@ -457,11 +468,14 @@ def _run_child(  # pylint: disable=too-many-arguments,too-many-locals
     *,
     observer: Callable[[dict], None] | None = None,
     channel_options: dict | None = None,
+    total: int = 5,
 ) -> StageResult:
     if name == "bundle" and observer is not None:
         with _path_gate_channel(command, observer) as (observed_command, inherited_options):
-            return _run_child(name, index, observed_command, env, output, channel_options=inherited_options)
-    print(f"[{index}/5] {name} - started {time.strftime('%H:%M:%S')}", flush=True)
+            return _run_child(
+                name, index, observed_command, env, output, channel_options=inherited_options, total=total
+            )
+    print(f"[{index}/{total}] {name} - started {time.strftime('%H:%M:%S')}", flush=True)
     options: dict[str, Any] = {"cwd": str(REPO_ROOT), "env": env, "stdout": None, "stderr": None}
     options.update(channel_options or {})
     if os.name == "nt":
@@ -471,7 +485,7 @@ def _run_child(  # pylint: disable=too-many-arguments,too-many-locals
     try:
         process_context = subprocess.Popen(command, **options)
     except OSError as exc:
-        print(f"[{index}/5] {name} - FAILED exit=launch-failed out={output}", flush=True)
+        print(f"[{index}/{total}] {name} - FAILED exit=launch-failed out={output}", flush=True)
         print(f"Could not start {name}: {type(exc).__name__}", file=sys.stderr, flush=True)
         return StageResult(name, None, output)
     with process_context as process:
@@ -481,7 +495,7 @@ def _run_child(  # pylint: disable=too-many-arguments,too-many-locals
             while process.poll() is None:
                 now = time.monotonic()
                 if now >= heartbeat:
-                    print(f"[{index}/5] {name} - running elapsed={int(now - started)}s", flush=True)
+                    print(f"[{index}/{total}] {name} - running elapsed={int(now - started)}s", flush=True)
                     heartbeat = now + HEARTBEAT_SECONDS
                 time.sleep(min(0.2, max(0.01, heartbeat - now)))
             return StageResult(name, process.wait(), output)
@@ -490,10 +504,10 @@ def _run_child(  # pylint: disable=too-many-arguments,too-many-locals
             raise
 
 
-def _finish_stage(result: StageResult, index: int, status: str, detail: str = "") -> None:
+def _finish_stage(result: StageResult, index: int, status: str, detail: str = "", *, total: int = 5) -> None:
     native = str(result.code) if result.code is not None else "launch-failed"
     suffix = f" {detail}" if detail else ""
-    print(f"[{index}/5] {result.name} - {status} exit={native}{suffix} out={result.output}", flush=True)
+    print(f"[{index}/{total}] {result.name} - {status} exit={native}{suffix} out={result.output}", flush=True)
 
 
 def _preflight(env: dict[str, str], *, observer: Callable[[dict], None] | None = None) -> int:
@@ -572,8 +586,41 @@ def _engine_started(bundle: Path) -> bool | None:
     return any(isinstance(phase, dict) and phase.get("phase") == "engine_run" for phase in phases)
 
 
-def _summary(run: Path, bundle: Path, oracle: Path, overall: int, *, fidelity: str) -> None:
+def _summary(  # pylint: disable=too-many-arguments,too-many-locals
+    run: Path,
+    bundle: Path,
+    oracle: Path,
+    overall: int,
+    *,
+    fidelity: str,
+    assessing: bool = False,
+    report: Path | None = None,
+    reason: str = "assessment_evidence_unrecognized",
+    admin_insights: str = "not_judged",
+    admin_insights_reason: str = "not_judged",
+) -> None:
     print("NEXT STEPS", flush=True)
+    if assessing:
+        if report is not None and report.is_file():
+            print(f"REPORT {report}", flush=True)
+        print(f"Admin Insights: {admin_insights} ({admin_insights_reason})", flush=True)
+        if overall == 0:
+            print("1. Review the report and choose scope; this is not migration readiness.", flush=True)
+            print(
+                "2. `t2p start --project <name>` creates a NEW run and repeats survey/assessment "
+                "until future bundle support.",
+                flush=True,
+            )
+            print("ASSESSMENT COMPLETE (not migration readiness)", flush=True)
+        elif overall == 3:
+            print(f"ASSESSMENT INCOMPLETE ({reason}); fix the cause before deciding next steps.", flush=True)
+        elif overall == 130:
+            print("ASSESSMENT INTERRUPTED; inspect retained evidence before deciding next steps.", flush=True)
+        else:
+            print(f"ASSESSMENT FAILED ({reason}); fix the cause before deciding next steps.", flush=True)
+        print(f"Overall exit={overall}.", flush=True)
+        print(f"RUN {run}", flush=True)
+        return
     if overall == 0:
         print("1. Compare the working/shipping report with Tableau before calling the migration done.", flush=True)
     else:
@@ -614,13 +661,17 @@ def main(
     """Run survey, assessment, harvest, reference capture and deterministic conversion."""
     parser = build_parser()
     args = parser.parse_args(argv)
+    assessing = args.assess_only
+    stage_total = 4 if assessing else 5
+    if assessing and (args.project is not None or args.workbook is not None or args.storage_decision is not None):
+        parser.error("--assess-only conflicts with --project, --workbook and --storage-decision")
 
     def emit(record: dict) -> None:
         if observer is not None:
             observer(record)
 
     def finish(result: StageResult, index: int, state: str, detail: str = "") -> None:
-        _finish_stage(result, index, state, detail)
+        _finish_stage(result, index, state, detail, total=stage_total)
         emit(
             {
                 "event": "stage",
@@ -634,7 +685,11 @@ def main(
     def run_child(name: str, index: int, command: list[str], environment: dict[str, str], output: Path) -> StageResult:
         try:
             if name == "bundle" and observer is not None:
+                if assessing:
+                    return _run_child(name, index, command, environment, output, observer=observer, total=stage_total)
                 return _run_child(name, index, command, environment, output, observer=observer)
+            if assessing:
+                return _run_child(name, index, command, environment, output, total=stage_total)
             return _run_child(name, index, command, environment, output)
         except KeyboardInterrupt:
             emit({"event": "stage", "stage": name, "native_exit_code": None, "state": "interrupted", "artifact": None})
@@ -654,7 +709,7 @@ def main(
     if harvest.refuse_unignored_output(
         candidate,
         None,
-        artifacts=FRONT_DOOR_ARTIFACTS,
+        artifacts=FRONT_DOOR_ARTIFACTS + ASSESSMENT_ARTIFACTS if assessing else FRONT_DOOR_ARTIFACTS,
         hint=FRONT_DOOR_HINT,
     ):
         emit({"event": "output_guard", "state": "blocked"})
@@ -672,6 +727,8 @@ def main(
     except (OSError, ValueError, SystemExit) as exc:
         print(f"Cannot establish Tableau environment: {exc}", file=sys.stderr, flush=True)
         return 1
+    if assessing and not env.get("TABLEAU_SITE", ""):
+        print(DEFAULT_SITE_NOTE.format(env_file=env_path), file=sys.stderr, flush=True)
     kind, display = _scope_label(args, env)
     metadata = {
         "scope": {
@@ -684,6 +741,8 @@ def main(
         "assessment_scope": "site",
         "attribution": attribution,
     }
+    if assessing:
+        metadata["intent"] = "assessment"
     try:
         run = work_dirs.allocate_run(display, repo_root=parent, extra_manifest=metadata)
     except (OSError, ValueError, RuntimeError) as exc:
@@ -703,13 +762,38 @@ def main(
     failed = False
     invalid = False
     fidelity = "fidelity NOT VERIFIED"
+    assessment_observation = {
+        "admin_insights": "not_judged",
+        "admin_insights_reason": "not_judged",
+    }
+
+    def finalize_assessment(code: int, reason: str) -> int:
+        return _finalize(
+            root,
+            bundle,
+            oracle_root,
+            code == 1,
+            code == 3,
+            fidelity,
+            code=code,
+            assessing=True,
+            report=assessment / "assessment-report.html",
+            reason=reason,
+            admin_insights=assessment_observation["admin_insights"],
+            admin_insights_reason=assessment_observation["admin_insights_reason"],
+        )
+
     try:
         preflight_code = _preflight(child_env, observer=observer) if observer is not None else _preflight(child_env)
         if preflight_code == 130:
             print("Migration interrupted during preflight.", flush=True)
+            if assessing:
+                return finalize_assessment(130, "interrupted")
             return _finalize(root, bundle, oracle_root, True, False, fidelity, code=130)
         if preflight_code != 0:
             print(f"Migration preflight FAILED exit={preflight_code}", flush=True)
+            if assessing:
+                return finalize_assessment(1, "preflight_failed")
             failed = True
             return _finalize(root, bundle, oracle_root, failed, invalid, fidelity)
 
@@ -734,6 +818,10 @@ def main(
         result = run_child("survey", 1, survey_command, child_env, survey_path)
         if result.code != 0:
             finish(result, 1, "FAILED")
+            if assessing and not env.get("TABLEAU_SITE", ""):
+                print(DEFAULT_SITE_NOTE.format(env_file=env_path), file=sys.stderr, flush=True)
+            if assessing:
+                return finalize_assessment(3 if result.code == 3 else 1, "survey_failed")
             failed = True
             return _finalize(root, bundle, oracle_root, failed, invalid, fidelity)
         try:
@@ -741,9 +829,106 @@ def main(
             survey_counts = f"workbooks={len(survey_ids)} required_sources={len(survey['required_datasources'])}"
         except EvidenceError as exc:
             finish(result, 1, "CANNOT_ESTABLISH", str(exc))
+            if assessing:
+                return finalize_assessment(3, "survey_unrecognized")
             invalid = True
             return _finalize(root, bundle, oracle_root, failed, invalid, fidelity)
         finish(result, 1, "OK", survey_counts)
+
+        if assessing:
+            assess_command = [
+                *common_python,
+                str(REPO_ROOT / "scripts" / "assess_estate.py"),
+                "--env",
+                str(env_path),
+                "--out",
+                str(assessment),
+                "--survey",
+                str(survey_path),
+            ]
+            result = run_child("assessment", 2, assess_command, child_env, assessment)
+            if result.code != 0 and not env.get("TABLEAU_SITE", ""):
+                print(DEFAULT_SITE_NOTE.format(env_file=env_path), file=sys.stderr, flush=True)
+            if result.code not in {0, 3}:
+                finish(result, 2, "FAILED")
+                return finalize_assessment(1, "assessment_failed")
+
+            import assessment_report  # pylint: disable=import-outside-toplevel
+
+            state = assessment_report.evidence_state(assessment)
+            assessment_observation.update(
+                admin_insights=state["admin_insights"],
+                admin_insights_reason=state["admin_insights_reason"],
+            )
+            if state["assessment"] not in {"established", "degraded_primary"}:
+                finish(result, 2, "CANNOT_ESTABLISH", state["assessment_reason"])
+                return finalize_assessment(3, state["assessment_reason"])
+            degraded_primary = state["assessment"] == "degraded_primary"
+            if result.code == 3 and not degraded_primary:
+                finish(result, 2, "CANNOT_ESTABLISH", "assessment_exit_mismatch")
+                return finalize_assessment(3, "assessment_exit_mismatch")
+            finish(
+                result,
+                2,
+                "OK" if not degraded_primary else "CANNOT_ESTABLISH",
+                "degraded_primary" if degraded_primary else "",
+            )
+
+            collector_code = 3 if degraded_primary else 0
+            if not degraded_primary:
+                collector_path = assessment / "admin_insights.json"
+                collector_command = [
+                    *common_python,
+                    str(REPO_ROOT / "scripts" / "admin_insights_collector.py"),
+                    "--env",
+                    str(env_path),
+                    "--db",
+                    str(assessment / "estate.db"),
+                    "--out",
+                    str(collector_path),
+                ]
+                result = run_child("admin_insights", 3, collector_command, child_env, collector_path)
+                collector_code = result.code if result.code is not None else 1
+                finish(
+                    result,
+                    3,
+                    "OK" if collector_code == 0 else "CANNOT_ESTABLISH" if collector_code == 3 else "FAILED",
+                )
+
+            report_path = assessment / "assessment-report.html"
+            report_command = [
+                *common_python,
+                str(REPO_ROOT / "scripts" / "assessment_report.py"),
+                "--run",
+                str(assessment),
+            ]
+            result = run_child("report", 4, report_command, child_env, report_path)
+            if result.code != 0:
+                finish(result, 4, "FAILED")
+                return finalize_assessment(1, "report_publication_failed")
+            try:
+                published_state = assessment_report.evidence_state(assessment)
+                assessment_observation.update(
+                    admin_insights=published_state["admin_insights"],
+                    admin_insights_reason=published_state["admin_insights_reason"],
+                )
+                if published_state["report"] != "current":
+                    finish(result, 4, "CANNOT_ESTABLISH", "report_not_current")
+                    return finalize_assessment(3, "report_not_current")
+                finish(result, 4, "OK")
+            except (BrokenPipeError, OSError, RuntimeError):
+                return 1
+            if degraded_primary:
+                return finalize_assessment(3, "degraded_primary")
+            if collector_code == 3:
+                if published_state["admin_insights"] != "cannot_establish":
+                    return finalize_assessment(3, "admin_insights_unrecognized")
+                return finalize_assessment(3, published_state["admin_insights_reason"])
+            if collector_code != 0:
+                return finalize_assessment(1, "collector_no_result")
+            if published_state["admin_insights"] not in {"available", "unavailable"}:
+                return finalize_assessment(1, "collector_no_result")
+            return finalize_assessment(0, "none")
 
         assess_command = [
             *common_python,
@@ -895,9 +1080,25 @@ def _finalize(
     fidelity: str,
     *,
     code: int | None = None,
+    assessing: bool = False,
+    report: Path | None = None,
+    reason: str = "assessment_evidence_unrecognized",
+    admin_insights: str = "not_judged",
+    admin_insights_reason: str = "not_judged",
 ) -> int:
     overall = code if code is not None else (3 if invalid else 1 if failed else 0)
-    _summary(run, bundle, oracle, overall, fidelity=fidelity)
+    _summary(
+        run,
+        bundle,
+        oracle,
+        overall,
+        fidelity=fidelity,
+        assessing=assessing,
+        report=report if report is not None and report.is_file() else None,
+        reason=reason,
+        admin_insights=admin_insights,
+        admin_insights_reason=admin_insights_reason,
+    )
     return overall
 
 

@@ -662,6 +662,7 @@ MODULES = (
     # request and names no credential); MODULES is a superset of that detector, never a mirror of it.
     "scripts/tableau_oracle_manifest.py",
     "scripts/tableau_lineage.py",
+    "scripts/admin_insights_collector.py",
 )
 
 # Where response bytes ENTER, declared per function rather than inferred from a parameter's spelling.
@@ -1718,6 +1719,64 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
         "round(float(parts[3]))": "NOT-A-STRING: an integer page height in points",
         "{'width': round(float(parts[2])), 'height': round(float(parts[3]))}": (
             "NOT-A-STRING: a two-integer page geometry, stored under a constant key"
+        ),
+    },
+    ("scripts/admin_insights_collector.py", "_query_rows"): {
+        "{'event_type': event_type, 'event_name': event_name, 'item_type': item_type, 'item_luid': item_luid, "
+        "'workbook_luid': workbook_luid, 'day': day, 'events': count}": (
+            "REFUSED-AT-SEAM: _request_once rejects response bodies reflecting the PAT secret or session token; "
+            "_query_rows validates types and constructs only the aggregate allowlist, never actor fields"
+        ),
+        "event_type": (
+            "REFUSED-AT-SEAM: only validated aggregate fields reach this row; _request_once refuses credential "
+            "reflection before parsing"
+        ),
+        "event_name": (
+            "REFUSED-AT-SEAM: only validated aggregate fields reach this row; _request_once refuses credential "
+            "reflection before parsing"
+        ),
+        "item_type": (
+            "REFUSED-AT-SEAM: only validated aggregate fields reach this row; _request_once refuses credential "
+            "reflection before parsing"
+        ),
+        "item_luid": (
+            "REFUSED-AT-SEAM: only validated aggregate fields reach this row; _request_once refuses credential "
+            "reflection before parsing"
+        ),
+        "workbook_luid": (
+            "SHAPE-VERIFIED: derived only by joining an item LUID against the local view-to-workbook index"
+        ),
+        "day": (
+            "REFUSED-AT-SEAM: only validated aggregate fields reach this row; _request_once refuses credential "
+            "reflection before parsing"
+        ),
+        "count": "NOT-A-STRING: a non-negative integer aggregate count",
+    },
+    ("scripts/admin_insights_collector.py", "_collect"): {
+        "reason": (
+            "FIXED-VOCABULARY: only the collector's fixed outcome reasons are assigned; raw HTTP response text "
+            "is never included"
+        ),
+        "{'outcome': 'available', 'reason': None, 'window': {'first_day': min(days) if days else None, "
+        "'last_day': max(days) if days else None}, 'rows': rows, 'unmapped_events': unmapped}": (
+            "REFUSED-AT-SEAM: response bytes are checked for credential reflection before parsing; rows and "
+            "unmapped counts are shape-validated aggregates"
+        ),
+        "min(days) if days else None": "SHAPE-VERIFIED: day strings are validated before the stable window bounds",
+        "max(days) if days else None": "SHAPE-VERIFIED: day strings are validated before the stable window bounds",
+        "rows": "REFUSED-AT-SEAM: _query_rows emits only validated aggregate allowlist fields",
+        "unmapped": "NOT-A-STRING: a non-negative integer aggregate count",
+        "{'first_day': min(days) if days else None, 'last_day': max(days) if days else None}": (
+            "SHAPE-VERIFIED: min/max over day strings validated by _query_rows"
+        ),
+    },
+    ("scripts/admin_insights_collector.py", "_publish"): {
+        "value": (
+            "SCRUBBED-AT-SINK: _collect constructs the fixed outcome object from allowlisted fields and "
+            "credential-reflection-checked aggregate rows before the only serialization"
+        ),
+        "json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(',', ':'))": (
+            "SCRUBBED-AT-SINK: the serialized value is the fixed-schema aggregate constructed by _collect"
         ),
     },
 }

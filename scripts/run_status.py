@@ -848,7 +848,114 @@ def _next_action(  # pylint: disable=too-many-arguments
     return {"headline": headline, "affected_units": affected, "details": details}
 
 
-def build_status(run: Path | str) -> tuple[dict[str, Any], int]:
+def _assessment_observations(
+    run: Path,
+    states: dict[str, str],
+    findings: list[Finding],
+) -> tuple[dict[str, Any], list[Location]]:
+    """Project the assessment reader's fixed vocabulary without reading its evidence here."""
+    assessment_dir = run / "assessment"
+    requested = ("assets", "oracle", "bundle", "packages")
+    not_requested = {name: "not_requested" for name in requested}
+    for name in requested:
+        if states.get(name) != "present":
+            continue
+        entries = _entries(run / name, run, findings)
+        if entries:
+            _problem(findings, name, "unexpected_assessment_content")
+
+    evidence_names = (
+        "estate_survey.json",
+        "assessment.json",
+        "estate.db",
+        "admin_insights.json",
+        "assessment-report.html",
+    )
+    unsafe = states.get("assessment") not in {"present", "missing"}
+    if states.get("assessment") == "present":
+        for name in evidence_names:
+            entry = _entry_state(assessment_dir / name)
+            if entry not in {"regular", "missing"}:
+                _problem(findings, f"assessment/{name}", "evidence_unrecognized")
+                unsafe = True
+    if unsafe:
+        evidence = {
+            "assessment": "unrecognized",
+            "assessment_reason": "evidence_unrecognized",
+            "admin_insights": "not_judged",
+            "admin_insights_reason": "not_judged",
+            "report": "not_judged",
+            "report_reason": "not_judged",
+        }
+    else:
+        import assessment_report  # pylint: disable=import-outside-toplevel
+
+        evidence = assessment_report.evidence_state(assessment_dir)
+
+    if evidence["assessment"] == "degraded_primary":
+        _problem(findings, "assessment/assessment.json", "assessment_degraded_primary")
+    elif evidence["assessment"] == "missing":
+        _problem(findings, "assessment", "evidence_missing")
+    elif evidence["assessment"] == "unrecognized":
+        _problem(findings, "assessment", "evidence_unrecognized")
+    if evidence["assessment"] in {"established", "degraded_primary"}:
+        if evidence["admin_insights"] == "cannot_establish":
+            _problem(findings, "assessment/admin_insights.json", "admin_insights_cannot_establish")
+        elif evidence["admin_insights"] == "unrecognized":
+            _problem(findings, "assessment/admin_insights.json", "evidence_unrecognized")
+        elif (
+            evidence["admin_insights"] == "not_collected" and evidence["admin_insights_reason"] == "collector_no_result"
+        ):
+            _problem(findings, "assessment/admin_insights.json", "evidence_missing")
+        if evidence["report"] == "stale":
+            _problem(findings, "assessment/assessment-report.html", "report_stale")
+        elif evidence["report"] == "missing":
+            _problem(findings, "assessment/assessment-report.html", "report_missing")
+        elif evidence["report"] == "unrecognized":
+            _problem(findings, "assessment/assessment-report.html", "evidence_unrecognized")
+
+    status_evidence = {
+        key: evidence.get(key)
+        for key in (
+            "assessment",
+            "assessment_reason",
+            "admin_insights",
+            "admin_insights_reason",
+            "report",
+            "report_reason",
+        )
+    }
+    locations = _locations(run, states, [])
+    locations.append(_location("assessment", assessment_dir, "standard", states.get("assessment", "missing")))
+    return {
+        "intent": "assessment",
+        "not_requested": not_requested,
+        "assessment": status_evidence,
+        "inventory_scope": "not_requested",
+        "child_evidence": {
+            name: "not_requested"
+            for name in ("survey", "assessment", "admin_insights", "report", "harvest", "reference", "bundle")
+        },
+        "locations": [asdict(row) for row in locations],
+        "canonical_subdirs": states,
+        "findings": [asdict(finding) for finding in findings],
+        "next_action": (
+            {
+                "headline": "Inspect unassessable assessment evidence; preserve the report before deciding next steps.",
+                "affected_units": [],
+                "details": [asdict(finding) for finding in findings if finding.unassessable],
+            }
+            if findings
+            else {
+                "headline": "Review the HTML assessment and choose scope; this does not establish migration readiness.",
+                "affected_units": [],
+                "details": [],
+            }
+        ),
+    }, locations
+
+
+def build_status(run: Path | str) -> tuple[dict[str, Any], int]:  # pylint: disable=too-many-statements
     raw = str(run)
     findings: list[Finding] = []
     status: dict[str, Any] = {
@@ -900,7 +1007,15 @@ def build_status(run: Path | str) -> tuple[dict[str, Any], int]:
         _display_known(manifest["status"], {"active"}, findings, "run.json") if "status" in manifest else "not_recorded"
     )
     status["run_recorded_status_semantics"] = "allocation metadata only; not proof of process liveness"
+    intent = None
+    if "intent" in manifest:
+        intent = _display_known(manifest["intent"], {"assessment"}, findings, "run.json")
+        status["intent"] = intent
     states = {name: _directory(path / name, path, findings) for name in CANONICAL_SUBDIRS}
+    if intent == "assessment":
+        status.update(_assessment_observations(path, states, findings)[0])
+        status["findings"] = [asdict(finding) for finding in findings]
+        return status, int(any(finding.unassessable for finding in findings))
     report_scope, reported, working, handovers, records = "unestablished", [], [], {}, []
     pbip_state = handover_state = "not_read"
     phase_evidence = {"bundle/source-provenance.json": "not_read", "bundle/phase-timings.json": "not_read"}
@@ -944,6 +1059,13 @@ def render_human(status: dict[str, Any]) -> str:
     lines = ["RUN STATUS: DIAGNOSTIC ONLY (NOT readiness)"]
     locations = status.get("locations", [])
     lines.append(f"LOCATIONS: {len(locations)}")
+    if status.get("intent") == "assessment":
+        lines.append("Intent: assessment")
+        lines.append("Not requested: " + json.dumps(status.get("not_requested"), sort_keys=True))
+        assessment = status.get("assessment") or {}
+        lines.append(f"Assessment: {assessment.get('assessment')} ({assessment.get('assessment_reason')})")
+        lines.append(f"Admin Insights: {assessment.get('admin_insights')} ({assessment.get('admin_insights_reason')})")
+        lines.append(f"Report: {assessment.get('report')} ({assessment.get('report_reason')})")
     for row in locations:
         # The record keeps its escaped rendering; the copyable native spelling gets its own
         # indented line, and is withheld outright when it could carry control characters.

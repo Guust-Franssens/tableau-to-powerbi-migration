@@ -7,6 +7,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -19,6 +20,8 @@ SCRIPT = REPO_ROOT / "scripts" / "run_status.py"
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 import run_status as rs  # noqa: E402  # pylint: disable=wrong-import-position
+import assessment_report  # noqa: E402  # pylint: disable=wrong-import-position
+import assess_estate  # noqa: E402  # pylint: disable=wrong-import-position
 import stamp_tableau_provenance as prov  # noqa: E402  # pylint: disable=wrong-import-position
 from bundle_corpus import is_reparse_entry  # noqa: E402  # pylint: disable=wrong-import-position
 
@@ -50,6 +53,83 @@ def _run(tmp_path: Path, name: str = "001-estate") -> Path:
             "allocated_abs_path": str(run),
         },
     )
+    return run
+
+
+def _assessment_run(
+    tmp_path: Path,
+    *,
+    name: str = "001-estate",
+    outcome: str = "unavailable",
+    degraded: bool = False,
+    collector: bool = True,
+) -> Path:
+    run = _run(tmp_path, name)
+    record = json.loads((run / "run.json").read_text(encoding="utf-8"))
+    record["run"] = int(name.split("-", 1)[0])
+    record["unit_key"] = name.split("-", 1)[1]
+    record["intent"] = "assessment"
+    _write_json(run / "run.json", record)
+    root = run / "assessment"
+    survey = {
+        "degraded": False,
+        "workbooks": [{"luid": "workbook-1", "name": "Book"}],
+        "required_datasources": [],
+        "summary": {"workbooks_total": 1, "degraded": False},
+    }
+    _write_json(root / "estate_survey.json", survey)
+    assessed = {
+        "luid": "workbook-1",
+        "name": "Book",
+        "rank": 1,
+        "cumulative_share": 1.0,
+        "tier": "High",
+        "tier_reason": "synthetic usage",
+        "complexity": 0.0 if degraded else 1.0,
+        "views_lifetime": 1,
+    }
+    assessment = {
+        "workbooks": [assessed],
+        "listing_errors": [{"listing": "structure", "severity": "primary", "status": 503}] if degraded else [],
+        "degraded": degraded,
+        "degraded_primary": degraded,
+        "iam_hard_cases": [],
+        "datasource_hazards": {},
+        "summary": {"workbooks_total": 1, "degraded": degraded, "degraded_primary": degraded},
+    }
+    _write_json(root / "assessment.json", assessment)
+    connection = sqlite3.connect(root / "estate.db")
+    connection.executescript(assess_estate.SCHEMA)
+    connection.execute(
+        "INSERT INTO workbook (luid, name, project_luid, complexity, complexity_understated, "
+        "views_lifetime, view_count, rank, cumulative_share, tier, tier_reason) "
+        "VALUES ('workbook-1', 'Book', '', ?, 0, 1, 1, 1, 1.0, 'High', 'synthetic usage')",
+        (assessed["complexity"],),
+    )
+    connection.execute(
+        "INSERT INTO assessment_run VALUES ('2026-10-01T10:00:00Z', ?, ?, 1, ?)",
+        (int(degraded), int(degraded), int(degraded)),
+    )
+    connection.execute("INSERT INTO permission_collection VALUES (0)")
+    if degraded:
+        connection.execute("INSERT INTO listing_error (listing, severity, status) VALUES ('structure', 'primary', 503)")
+    connection.commit()
+    connection.close()
+    if collector:
+        reason = "datasource_not_found" if outcome == "unavailable" else "transport_failure"
+        _write_json(
+            root / "admin_insights.json",
+            {
+                "schema": "admin-insights-aggregate/1",
+                "outcome": outcome,
+                "reason": None if outcome == "available" else reason,
+                "datasource_luid": None,
+                "window": {"first_day": None, "last_day": None},
+                "rows": [],
+                "unmapped_events": 0,
+            },
+        )
+    assert assessment_report.main(["--run", str(root)]) == 0
     return run
 
 
@@ -175,6 +255,122 @@ def test_assessable_mixed_inventory_and_real_cli_are_read_only(tmp_path: Path) -
     ]
     assert payload["next_action"]["headline"].startswith("Inspect the recorded failed phase")
     assert payload["next_action"]["affected_units"] == ["Book", "PbipOnly", "Recovered", "SharedData"]
+
+
+def test_assessment_intent_reports_not_requested_and_unavailable_disclosure(tmp_path: Path) -> None:
+    run = _assessment_run(tmp_path, outcome="unavailable")
+
+    before = _hash_tree(run)
+    status, code = rs.build_status(run)
+
+    assert code == 0
+    assert status["intent"] == "assessment"
+    assert status["inventory_scope"] == "not_requested"
+    assert set(status["not_requested"].values()) == {"not_requested"}
+    assert status["canonical_subdirs"]["assets"] == "present"
+    assert status["assessment"] == {
+        "assessment": "established",
+        "assessment_reason": None,
+        "admin_insights": "unavailable",
+        "admin_insights_reason": "datasource_not_found",
+        "report": "current",
+        "report_reason": None,
+    }
+    human = rs.render_human(status)
+    assert "Intent: assessment" in human
+    assert "Not requested:" in human
+    assert "Assessment: established (None)" in human
+    assert "Admin Insights: unavailable (datasource_not_found)" in human
+    assert "Report: current (None)" in human
+    assert "Review the HTML assessment and choose scope" in human
+    assert _hash_tree(run) == before
+
+
+def test_assessment_cannot_establish_missing_collector_and_degradation_findings(tmp_path: Path) -> None:
+    cannot = _assessment_run(tmp_path, name="001-cannot", outcome="cannot_establish")
+    status, code = rs.build_status(cannot)
+    assert code == 1
+    assert status["assessment"]["admin_insights"] == "cannot_establish"
+    assert any(row["reason"] == "admin_insights_cannot_establish" for row in status["findings"])
+
+    missing = _assessment_run(tmp_path, name="002-missing", collector=False)
+    status, code = rs.build_status(missing)
+    assert code == 1
+    assert status["assessment"]["admin_insights"] == "not_collected"
+    assert any(row["reason"] == "evidence_missing" for row in status["findings"])
+
+    degraded = _assessment_run(tmp_path, name="003-degraded", degraded=True, collector=False)
+    status, code = rs.build_status(degraded)
+    assert code == 1
+    assert status["assessment"]["assessment"] == "degraded_primary"
+    assert [row["reason"] for row in status["findings"]] == ["assessment_degraded_primary"]
+
+
+@pytest.mark.parametrize("report_state", ["missing", "stale"])
+def test_assessment_report_missing_or_stale_is_unassessable(tmp_path: Path, report_state: str) -> None:
+    run = _assessment_run(tmp_path, name=f"001-{report_state}")
+    report = run / "assessment" / "assessment-report.html"
+    if report_state == "missing":
+        report.unlink()
+    else:
+        assessment_path = run / "assessment" / "assessment.json"
+        assessment = json.loads(assessment_path.read_text(encoding="utf-8"))
+        assessment["workbooks"][0]["name"] = "changed"
+        _write_json(assessment_path, assessment)
+
+    status, code = rs.build_status(run)
+    assert code == 1
+    assert status["assessment"]["report"] == report_state
+    assert any(row["reason"] == f"report_{report_state}" for row in status["findings"])
+
+
+def test_assessment_unsafe_evidence_is_not_read_and_unknown_intent_is_finding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = _assessment_run(tmp_path)
+    target = tmp_path / "outside.json"
+    target.write_text('{"private":"not read"}', encoding="utf-8")
+    assessment = run / "assessment" / "assessment.json"
+    assessment.unlink()
+    try:
+        assessment.symlink_to(target)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) != 1314:
+            raise
+        pytest.skip("this platform/account cannot create symlinks without elevation")
+    monkeypatch.setattr(
+        assessment_report,
+        "evidence_state",
+        lambda _path: pytest.fail("unsafe evidence must not reach the shared reader"),
+    )
+
+    status, code = rs.build_status(run)
+    assert code == 1
+    assert status["assessment"]["assessment"] == "unrecognized"
+    assert any(row["reason"] == "evidence_unrecognized" for row in status["findings"])
+
+    clean = _run(tmp_path, "002-unknown-intent")
+    manifest = json.loads((clean / "run.json").read_text(encoding="utf-8"))
+    manifest["run"] = 2
+    manifest["unit_key"] = "unknown-intent"
+    manifest["intent"] = "future"
+    _write_json(clean / "run.json", manifest)
+    status, code = rs.build_status(clean)
+    assert code == 1
+    assert any(row["source"] == "run.json" and row["reason"] == "unknown_recorded_value" for row in status["findings"])
+
+
+def test_assessment_rejects_unexpected_unrequested_content_and_legacy_intent_is_absent(tmp_path: Path) -> None:
+    run = _assessment_run(tmp_path)
+    (run / "assets" / "unexpected.json").write_text("{}", encoding="utf-8")
+    status, code = rs.build_status(run)
+    assert code == 1
+    assert status["not_requested"]["assets"] == "not_requested"
+    assert any(row["reason"] == "unexpected_assessment_content" for row in status["findings"])
+
+    legacy = _run(tmp_path, "002-legacy")
+    status, _code = rs.build_status(legacy)
+    assert "intent" not in status
 
 
 def test_explicit_empty_collections_are_empty_diagnostics_not_readiness(tmp_path: Path) -> None:

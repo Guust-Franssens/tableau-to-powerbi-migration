@@ -48,6 +48,12 @@ deployability. Compare the shipping report with Tableau, then give the printed h
 paths to the root dispatcher for an issued brief and `@tableau-migrator` handoff. Datasource-only
 project scopes are not supported by this workbook-centric front door.
 
+The explicit assessment-only pre-step is `t2p assess [--env PATH] [--runs-parent PATH] [--session-id UUID]`
+or, for experts, `python -B scripts\start_migration.py --assess-only`. It allocates one site-wide
+assessment run, surveys and assesses the site, attempts Admin Insights aggregates, and writes one
+offline HTML report. It stops before harvest, reference capture, packaging or conversion; it is not
+migration readiness. `t2p start --project <name>` creates a new run and repeats survey/assessment.
+
 The individual producer commands below remain available for expert/recovery use; do not hand-chain
 their legacy default output folders for a normal site migration.
 
@@ -62,6 +68,8 @@ Do not ask the human to generate the note.
 | Script | What it does | Called by |
 |---|---|---|
 | `start_migration.py` | The recommended live-site pre-bundle front door: one site/project/workbook scope, one allocated `_runs/<NNN>-<slug>/`, five direct-output producer stages, artifact-based scope checks, a retained bundle attempt after reference failure, and an explicit handoff. Exit 0 is capture-only, never fidelity or readiness. Use `--runs-parent` only for a new shorter-root run after a path refusal; existing runs are never relocated. | Operator/root dispatcher, before `@tableau-migrator` |
+| `admin_insights_collector.py` | Internal assessment-only child that requests one aggregate for the uniquely identified top-level Admin Insights `TS Events` datasource. It persists only allowlisted aggregate fields; the VDS endpoints and shapes remain assumed and are not live-qualified. | `start_migration.py --assess-only` |
+| `assessment_report.py` | Internal assessment-only reader/renderer: validates the producer's fixed survey, JSON and read-only SQLite evidence, then atomically writes a deterministic, self-contained offline HTML report. It does not call Tableau or certify migration readiness. | `start_migration.py --assess-only`, `run_status.py` |
 | `build_migration_feedback.py` | Offline, hash-pinned private evidence builder for the repo-local `migration-feedback` skill. Validates recorded identity, canonical fresh-output receipts and controls; emits a strict public-safe `issue-payload.json`, never publishes or reruns anything. No default output outside a selected run. [Input/output contract](#migration-feedback-phase-1). | Internal implementation helper for the feedback skill, not a second diagnostics exporter |
 | `preflight_source_credentials.py` | Read-only classification of live/local/review sources with no network in `--spec` mode. Classification is not connectivity proof; follow `live-source-reachability` for static checks and the shipped-artifact automatic-source refresh procedure. The separate `--model` service datasource/refresh check remains available and needs Fabric authentication. | `parse_tableau.py`, at parse time |
 | `migration_bundle.py` | Shared contract reader for parser `migration-spec.json` or deterministic-engine bundles (`report.json` + `handover/*.json`): migration root, explicit sources and published-datasource keys, never a fabricated spec. Defines receipt-backed engine output roots (`pbip/`, `reports/`, `semantic_models/`, `data/`) and engine provenance for bundle/package evidence checks. | source classification, package/evidence tools, `published_datasource_registry.py` |

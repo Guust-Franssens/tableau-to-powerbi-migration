@@ -360,29 +360,37 @@ def test_paged_returns_the_rows_it_got_plus_the_error_naming_the_page(monkeypatc
     assert no_sleep == []
 
 
-def test_a_403_is_an_ANSWER_and_does_not_degrade_the_iam_export(monkeypatch, no_sleep):
+@pytest.mark.parametrize("status", [401, 403])
+def test_an_auth_denied_grant_listing_stays_silent_but_is_counted(status, monkeypatch, no_sleep, tmp_path):
     """ "You may not see this" is a fact about the estate; "no answer" is not. Only the second
     degrades, or every locked-down project would raise a false alarm."""
-    site = _site(FakeTableau({"/permissions": 403}), monkeypatch)
-    rows, errors = assess_estate._grants(site, "workbook", "wb-1", "Sales", "/workbooks/wb-1")
-    assert (rows, errors) == ([], [])
+    site = _site(FakeTableau({"/permissions": status}), monkeypatch)
+    rows, errors, denied = assess_estate._grants(site, "workbook", "wb-1", "Sales", "/workbooks/wb-1")
+    assert (rows, errors, denied) == ([], [], True)
+    permissions, iam_errors, denied_listings = assess_estate._collect_iam(site, [{"id": "p-1", "name": "Finance"}], [])
+    assert (permissions, iam_errors, denied_listings) == ([], [], 1)
+    raw = _raw_fixture()
+    raw["permission_denied_listings"] = denied_listings
+    store = assess_estate.write_store(tmp_path, raw, assess_estate.assemble(raw, 0.99))
+    with assess_estate.sqlite3.connect(store) as connection:
+        assert connection.execute("SELECT denied_listings FROM permission_collection").fetchone() == (1,)
     assert no_sleep == []
 
 
 def test_an_unreadable_grant_IS_degraded(monkeypatch, no_sleep):
     site = _site(FakeTableau({"/permissions": TimeoutError("timed out")}), monkeypatch, max_attempts=1)
-    _, errors = assess_estate._grants(site, "workbook", "wb-1", "Sales", "/workbooks/wb-1")
+    _, errors, denied = assess_estate._grants(site, "workbook", "wb-1", "Sales", "/workbooks/wb-1")
     assert errors[0]["severity"] == assess_estate.SECONDARY
-    assert "Sales" in errors[0]["listing"] and no_sleep == []
+    assert "Sales" in errors[0]["listing"] and denied is False and no_sleep == []
 
 
 @pytest.mark.parametrize("status", [404, 429, 500])
 def test_a_permissions_endpoint_failure_degrades_the_iam_export(status, monkeypatch, no_sleep):
     """Only auth refusals are a useful permissions answer; other statuses mean the grant rows are unknown."""
     site = _site(FakeTableau({"/permissions": status}), monkeypatch, max_attempts=1)
-    _, errors = assess_estate._grants(site, "project", "p-1", "Finance", "/projects/p-1")
+    _, errors, denied = assess_estate._grants(site, "project", "p-1", "Finance", "/projects/p-1")
     assert errors and errors[0]["status"] == status
-    assert errors[0]["severity"] == assess_estate.SECONDARY
+    assert errors[0]["severity"] == assess_estate.SECONDARY and denied is False
     assert no_sleep == []
 
 
@@ -415,6 +423,7 @@ def _raw_fixture(errors=None, groups=None):
         "structure": {"publishedDatasources": []},
         "structure_by_name": {},
         "permissions": [],
+        "permission_denied_listings": 0,
         "survey": None,
         "collection_errors": errors or [],
     }
