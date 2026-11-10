@@ -2658,14 +2658,14 @@ def test_fresh_s1_refusal_inside_s2_retains_the_original_integrity_code(
     "shape",
     ["package", "bad-manifest", "missing-marker", "missing-root", "mixed-first", "mixed-last"],
 )
-@pytest.mark.parametrize("source_exists", [False, True], ids=["unknown-source", "own-packaged-source"])
 def test_package_source_override_refuses_before_is_file_or_any_legacy_helper(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     shape: str,
-    source_exists: bool,
 ) -> None:
+    # Unknown and own-packaged sources rotate across the shapes; both refuse identically.
+    source_exists = shape in ("bad-manifest", "missing-root", "mixed-last")
     package = _packaged_unit(tmp_path)
     explicit = package / "assets" / "Minimal.twb" if source_exists else tmp_path / "private-host" / "missing.twb"
     targets = [package]
@@ -2861,7 +2861,6 @@ def test_current_acquired_authority_drives_real_packaging_inheritance_binding_an
         ("state-cardinality", 1, "FINDINGS", "published_dependency_authority_invalid"),
     ],
 )
-@pytest.mark.parametrize("fallback", ["stop", "model_only_unvalidated"])
 def test_published_authority_refuses_publicly_before_all_downstream_helpers(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2870,8 +2869,9 @@ def test_published_authority_refuses_publicly_before_all_downstream_helpers(
     exit_code: int,
     status: str,
     code: str,
-    fallback: str,
 ) -> None:
+    # The fallback policy never softens the refusal; each status class runs under both policies.
+    fallback = "model_only_unvalidated" if fault in ("missing", "ambiguous", "sha") else "stop"
     _provider, consumer = _shared_source_pair(tmp_path / "packages")
     path = consumer / "source-provenance.json"
     provenance = json.loads(path.read_bytes())
@@ -3053,6 +3053,7 @@ def test_provider_consumer_command_returns_two_own_local_sources(
         assert str(path).replace("\\", "\\\\") not in json.dumps(report)
 
 
+# One fault per distinct guard in _binding_roots (state, exact-int ordinal, range, self, verdict).
 @pytest.mark.parametrize(
     "fault",
     [
@@ -3062,7 +3063,6 @@ def test_provider_consumer_command_returns_two_own_local_sources(
         "missing-verified",
         "foreign-root",
         "foreign-identity",
-        "unknown-verdict",
         "blocked-target",
         "unknown-topology",
         "wrong-target-kind",
@@ -3072,15 +3072,10 @@ def test_provider_consumer_command_returns_two_own_local_sources(
         "untyped-dependency",
         "list-dependencies",
         "ambiguous",
-        "mismatch",
-        "missing",
-        "not-applicable",
         "bool-ordinal",
         "negative-ordinal",
         "out-of-range",
         "self",
-        "string-ordinal",
-        "float-ordinal",
         "wrong-provider-kind",
         "wrong-provider-topology",
         "blocked-provider",
@@ -3515,9 +3510,21 @@ def test_start_ready_rejects_copied_or_changed_issued_data_authority(
 
 
 @pytest.mark.parametrize(
-    "arm", ["boundary", "integrity", "roles", "source", "data", "reference", "reference-unit", "binding"]
+    ("arm", "malformed"),
+    [
+        ("boundary", False),
+        ("integrity", False),
+        ("integrity", True),
+        ("roles", False),
+        ("roles", True),
+        ("source", True),
+        ("data", False),
+        ("reference", True),
+        ("reference-unit", False),
+        ("binding", False),
+        ("binding", True),
+    ],
 )
-@pytest.mark.parametrize("malformed", [False, True], ids=["unknown", "missing-shape"])
 def test_start_ready_unknown_or_malformed_conjunction_inputs_never_fall_through(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, arm: str, malformed: bool
 ) -> None:

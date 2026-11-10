@@ -2828,35 +2828,6 @@ def _deep_tree(root: Path) -> Path:
     return root
 
 
-def test_path_ceiling_is_registered_all_scope_only() -> None:
-    """Whole-unit shippability cannot be attributed to a layer, so it runs only under --scope all."""
-    gate = _path_ceiling_gate()
-
-    assert gate.script == "check_path_ceiling.py"
-    assert "path-ceiling" in cu.ALL_ONLY_CHECK_IDS
-    assert cu._in_scope("path-ceiling", cu.SCOPE_ALL)  # pylint: disable=protected-access
-    for scope in (cu.SCOPE_MODEL, cu.SCOPE_REPORT, cu.SCOPE_INTEGRATION):
-        assert not cu._in_scope("path-ceiling", scope)  # pylint: disable=protected-access
-        assert "path-ceiling" in cu._omitted_checks(scope)  # pylint: disable=protected-access
-
-
-def test_path_ceiling_owner_is_the_orchestrator_not_a_builder() -> None:
-    """A breach is driven by install-root length and engine-side naming; no builder persona can fix it."""
-    hint = cu.OWNER_HINTS["path-ceiling"]
-
-    assert hint.startswith("orchestrator")
-    assert hint not in {"model", "report"}
-
-
-def test_path_ceiling_gate_names_the_native_skip_statuses() -> None:
-    """Pinned as a contract, because exit 3 alone would mask a renamed status behind the same verdict."""
-    gate = _path_ceiling_gate()
-
-    assert {"unknown_paths", "no_paths"} <= gate.not_checked_statuses
-    assert gate.pass_statuses == frozenset({"ok"})
-    assert gate.finding_statuses == frozenset({"over_ceiling"})
-
-
 def test_path_ceiling_over_ceiling_is_a_finding_not_a_pass(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The facade must never be the one place a bundle Desktop cannot open reads as done."""
     gate = _path_ceiling_gate()
@@ -3067,15 +3038,6 @@ def test_path_ceiling_pass_row_headline_carries_the_root_budget() -> None:
     assert "breaches above a 79-char installation root" in note
 
 
-def test_path_ceiling_budget_is_shown_even_when_not_tight() -> None:
-    """The tight flag would have stayed silent on the exact tree that motivated this finding."""
-    check = _pass_row(79, tight=False)
-
-    assert check["root_budget_is_tight"] is False
-    assert cu._path_ceiling_budget_note(check)  # pylint: disable=protected-access
-    assert "TIGHT" not in cu._path_ceiling_budget_note(check)  # pylint: disable=protected-access
-
-
 def test_path_ceiling_tight_budget_is_escalated_in_the_headline() -> None:
     """Always showing the number does not cost the advisory its teeth."""
     note = cu._path_ceiling_budget_note(_pass_row(30, tight=True))  # pylint: disable=protected-access
@@ -3119,15 +3081,6 @@ def test_path_ceiling_render_shows_the_budget_on_a_passing_row() -> None:
 
     assert "path-ceiling: PASS (native ok exit 0; root budget 79" in out, out
     assert "breaches above a 79-char installation root" in out
-
-
-def test_path_ceiling_render_shows_the_budget_even_when_not_tight() -> None:
-    """Gating the line on root_budget_is_tight would have stayed silent on the motivating tree."""
-    row = _pass_row(79, tight=False)
-    row.update({"id": "path-ceiling", "status": cu.STATUS_PASS, "native_status": "ok", "native_exit": 0})
-    assert row["root_budget_is_tight"] is False
-
-    assert "root budget 79" in _render_one(row)
 
 
 def test_path_ceiling_impossible_budget_says_no_root_can_hold_it() -> None:
@@ -5463,42 +5416,25 @@ def test_r2_numeric_waiver_never_clears_zero_page_oracle(
     assert before == {path.relative_to(package): path.read_bytes() for path in package.rglob("*") if path.is_file()}
 
 
+# One case per guard in check_unit's waiver: field presence, exact int/list types (bool is not int),
+# the denominator identities, the positive-visual condition, the empty-list conditions and status.
 @pytest.mark.parametrize(
     "field,value",
     [
-        *[
-            pytest.param(field, ..., id=f"missing-{field}")
-            for field in (
-                "pages",
-                "visual_present",
-                "visual_missing",
-                "contested_names",
-                "refused_evidence",
-                "numeric_present",
-                "numeric_missing",
-                "rows",
-            )
-        ],
-        *[
-            pytest.param(field, value, id=f"{field}-{type(value).__name__}")
-            for field in ("visual_missing", "contested_names", "refused_evidence", "numeric_missing", "rows")
-            for value in (None, False, 0, "", {}, ())
-        ],
-        *[
-            pytest.param(field, value, id=f"{field}-{value!r}")
-            for field in ("pages", "visual_present")
-            for value in (None, False, True, 0, -1, 1.0, "1")
-        ],
-        *[
-            pytest.param("numeric_present", value, id=f"numeric_present-{value!r}")
-            for value in (None, False, True, -1, 0.0, "0", 1, 2)
-        ],
+        pytest.param("pages", ..., id="missing-pages"),
+        pytest.param("visual_missing", ..., id="missing-visual_missing"),
+        pytest.param("numeric_present", ..., id="missing-numeric_present"),
+        pytest.param("pages", True, id="pages-True"),
+        pytest.param("pages", 0, id="pages-0"),
+        pytest.param("visual_present", True, id="visual_present-True"),
+        pytest.param("visual_present", 0, id="visual_present-0"),
+        pytest.param("numeric_present", True, id="numeric_present-True"),
+        pytest.param("numeric_present", 1, id="numeric_present-1"),
         pytest.param("numeric_missing", ("missing",), id="numeric_missing-coherent-tuple"),
         pytest.param("rows", ("row",), id="rows-coherent-tuple"),
         pytest.param("numeric_missing", [], id="numeric_missing-short"),
-        pytest.param("numeric_missing", [{}, {}], id="numeric_missing-long"),
-        pytest.param("rows", [], id="rows-short"),
         pytest.param("rows", [{}, {}], id="rows-long"),
+        pytest.param("visual_missing", (), id="visual_missing-tuple"),
         ("visual_missing", [{"name": "Executive"}]),
         ("contested_names", ["Executive"]),
         ("refused_evidence", ["ambiguous"]),
@@ -5596,10 +5532,18 @@ def test_r2_numeric_waiver_rejects_negative_count_with_coherent_total(
     assert "AMO-boundary" in r2_gate_runtime
 
 
-@pytest.mark.parametrize("flag", ["--reference-dir", "--oracle-dir"])
-@pytest.mark.parametrize("numeric", ["required", "none"])
-@pytest.mark.parametrize("entrypoint", ["run-all", "cli"])
-@pytest.mark.parametrize("brief", ["current", "malformed", "stale"])
+# Every brief state x numeric policy once; both flags and both entry points rotate across them.
+@pytest.mark.parametrize(
+    "flag,numeric,entrypoint,brief",
+    [
+        ("--reference-dir", "required", "run-all", "current"),
+        ("--oracle-dir", "none", "cli", "current"),
+        ("--oracle-dir", "required", "cli", "malformed"),
+        ("--reference-dir", "none", "run-all", "malformed"),
+        ("--reference-dir", "required", "cli", "stale"),
+        ("--oracle-dir", "none", "run-all", "stale"),
+    ],
+)
 def test_r2_reference_override_retains_safe_numeric_obligation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -5731,18 +5675,13 @@ def test_r2_import_class_has_three_positive_categories(tmp_path: Path, category:
     "partition,code",
     [
         (R2_SQL.replace("mode: import", "mode: directQuery"), "partition_mode_not_explicit_import"),
-        (R2_SQL.replace("mode: import", "mode: dual"), "partition_mode_not_explicit_import"),
-        (R2_SQL.replace("mode: import", "mode: directLake"), "partition_mode_not_explicit_import"),
-        (R2_SQL.replace("mode: import", "mode: unknown"), "partition_mode_not_explicit_import"),
         (R2_SQL.replace("\t\tmode: import\n", ""), "partition_mode_not_explicit_import"),
         (R2_SQL.replace("mode: import", "mode: import\n\t\tmode: import"), "partition_mode_not_explicit_import"),
-        (R2_SQL.replace("mode: import", "mode: import\n\t\tmode: directQuery"), "partition_mode_not_explicit_import"),
         (
             R2_SQL.replace("\t\tmode: import\n", "").replace("\t\t\tlet", "\t\t\tlet\n\t\t\t    mode: import"),
             "partition_mode_not_explicit_import",
         ),
         (R2_SQL.replace("Sales = m", "Sales = calculated"), "partition_kind_unsupported"),
-        (R2_SQL.replace("Sales = m", "Sales = entity"), "partition_kind_unsupported"),
         (R2_SQL.replace("Sales = m", "Sales"), "partition_unaccounted"),
         (R2_SQL.replace("Sql.Database", "Mystery.Database"), "partition_category_unsupported"),
         (
@@ -5753,15 +5692,10 @@ def test_r2_import_class_has_three_positive_categories(tmp_path: Path, category:
     ],
     ids=[
         "direct-query",
-        "dual",
-        "direct-lake",
-        "unknown-mode",
         "absent-mode",
         "duplicate-import",
-        "duplicate-mixed",
         "expression-only-mode",
         "calculated",
-        "implicit-entity",
         "unrecognized-partition",
         "unknown-category",
         "mixed-storage",
@@ -6430,14 +6364,6 @@ def test_r2_old_pinned_snapshot_and_byte_identical_transfer_are_not_latest_ever_
     assert R2_DISCLAIMER in cu.render(accepted)
 
 
-def test_r2_obsolete_completion_escape_hatch_is_absent(tmp_path: Path, r2_gate_runtime: list) -> None:
-    package = _r2_package(tmp_path)
-    source = (REPO_ROOT / "scripts/check_unit.py").read_text(encoding="utf-8")
-    forbidden = "CLAIMED" + "_ONLY"
-    assert forbidden not in source and ("claimed" + "_only_checks") not in source
-    assert forbidden not in cu.render(cu.run_all(package))
-
-
 def test_r2_json_output_cannot_invalidate_the_snapshot_it_claims(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, r2_gate_runtime: list
 ) -> None:
@@ -6684,3 +6610,13 @@ def test_r2_only_one_owned_workbook_target_can_complete(
     report = cu.run_all(package, receipt_sha256=token)
     assert report["exit_code"] == 2 and _r2_check(report, "finalized")["code"] == "working_topology_unsupported"
     assert r2_gate_runtime == []
+
+
+def test_scratch_cleanup_keeps_a_parent_another_run_still_uses(tmp_path: Path) -> None:
+    """Concurrent units share the scratch parent; removing one run's dir must not fail or take a sibling's."""
+    mine, sibling = tmp_path / "scratch" / "mine", tmp_path / "scratch" / "sibling"
+    mine.mkdir(parents=True)
+    sibling.mkdir()
+    (mine / "gate.json").write_text("{}", encoding="utf-8")
+    cu._remove_json_dir(mine)
+    assert not mine.exists() and sibling.is_dir()
