@@ -12,7 +12,7 @@ import sys
 import types as reference_types
 from collections.abc import Callable
 from dataclasses import FrozenInstanceError
-from pathlib import Path, PureWindowsPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from xml.etree import ElementTree
 
 import pytest
@@ -26,6 +26,7 @@ import check_reference_readiness as crr  # noqa: E402  # pylint: disable=wrong-i
 import check_unit as cu  # noqa: E402  # pylint: disable=wrong-import-position
 import manifest_scope as ms  # noqa: E402  # pylint: disable=wrong-import-position
 import package_unit as pkg  # noqa: E402  # pylint: disable=wrong-import-position
+import path_flavour as pf  # noqa: E402  # pylint: disable=wrong-import-position
 import reference_evidence as rev  # noqa: E402  # pylint: disable=wrong-import-position
 import test_package_filesystem as reference_filesystem  # noqa: E402  # pylint: disable=wrong-import-position
 import test_stamp_tableau_provenance as published_fixture  # noqa: E402  # pylint: disable=wrong-import-position
@@ -1263,6 +1264,7 @@ FOREIGN = "Zz_Foreign_Unit_Sentinel"
 #: An absolute host path, ASSEMBLED AT RUNTIME so no tracked file contains the literal.
 _SEP = chr(92)
 HOST_PATH_ROOT = f"C:{_SEP}Users{_SEP}a-real-account"
+HOST_PATH = f"{HOST_PATH_ROOT}{_SEP}.copilot{_SEP}installed-plugins"
 
 
 def absolute_host_paths(payload: object, path: str = "") -> list[str]:
@@ -2198,6 +2200,18 @@ def test_binding_cannot_use_incomplete_roles_or_ambiguous_owned_text(tmp_path: P
     assert before == {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}
 
 
+def test_a_path_written_in_the_OTHER_flavour_is_still_composed_consistently() -> None:
+    """`C:/runs/out` is a Windows path spelled with forward slashes, and the old rule got it wrong."""
+    assert pkg._path_separator("C:/runs/out") == "\\"  # noqa: SLF001
+    assert pkg._path_separator("/var/tmp/customer\\name/Book") == "/"  # noqa: SLF001
+    assert pf.flavour("C:/runs/out") == pf.WINDOWS
+    assert pf.flavour("/var/tmp/customer\\name/Book") == pf.POSIX
+    assert pf.flavour("relative/path") is None
+    assert pf.join("/var/tmp/customer\\name/Book", "data", "Shared.Data", trailing=True) == (
+        "/var/tmp/customer\\name/Book/data/Shared.Data/"
+    )
+
+
 def test_an_oversized_source_is_refused_by_the_ceiling_rather_than_copied(tmp_path: Path) -> None:
     """The ceiling exists so an unbounded case is loud, and it must not fire on a normal one."""
     bundle, oracle = _bundle(tmp_path)
@@ -2336,6 +2350,15 @@ def test_no_shipped_manifest_carries_an_absolute_host_path(tmp_path: Path) -> No
         for leak in absolute_host_paths(json.loads(path.read_text(encoding="utf-8")))
     ]
     assert offenders == [], f"absolute host paths shipped in: {offenders}"
+
+
+def test_the_absolute_path_walker_can_actually_find_one() -> None:
+    """The positive control the vacuous text search never had."""
+    assert absolute_host_paths({"engine": {"root": HOST_PATH}}) == [".engine.root"]
+    assert absolute_host_paths({"a": [{"b": f"{HOST_PATH_ROOT}{_SEP}x"}]}) == [".a[0].b"]
+    assert absolute_host_paths(json.loads(json.dumps({"root": HOST_PATH}))) == [".root"]
+    assert absolute_host_paths({"engine": {"version": "2.339.0"}}) == []
+    assert absolute_host_paths({"relative": f"pbip{_SEP}Unit{_SEP}Unit.pbip"}) == []
 
 
 # --------------------------------------------------------------------------------------------
@@ -2525,6 +2548,48 @@ def test_the_containment_walk_contains_KEYS_and_reports_the_CONTAINED_key(tmp_pa
     again, refused_again = pkg._contain_unsafe_strings(contained)  # pylint: disable=protected-access
     assert again == contained and sorted(refused_again) == sorted(refused), "the walk must be idempotent"
     assert tmp_path.is_dir()
+
+
+def test_a_LEGITIMATE_relative_retained_path_still_packages_and_says_where_the_bytes_are(
+    tmp_path: Path,
+) -> None:
+    """Positive control for the two above, plus the second half of finding 1."""
+    bundle, oracle = _bundle(tmp_path)
+    manifest = json.loads((oracle / "oracle-manifest.json").read_text(encoding="utf-8"))
+    manifest["views"][0]["data"] = {"status": "ok", "path": "data/view-0.csv", "row_count": 900}
+    (oracle / "data").mkdir(parents=True, exist_ok=True)
+    (oracle / "data" / "view-0.csv").write_text("Region\r\nWest\r\n", encoding="utf-8")
+    (oracle / "oracle-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    _package(tmp_path, bundle, oracle)
+
+    root = _out(tmp_path) / UNIT
+    shipped = json.loads((root / "oracle" / "oracle-manifest.json").read_text(encoding="utf-8"))
+    data = [v for v in shipped["views"] if v.get("flags")][0]["data"]
+    assert data["retained_path"] == "data/view-0.csv", "a safe capture-relative pointer must survive"
+    assert "capture" in data["packaging_reason"], "the reference must say it names the capture, not this package"
+    assert not (root / "oracle" / "data" / "view-0.csv").exists(), "the bytes stay out of the package"
+    assert not list((root / "oracle").rglob("*.csv"))
+
+
+def test_a_packaged_view_from_an_OLDER_capture_is_flagged_by_the_packager_itself(tmp_path: Path) -> None:
+    """The legacy half of #480 finding 1, and the reviewer's actual reproduction input."""
+    bundle, oracle = _bundle(tmp_path)
+    manifest = json.loads((oracle / "oracle-manifest.json").read_text(encoding="utf-8"))
+    # No `flags` key anywhere: exactly a manifest written before the diagnostic existed.
+    manifest["views"][0]["data"] = {"status": "ok", "path": "data/view-0.csv", "columns": ["Region"]}
+    (oracle / "data").mkdir(parents=True, exist_ok=True)
+    (oracle / "data" / "view-0.csv").write_text("Region\r\n", encoding="utf-8")
+    (oracle / "oracle-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    _package(tmp_path, bundle, oracle)
+
+    shipped = json.loads((_out(tmp_path) / UNIT / "oracle" / "oracle-manifest.json").read_text(encoding="utf-8"))
+    flagged = [v for v in shipped["views"] if v.get("flags")]
+    assert [v["flags"] for v in flagged] == [["data_unassessable", "row_count_unrecorded"]]
+    # ...and the STRUCTURAL half (#480 round 2): the packager must not copy uncertified bytes into
+    # `<kind>/data/<stem>.csv`, where every numeric consumer reads them as evidence.
+    assert "path" not in flagged[0]["data"]
+    assert flagged[0]["data"]["retained_path"] == "data/view-0.csv"
+    assert not list((_out(tmp_path) / UNIT / "oracle").rglob("*.csv"))
 
 
 def test_a_packaged_view_whose_row_count_was_never_recorded_says_so(tmp_path: Path) -> None:
@@ -3104,6 +3169,14 @@ def _pbir_bundle(tmp_path: Path, *units: str) -> Path:
     return bundle
 
 
+def _deepest_tail(unit: str = BUDGET_UNIT) -> str:
+    """The package-relative path of :func:`_pbir_bundle`'s deepest file, built independently of `package_unit`."""
+    return str(
+        Path(unit, "fabric", f"{unit}.Report", "definition", "pages", FIELD_PAGE_ID, "visuals", FIELD_VISUAL_ID)
+        / "visual.json"
+    )
+
+
 def _padded_path(base: Path, length: int) -> Path:
     """A path under `base` measuring exactly `length` ASCII characters."""
     if len(str(base)) > length:
@@ -3114,6 +3187,11 @@ def _padded_path(base: Path, length: int) -> Path:
         out = out.with_name(out.name + "d") if deficit == 1 else out / ("d" * min(deficit - 1, 60))
     assert len(str(out)) == length
     return out
+
+
+def _synthetic_out(length: int) -> Path:
+    """A never-created `--out` of exactly `length` characters, rooted at the filesystem anchor so it cannot skip."""
+    return _padded_path(Path(Path.cwd().anchor or "/") / "pkg", length)
 
 
 def _pin_windows(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3141,6 +3219,20 @@ def test_the_retired_package_is_never_named_after_the_package_it_retires(
     assert len(seen[0].name) < len(f".{final.name}.replaced"), seen[0]
 
 
+def test_the_budget_measures_both_the_staged_and_the_final_tree(tmp_path: Path) -> None:
+    """Neither root may be assumed to be the deeper one - which of the two wins depends on the name."""
+    bundle = _pbir_bundle(tmp_path)
+    out = tmp_path / "packages"
+    projected = pkg.projected_paths(bundle, BUDGET_UNIT, out)
+    by_root = {
+        root: {path.tail for path in projected if path.path.startswith(f"{root}{os.sep}") or path.path == str(root)}
+        for root in pkg.package_roots(out, BUDGET_UNIT)
+    }
+    assert len(by_root) == 3, "the final tree, the staged tree and the retired tree"
+    assert all(tails for tails in by_root.values()), "every root must be measured"
+    assert len({frozenset(tails) for tails in by_root.values()}) == 1, "the same tails at every root"
+
+
 def test_a_unit_whose_paths_exceed_the_ceiling_is_refused_BEFORE_anything_is_written(tmp_path: Path) -> None:
     """The customer's shape: 47 units, a canonical `_runs/<NNN>-<slug>/packages/<batch>/` `--out`."""
     bundle = _pbir_bundle(tmp_path)
@@ -3150,6 +3242,61 @@ def test_a_unit_whose_paths_exceed_the_ceiling_is_refused_BEFORE_anything_is_wri
     assert not out.exists(), "the refusal must precede every write, including --out itself"
     assert not (tmp_path / "packages").exists()
     assert excinfo.value.budget.unit == BUDGET_UNIT
+
+
+def test_the_budget_measures_the_STAGED_tree_too_not_only_the_final_one(tmp_path: Path) -> None:
+    """A one-character unit stages under a 9-character name, so staging is the deeper of the two."""
+    unit = "B"
+    bundle = _pbir_bundle(tmp_path, unit)
+    out = _synthetic_out(pkg.WINDOWS_LIMITS.file_ceiling - len(_deepest_tail(unit)) - 1)
+    budget = pkg.path_budget(bundle, unit, out, limits=pkg.WINDOWS_LIMITS)
+    final = str(out / unit)
+    assert budget.overruns, "the scratch trees are over the ceiling and the final tree is not"
+    assert not [path for path in budget.overruns if path.path.startswith(f"{final}{os.sep}")], [
+        path.path for path in budget.overruns
+    ]
+
+
+def test_scratch_overrun_does_not_consume_the_WINDOWS_shipping_budget(tmp_path: Path) -> None:
+    """A POSIX host may need a long scratch root while the final package remains relocatable."""
+    unit = "B"
+    bundle = _pbir_bundle(tmp_path, unit)
+    out = _synthetic_out(cpc.POSIX_PATH_CEILING - len(_deepest_tail(unit)) - 1)
+
+    budget = pkg.path_budget(bundle, unit, out, limits=cpc.POSIX_LIMITS)
+
+    assert budget.overruns, "the staging or retired scratch root must exceed the POSIX host limit"
+    assert budget.shipping == [], "only the final package is judged for Windows portability"
+    final_paths = [
+        path
+        for path in pkg.projected_paths(bundle, unit, out, limits=cpc.POSIX_LIMITS)
+        if path.path.startswith(f"{out / unit}{os.sep}") or path.path == str(out / unit)
+    ]
+    assert budget.shipping_budget == min(
+        (pkg.WINDOWS_LIMITS.dir_ceiling if path.kind == pkg.KIND_DIR else pkg.WINDOWS_LIMITS.file_ceiling)
+        - (path.length - pkg.utf16_len(str(out)))
+        for path in final_paths
+    )
+
+    staging = tmp_path / "staging"
+    assembled_file = staging / _deepest_tail(unit)
+    assembled_file.parent.mkdir(parents=True)
+    assembled_file.write_text("{}", encoding="utf-8")
+    assembled = pkg.assembled_budget(unit, staging, out / unit, out, cpc.POSIX_LIMITS)
+    assert assembled.overruns
+    assert assembled.shipping == []
+
+
+def test_a_unit_that_fits_exactly_at_the_ceiling_is_NOT_refused(tmp_path: Path) -> None:
+    """The negative control, one character away from the test above."""
+    unit = "Sales_Performance_Dashboard"
+    bundle = _pbir_bundle(tmp_path, unit)
+    fits = _synthetic_out(pkg.WINDOWS_LIMITS.file_ceiling - len(_deepest_tail(unit)) - 1)
+    assert pkg.path_budget(bundle, unit, fits, limits=pkg.WINDOWS_LIMITS).overruns == []
+    assert pkg.path_budget(bundle, unit, fits, limits=pkg.WINDOWS_LIMITS).out_root_budget == len(str(fits))
+    assert pkg.path_budget(bundle, unit, fits / "x", limits=pkg.WINDOWS_LIMITS).overruns, (
+        "one character more must be refused"
+    )
 
 
 def test_main_accounts_for_a_too_deep_unit_without_blocking_siblings(
@@ -3281,6 +3428,21 @@ def test_an_output_the_projection_never_predicted_is_still_refused_before_the_sw
     assert excinfo.value.budget.worst.tail == surprise
     assert pkg.package_contents(out / UNIT) == before, "the package already there must survive untouched"
     assert not pkg.staging_dir(out, UNIT).exists(), "and the staged tree must be gone"
+
+
+def test_the_RETIRED_tree_is_measured_because_rmtree_WALKS_it(tmp_path: Path) -> None:
+    """Three roots, not two: a package being replaced is renamed to `.<digest>~` and then walked."""
+    unit = "B"
+    bundle = _pbir_bundle(tmp_path, unit)
+    out = _synthetic_out(pkg.WINDOWS_LIMITS.file_ceiling - len(_deepest_tail(unit)) - 9)
+
+    assert pkg.retired_dir(out / unit) in pkg.package_roots(out, unit)
+    budget = pkg.path_budget(bundle, unit, out, limits=pkg.WINDOWS_LIMITS)
+    retired = f"{pkg.retired_dir(out / unit)}{os.sep}"
+    assert budget.overruns, "the retired tree is over the ceiling"
+    assert all(path.path.startswith(retired) for path in budget.overruns), [
+        path.path for path in budget.overruns if not path.path.startswith(retired)
+    ]
 
 
 def test_a_length_refusal_from_the_FILESYSTEM_is_restated_with_a_path_and_a_remedy(
@@ -3845,6 +4007,29 @@ def test_assembled_provider_is_registered_once_despite_cleanup_finding(
     assert not (retired / pkg.MANIFEST_NAME).exists()
 
 
+def test_crash_diagnostic_redacts_whole_messages_with_host_locations() -> None:
+    windows_path = str(PureWindowsPath("C:/", "Users", "Neutral Canary", "secret.csv"))
+    unc_path = str(PureWindowsPath("//server/Users", "Neutral Canary", "secret.csv"))
+    posix_path = str(PurePosixPath("/", "home", "Neutral Canary", "secret.csv"))
+    lowercase_account = str(PureWindowsPath("C:/", "Users", "neutral canary"))
+    spaced_filename = str(PureWindowsPath("C:/", "Users", "Neutral Canary", "My Secret File.csv"))
+    followed_by_prose = f"{PureWindowsPath('C:/', 'Users', 'Alice')} Failed again"
+    for text in (
+        f'"{windows_path}", retry failed',
+        f"failure at {windows_path}; retry failed",
+        f"{unc_path}; retry failed",
+        f"{posix_path} (retry failed)",
+        lowercase_account,
+        spaced_filename,
+        followed_by_prose,
+    ):
+        safe = pkg._sanitize_diagnostic(text)  # pylint: disable=protected-access
+        assert safe == "[host location redacted]"
+
+    assert pkg._sanitize_diagnostic("/api/v1/Neutral Canary is unavailable") == "/api/v1/Neutral Canary is unavailable"  # pylint: disable=protected-access
+    assert pkg._sanitize_diagnostic("ordinary failure text") == "ordinary failure text"  # pylint: disable=protected-access
+
+
 def test_a_staging_tree_that_survives_cleanup_fails_its_unit_rather_than_being_assembled_into(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3997,6 +4182,37 @@ def test_failed_rollback_cannot_mask_keyboard_interrupt(tmp_path: Path, monkeypa
     assert caught.value.secondary_code == "rollback_failed"
     assert isinstance(caught.value.__cause__, KeyboardInterrupt)
     assert not final.exists() and retired.is_dir() and staged.is_dir()
+
+
+def test_path_budget_diagnostics_keep_independent_utf16_measurements_without_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The known field-reproduction directory is the offender, not a string parsed from its error."""
+    _pin_windows(monkeypatch)
+    bundle = _pbir_bundle(tmp_path)
+    out = _padded_path(tmp_path, 170) / "private-location-\U0001f4c1"
+    report = tmp_path / "budget-details.json"
+    assert pkg.main(["--bundle", str(bundle), "--out", str(out), "--json", str(report)]) == pkg.EXIT_UNIT_FAILED
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    captured = capsys.readouterr()
+    failure = payload["failed"][0]
+    deepest = (out / _deepest_tail()).parent
+    length = len(str(deepest).encode("utf-16-le")) // 2
+    root_length = len(str(out).encode("utf-16-le")) // 2
+    expected = {
+        "path_kind": "directory",
+        "length_utf16": length,
+        "ceiling_utf16": 247,
+        "overage_utf16": length - 247,
+        "max_out_root_utf16": 247 - (length - root_length),
+        "shorten_out_by_utf16": length - 247,
+        "relative_shape_overage_utf16": 0,
+    }
+    assert failure["details"] == {"path_budget": expected}
+    assert length != len(str(deepest)), "the non-BMP witness must distinguish UTF-16 from code points"
+    assert failure["reason"] in captured.out
+    assert "private-location" not in report.read_text(encoding="utf-8") + captured.out + captured.err
+    assert str(out) not in report.read_text(encoding="utf-8") + captured.out + captured.err
 
 
 @pytest.mark.parametrize("variant", ["unreadable"])

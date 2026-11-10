@@ -18,6 +18,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
+import check_path_ceiling as cpc  # noqa: E402  # pylint: disable=wrong-import-position
 import check_reference_readiness as crr  # noqa: E402  # pylint: disable=wrong-import-position
 import check_unit  # noqa: E402  # pylint: disable=wrong-import-position
 import package_role_identity as pri  # noqa: E402  # pylint: disable=wrong-import-position
@@ -830,6 +831,19 @@ def test_the_engine_working_copy_alone_has_no_expected_page_set(tmp_path: Path) 
     assert "no migration-spec.json" in parity["detail"]
 
 
+def _first_object_name() -> str:
+    """The name of the first Tableau object in the fixture - the one the negative control covers."""
+    return (crr.source_objects(FIXTURE) or [])[0].name
+
+
+def test_oracle_coverage_reports_the_uncaptured_pages_as_missing(tmp_path: Path) -> None:
+    bundle, oracle, _ = _bundle(tmp_path, covered={_first_object_name()})
+    coverage = check_unit.check_oracle_coverage(_package(tmp_path, bundle, oracle), None, None)
+    assert coverage["status"] == check_unit.STATUS_NOT_CHECKED
+    assert coverage["visual_missing"]
+    assert coverage["visual_present"] >= 1
+
+
 # --------------------------------------------------------------------------------------------
 # after - the positive control
 # --------------------------------------------------------------------------------------------
@@ -1135,6 +1149,13 @@ def test_incomplete_flat_package_without_manifest_fails_closed_when_ancestor_evi
     assert "oracle-coverage" not in checks
     assert run_report["exit_code"] == check_unit.EXIT_NOT_CHECKED
     assert checks[check_unit.PACKAGE_BOUNDARY_CHECK_ID]["code"] == "package_marker_missing"
+
+
+def test_the_packager_budgets_against_those_same_two_literals() -> None:
+    """A second copy of "260" is how a repo ends up with two length rules - so there is only one."""
+    assert (pkg.WINDOWS_LIMITS.file_ceiling, pkg.WINDOWS_LIMITS.dir_ceiling) == (259, 247)
+    assert pkg.platform_limits("nt") == pkg.WINDOWS_LIMITS
+    assert pkg.platform_limits("posix").file_ceiling == cpc.POSIX_PATH_CEILING > cpc.FILE_CEILING
 
 
 # --------------------------------------------------------------------------------------------

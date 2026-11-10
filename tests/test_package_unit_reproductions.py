@@ -368,6 +368,33 @@ def test_full_brief_is_refused_without_copying_redacting_or_echoing(
     assert str(brief) not in output
 
 
+def test_new_package_seals_exact_data_access_bytes_and_exposes_pending_consumer(tmp_path: Path) -> None:
+    bundle, oracle, _objects = _bundle(tmp_path, covered=None)
+    result = pkg.package_unit(
+        bundle,
+        UNIT,
+        tmp_path / "out",
+        oracle_dir=oracle,
+        assets_dir=bundle.parent / "assets",
+        brief=_brief(tmp_path, UNIT),
+    )
+    package = tmp_path / "out" / UNIT
+    wire = (package / "data-access.json").read_bytes()
+    assessment = pkg.data_access.parse_data_access(wire.decode("utf-8"))
+    assert assessment.state == "local_import_ready"
+    assert assessment.codes == ("all-flat-file", "package-self-contained")
+    assert result["artifacts"]["data_access"] == "data-access.json"
+    assert result["contents"]["files"]["data-access.json"] == hashlib.sha256(wire).hexdigest()
+    assert wire == assessment.dumps().encode("utf-8") and wire.endswith(b"\n") and b"\r" not in wire
+    assert pkg.pri.verify_s1(package).integrity.is_clean
+    for name in ("README.md", "handover.md"):
+        text = (package / name).read_text(encoding="utf-8")
+        assert "state=local_import_ready" in text
+        assert pkg.DATA_ACCESS_PENDING in text
+    rendered = pkg.render([result], tmp_path / "out", [], [], [UNIT])
+    assert "state=local_import_ready" in rendered and pkg.DATA_ACCESS_PENDING in rendered
+
+
 @pytest.mark.parametrize("variant", ["plain", "legacy"])
 def test_producer_keeps_a_strict_cannot_file_when_policy_is_unparsed(tmp_path: Path, variant: str) -> None:
     bundle, oracle, _objects = _bundle(tmp_path, covered=None)
