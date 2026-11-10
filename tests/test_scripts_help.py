@@ -47,88 +47,36 @@ def _tracked_scripts() -> list[Path]:
 SCRIPTS = _tracked_scripts()
 assert SCRIPTS, "no tracked scripts found under scripts/*.py - this guard now proves nothing"
 
-_HELP_SWEEP_RUNNER = """
-import os
-import runpy
-import sys
-
-base_argv = sys.argv[:]
-base_path = sys.path[:]
-base_env = os.environ.copy()
-base_cwd = os.getcwd()
-base_modules = sys.modules.copy()
-base_streams = (sys.stdin, sys.stdout, sys.stderr)
-base_stream_settings = tuple((stream.encoding, stream.errors) if stream is not None else (None, None) for stream in base_streams)
-for script in sys.argv[1:]:
-    try:
-        os.chdir(base_cwd)
-        os.environ.clear()
-        os.environ.update(base_env)
-        sys.argv = [script, "--help"]
-        sys.path = [os.path.dirname(script), *base_path[1:]]
-        runpy.run_path(script, run_name="__main__")
-    except SystemExit as exc:
-        if exc.code not in (0, None):
-            print(f"{script} --help exited {exc.code}", file=sys.stderr)
-            raise
-    except BaseException:
-        print(f"{script} --help failed", file=sys.stderr)
-        raise
-    finally:
-        os.chdir(base_cwd)
-        os.environ.clear()
-        os.environ.update(base_env)
-        sys.argv = base_argv
-        sys.path = base_path
-        sys.modules.clear()
-        sys.modules.update(base_modules)
-        sys.stdin, sys.stdout, sys.stderr = base_streams
-        for stream, (encoding, errors) in zip(base_streams, base_stream_settings):
-            if stream is not None and encoding and stream.encoding != encoding:
-                stream.reconfigure(encoding=encoding, errors=errors)
-"""
+# Every script runs in its own real subprocess, as on master: an in-process `runpy` sweep was measured
+# no faster (40 s for 113 scripts vs 39 s per-process) and let one script's stream reconfiguration
+# mask another script's crash. Chunking only trims test IDs; each subprocess keeps its own budget.
+HELP_CHUNKS = 8
+_CHUNKS = [SCRIPTS[i::HELP_CHUNKS] for i in range(HELP_CHUNKS)]
 
 
-def test_help_exits_zero_on_a_cp1252_stdout() -> None:
+@pytest.mark.parametrize("chunk", _CHUNKS, ids=[f"chunk{i + 1}of{HELP_CHUNKS}" for i in range(HELP_CHUNKS)])
+def test_help_exits_zero_on_a_cp1252_stdout(chunk: list[Path]) -> None:
     """`--help` must not crash before it can print anything, on any platform.
 
     Windows' cp1252 default is reproduced here without a Windows runner by forcing
-    `PYTHONIOENCODING=cp1252` on one real subprocess that exercises every tracked script.
+    `PYTHONIOENCODING=cp1252` on a real subprocess per script - the same mechanism the issue's own
+    repro used (`$env:PYTHONUTF8` unset) to confirm the cause.
     """
     env = {**os.environ, "PYTHONIOENCODING": "cp1252"}
     env.pop("PYTHONUTF8", None)
-    result = subprocess.run(
-        [sys.executable, "-c", _HELP_SWEEP_RUNNER, *(str(script) for script in SCRIPTS)],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        env=env,
-        timeout=60,
-    )
-    stderr = result.stderr.decode("utf-8", errors="replace")
-    assert result.returncode == 0, (
-        f"script help sweep exited {result.returncode} under a cp1252 stdout:\n{stderr[-2000:]}"
-    )
-
-
-@pytest.mark.parametrize(
-    ("script", "shape"),
-    [
-        (REPO_ROOT / "scripts/assess_estate.py", "direct"),
-        (REPO_ROOT / "scripts/build_plugin.py", "forwarding-shim"),
-    ],
-)
-def test_process_help_smoke_for_each_entrypoint_shape(script: Path, shape: str) -> None:
-    env = {**os.environ, "PYTHONIOENCODING": "cp1252"}
-    env.pop("PYTHONUTF8", None)
-    result = subprocess.run(
-        [sys.executable, str(script), "--help"],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        env=env,
-        timeout=60,
-    )
-    stderr = result.stderr.decode("utf-8", errors="replace")
-    assert result.returncode == 0, f"{shape} {script.name} --help failed:\n{stderr[-2000:]}"
+    failures = []
+    for script in chunk:
+        result = subprocess.run(
+            [sys.executable, str(script), "--help"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            env=env,
+            timeout=60,
+        )
+        if result.returncode != 0:
+            stderr = result.stderr.decode("utf-8", errors="replace")
+            failures.append(f"{script.name} --help exited {result.returncode}:\n{stderr[-2000:]}")
+    assert not failures, "under a cp1252 stdout:\n" + "\n\n".join(failures)
 
 
 def test_transpiler_missing_arguments_prints_usage() -> None:

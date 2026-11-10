@@ -75,10 +75,11 @@ def test_the_apostrophe_survives_the_round_trip_unmangled(tmp_path: Path) -> Non
 # --------------------------------------------------------------------------- truncation
 
 
-@pytest.mark.parametrize("length", [40, 49, 50, 51, 52, 53, 60])
+@pytest.mark.parametrize("length", [56, 57, 58, 59, 60, 61])
 def test_truncation_never_splits_an_xml_entity(length: int, tmp_path: Path) -> None:
     """A `&` near the cut point is the case: escaped it becomes 5 characters, so slicing the escaped
-    string can leave a bare `&a`. Measured on the pre-fix code: n=49..52 failed, n=53 passed."""
+    string can leave a bare `&a`. Measured by restoring escape-then-slice (`_attr(f"{name} Sheet")[:60]`):
+    n=57..60 failed, n=56 and n=61 passed, so this range brackets the boundary."""
     name = "x" * (length - 1) + "&"
     _root(name, tmp_path)  # raises ParseError if an entity was cut
 
