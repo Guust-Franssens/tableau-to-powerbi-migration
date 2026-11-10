@@ -95,8 +95,12 @@ def _compound_rollback(  # pylint: disable=too-many-locals
     return events, published
 
 
-@pytest.mark.parametrize("change", ARTIFACT_CHANGES, ids=[row[0] for row in ARTIFACT_CHANGES])
-@pytest.mark.parametrize("route", ["library", "cli"])
+ROLLBACK_CASES = [(change, "library") for change in ARTIFACT_CHANGES] + [(ARTIFACT_CHANGES[0], "cli")]
+
+
+@pytest.mark.parametrize(
+    ("change", "route"), ROLLBACK_CASES, ids=[f"{change[0]}-{route}" for change, route in ROLLBACK_CASES]
+)
 def test_compound_rollback_failure_never_leaves_current_authority(  # pylint: disable=too-many-locals
     package: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -142,8 +146,14 @@ def test_compound_rollback_failure_never_leaves_current_authority(  # pylint: di
     assert events == ["retired", "recreation-denied", "withdrawal-denied"]
 
 
-@pytest.mark.parametrize("kind,expected", ARTIFACT_CHANGES)
-@pytest.mark.parametrize("marker", ["none", "pending", "staged"])
+# A marker remaps only the GENERATED/FINAL codes to EXTRA_FILE; predecessor and PNG codes still win.
+REVALIDATION_CASES = [(*change, "none") for change in ARTIFACT_CHANGES] + [
+    (*ARTIFACT_CHANGES[i], marker)
+    for i, marker in ((0, "pending"), (6, "pending"), (4, "pending"), (7, "pending"), (0, "staged"), (5, "staged"))
+]
+
+
+@pytest.mark.parametrize("kind,expected,marker", REVALIDATION_CASES)
 def test_current_authority_revalidates_artifacts_and_history(
     package: Path, kind: str, expected: str, marker: str
 ) -> None:

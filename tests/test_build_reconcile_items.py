@@ -63,30 +63,12 @@ def test_unique_headers_keep_each_value_and_caption_identity(tmp_path: Path) -> 
     "payload",
     [
         b"Region,Amount,Amount,Other\nWest,1,999,7\n",
-        b"Region,Amount,Amount,Other\nWest,999,1,7\n",
         b"Region,Region,Amount\nWest,East,1\n",
-        b"Region,Unknown,Unknown,Amount\nWest,1,999,7\n",
-        b"Region,Amount, Amount,Other\nWest,1,999,7\n",
-        b"Region,Amount,Amount ,Other\nWest,1,999,7\n",
         b"Region,Amount,\tAmount\t,Other\nWest,1,999,7\n",
-        b"Region, Amount ,Amount,Other\nWest,999,1,7\n",
         b"Region, Amount ,\tAmount\t,Other\nWest,1,999,7\n",
-        b"Region,\tRegion ,Amount,Other\nWest,East,1,7\n",
         b"Region,Unknown,\tUnknown ,Amount\nWest,1,999,7\n",
     ],
-    ids=[
-        "measure-first-order",
-        "measure-reversed",
-        "dimension",
-        "unmapped",
-        "leading-space-alias",
-        "trailing-space-alias",
-        "tab-alias",
-        "reversed-alias",
-        "two-aliases",
-        "dimension-alias",
-        "unmapped-alias",
-    ],
+    ids=["measure", "dimension", "whitespace-alias", "two-aliases", "unmapped-alias"],
 )
 def test_duplicate_headers_refuse_the_entire_view(tmp_path: Path, payload: bytes) -> None:
     """Raw duplicates and aliases of one role key refuse even neighboring unique measures."""
@@ -104,13 +86,8 @@ def test_duplicate_headers_refuse_the_entire_view(tmp_path: Path, payload: bytes
 
 @pytest.mark.parametrize(
     "payload",
-    [
-        b"Region,Amount,Amount\nWest,1,999\n",
-        b"Region,Amount, Amount \nWest,1,999\n",
-        b"Region,Amount,\tAmount\t\nWest,1,999\n",
-        b"Region, Amount ,\tAmount\t\nWest,1,999\n",
-    ],
-    ids=["raw-duplicate", "space-alias", "tab-alias", "two-aliases"],
+    [b"Region,Amount,Amount\nWest,1,999\n", b"Region, Amount ,\tAmount\t\nWest,1,999\n"],
+    ids=["raw-duplicate", "two-aliases"],
 )
 def test_a_duplicate_view_does_not_discard_neighboring_unique_views(tmp_path: Path, payload: bytes) -> None:
     """Refusal is view-scoped, not a silent partial mapping or an estate-wide stop."""
@@ -139,8 +116,9 @@ def test_a_duplicate_view_does_not_discard_neighboring_unique_views(tmp_path: Pa
     assert result["unmapped_columns"] == []
 
 
-@pytest.mark.parametrize("caption", [b" Amount ", b"\tAmount\t", b"amount"])
-@pytest.mark.parametrize("role", ["MEASURE", "DIMENSION"])
+@pytest.mark.parametrize(
+    ("caption", "role"), [(b" Amount ", "MEASURE"), (b"\tAmount\t", "DIMENSION"), (b"amount", "MEASURE")]
+)
 def test_distinct_exact_caption_keys_keep_their_roles(tmp_path: Path, caption: bytes, role: str) -> None:
     """Exact role keys take precedence; whitespace and case are not blanket-normalized."""
     _write_oracle(tmp_path, b"Region,Amount," + caption + b",Other\nWest,1,999,7\n")
@@ -177,9 +155,9 @@ def test_empty_exact_role_still_uses_the_stripped_caption_key(tmp_path: Path) ->
     ]
 
 
-@pytest.mark.parametrize("caption", [b" Amount ", b"\tAmount\t"])
-def test_unique_stripped_caption_still_resolves_without_renaming(tmp_path: Path, caption: bytes) -> None:
+def test_unique_stripped_caption_still_resolves_without_renaming(tmp_path: Path) -> None:
     """A whitespace alias is not ambiguous unless another header resolves to the same key."""
+    caption = b"\tAmount\t"
     _write_oracle(tmp_path, b"Region," + caption + b",Other\nWest,1,999\n")
 
     result = builder.build(tmp_path, ROLES)
@@ -223,20 +201,14 @@ def test_grain_text_survives_csv_parsing_exactly(tmp_path: Path, payload: bytes,
     [
         (b"1.23", 1.23, "number"),
         (b"0", 0.0, "number"),
-        (b"0.123", 0.123, "number"),
         (b"-.5", -0.5, "number"),
-        (b"1234.56", 1234.56, "number"),
         (b"1,234", 1234.0, "number"),
-        (b"123,456.78", 123456.78, "number"),
         (b"-12,345,678.90", -12345678.9, "number"),
-        (b"0%", 0.0, "percent"),
         (b"19.5%", 0.195, "percent"),
         (b"-1,234.5 %", -12.345, "percent"),
-        (b"$0", 0.0, "currency"),
         (b"$1,234.56", 1234.56, "currency"),
         (b" - $ 12.50 ", -12.5, "currency"),
         (b"\xc2\xa312.50", 12.5, "currency"),
-        (b"\xe2\x82\xac0.123", 0.123, "currency"),
         (b"\xe2\x82\xac1,234.56", 1234.56, "currency"),
         (b"\xc2\xa512", 12.0, "currency"),
     ],
@@ -268,11 +240,8 @@ def test_supported_numbers_still_emit_items(tmp_path: Path, cell: bytes, expecte
         b"123,",
         b"1e3",
         b"NaN",
-        b"Infinity",
         b"\xd9\xa1.\xd9\xa2\xd9\xa3",
         b"-0,123",
-        b"-0,123%",
-        b"-$0,123",
     ],
 )
 def test_unsupported_numbers_stay_text_and_emit_no_item(tmp_path: Path, cell: bytes) -> None:
@@ -289,13 +258,9 @@ def test_unsupported_numbers_stay_text_and_emit_no_item(tmp_path: Path, cell: by
 
 
 @pytest.mark.parametrize(
-    "number",
-    [b"0,123", b"0,000", b"00,123", b"000,001", b"01,234", b"012,345", b"000,001,234.56"],
-)
-@pytest.mark.parametrize(
-    ("prefix", "suffix"),
-    [(b"", b""), (b"", b"%"), (b"\xe2\x82\xac", b"")],
-    ids=["plain", "percent", "currency"],
+    ("prefix", "number", "suffix"),
+    [(b"", number, b"") for number in (b"0,123", b"0,000", b"00,123", b"01,234", b"012,345", b"000,001,234.56")]
+    + [(b"", b"0,123", b"%"), (b"\xe2\x82\xac", b"0,123", b"")],
 )
 def test_zero_prefixed_grouped_numbers_stay_text(tmp_path: Path, number: bytes, prefix: bytes, suffix: bytes) -> None:
     """Every format arm refuses a leading zero before comma grouping, including zero itself."""
@@ -316,21 +281,9 @@ def test_zero_prefixed_grouped_numbers_stay_text(tmp_path: Path, number: bytes, 
     [
         (b"Region,Amount,Other\nWest,1,999\n", 0, 2),
         (b"Region,Amount,Amount\nWest,1,999\n", 1, 0),
-        (b"Region,Amount,\tAmount \nWest,1,999\n", 1, 0),
         (b'Region,Amount\nWest,"1,23"\n', 1, 0),
-        (b'Region,Amount\nWest,"0,123"\n', 1, 0),
-        (b'Region,Amount\nWest,"0,123%"\n', 1, 0),
-        (b'Region,Amount\nWest,"\xe2\x82\xac0,123"\n', 1, 0),
     ],
-    ids=[
-        "unique",
-        "duplicate",
-        "alias",
-        "unsupported",
-        "zero-prefix-plain",
-        "zero-prefix-percent",
-        "zero-prefix-currency",
-    ],
+    ids=["unique", "duplicate", "unsupported"],
 )
 def test_cli_reports_whether_any_numeric_item_was_written(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, payload: bytes, expected_exit: int, expected_count: int

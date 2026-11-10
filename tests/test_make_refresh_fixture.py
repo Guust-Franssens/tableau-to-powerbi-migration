@@ -15,28 +15,12 @@ assert spec.loader is not None
 spec.loader.exec_module(make_refresh_fixture)
 
 
-def test_same_rows_and_seed_write_byte_identical_csv(tmp_path: Path) -> None:
-    """Determinism is the contract: same knobs must produce identical bytes."""
-    first = tmp_path / "first" / make_refresh_fixture.CSV_NAME
-    second = tmp_path / "second" / make_refresh_fixture.CSV_NAME
-
-    first_size, first_hash = make_refresh_fixture.write_csv(first, rows=1_000, seed=262)
-    second_size, second_hash = make_refresh_fixture.write_csv(second, rows=1_000, seed=262)
-
-    assert first_size == second_size
-    assert first_hash == second_hash
-    assert first.read_bytes() == second.read_bytes()
-
-
-def test_different_seed_changes_the_csv_hash(tmp_path: Path) -> None:
-    """The seed is real, not decorative; changing it changes the deterministic stream."""
-    first = tmp_path / "first" / make_refresh_fixture.CSV_NAME
-    second = tmp_path / "second" / make_refresh_fixture.CSV_NAME
-
-    _, first_hash = make_refresh_fixture.write_csv(first, rows=1_000, seed=262)
-    _, second_hash = make_refresh_fixture.write_csv(second, rows=1_000, seed=263)
-
-    assert first_hash != second_hash
+def test_csv_is_deterministic_per_rows_and_seed(tmp_path: Path) -> None:
+    paths = [tmp_path / name / make_refresh_fixture.CSV_NAME for name in ("a", "b", "c")]
+    first = make_refresh_fixture.write_csv(paths[0], rows=1_000, seed=262)
+    assert make_refresh_fixture.write_csv(paths[1], rows=1_000, seed=262) == first
+    assert paths[0].read_bytes() == paths[1].read_bytes()
+    assert make_refresh_fixture.write_csv(paths[2], rows=1_000, seed=263)[1] != first[1]
 
 
 def test_binding_points_source_folder_at_generated_data(tmp_path: Path) -> None:

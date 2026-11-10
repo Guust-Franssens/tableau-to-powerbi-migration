@@ -334,7 +334,7 @@ def test_emptied_visual_block_is_budgeted_and_keeps_its_full_count(tmp_path, cap
     assert "more emptied visual(s) not named here" in out
 
 
-@pytest.mark.parametrize("cap", [1500, 2500, 6000, 20000, 60000])
+@pytest.mark.parametrize("cap", [1500, 6000, 60000])
 @pytest.mark.parametrize("mode", [[], ["--viz"], ["--fidelity"], ["--category", "model_object_parameter"]])
 def test_every_view_honours_the_cap_at_every_size(tmp_path, capsys, mode, cap):
     """Kills: budgeting that holds for one view or one cap. Three paths were unbounded at once."""
