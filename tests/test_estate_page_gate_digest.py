@@ -1,11 +1,5 @@
-"""Tool-boundary tests for `tests/estate_page_gate_digest.py` (issue #562).
-
-Scope, deliberately narrow: this file covers the ONE production consumer of `check_unit`'s direct
-target-bearing helpers. The measurement itself is pinned by `tests/estate_page_gate_expected.json`
-against a real estate; what is asserted here is the boundary contract that estate run depends on -
-a staged unit whose package boundary cannot be established must not produce a clean digest, and no
-supplied path component may travel out of the refusal.
-"""
+"""Tool-boundary tests for `tests/estate_page_gate_digest.py` (issue #562). Scope, deliberately narrow: this file
+covers the ONE production consumer of `check_unit`'s direct target-bearing helpers."""
 
 from __future__ import annotations
 
@@ -116,18 +110,7 @@ def _run(
 
 
 def test_a_safe_staged_estate_measures_exactly_what_it_measured_before(tmp_path: Path) -> None:
-    """The positive control: an ordinary staged unit's summary and digest are pinned literally.
-
-    Pinned as a whole dict rather than field-by-field, because the claim being protected is that the
-    direct-helper guard changed NOTHING for a safe target - a summary that merely still had the right
-    shape would not establish it. The four catching helpers all run here: `load_exemptions`,
-    `page_expectation` and `check_page_parity` through the verdict, `check_oracle_coverage` twice.
-
-    ⚠️ Scope: `oracle_layer_facts` is deliberately NOT exercised. Its synthetic kind-less probe
-    passes `workbook=None` into `WorkbookIdentity.attribute`, which raises `AttributeError` on the
-    current `object_identity` - a pre-existing defect unrelated to this boundary and outside this
-    change's closed surface, reproduced in the PR report rather than fixed here.
-    """
+    """The positive control: an ordinary staged unit's summary and digest are pinned literally."""
     bundle, specs, oracle = _estate(tmp_path)
     units, unstaged = epgd.stage(bundle, specs, tmp_path / "work")
 
@@ -150,19 +133,7 @@ def test_a_safe_staged_estate_measures_exactly_what_it_measured_before(tmp_path:
 def test_a_staged_unit_whose_boundary_is_unproven_exits_unmeasurable_without_leaking_a_component(
     tmp_path: Path, with_oracle: bool
 ) -> None:
-    """Kills: gating the boundary refusal on `--oracle`, and any leak through stderr.
-
-    Staged into a `packages/` directory - the real shape an operator produces by pointing `--work` at
-    a run's package root - every staged unit is lexically package-shaped with no
-    `package-manifest.json`, so its boundary is unproven.
-
-    ⚠️ The **`no-oracle`** case is the one that was wrong: the refusal used to be noticed only where
-    it happened to surface, inside the `--oracle` layer, so a run without `--oracle` collected the
-    resulting `NOT_CHECKED` rows as if they were data and published a digest anyway (exit 1). A
-    measurement that could not be made must not report a clean digest either way, and the message is
-    a CONSTANT plus the classifier's stable code: the unit here is named for a customer, which is
-    exactly the component that must not travel.
-    """
+    """Kills: gating the boundary refusal on `--oracle`, and any leak through stderr."""
     bundle, specs, oracle = _estate(tmp_path, unit_name="Contoso-Secret")
     work = tmp_path / "run" / "packages"
     out = tmp_path / "result.json"
@@ -191,12 +162,7 @@ def _main_with_redirected_expectation(
 def test_update_refuses_an_unproven_boundary_and_leaves_the_expectation_byte_identical(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:
-    """Kills: letting `--update` past the boundary gate.
-
-    `--update` is the worst case: it returns **0** and REWRITES the committed expectation, so a
-    boundary that was never established would become the number every later run is compared against.
-    The expectation file is asserted byte-identical, and so is the real committed one.
-    """
+    """Kills: letting `--update` past the boundary gate."""
     bundle, specs, _oracle = _estate(tmp_path, unit_name="Contoso-Secret")
     expectation = tmp_path / "expected.json"
     expectation.write_bytes(b'{"sha256": "sentinel"}\n')
@@ -231,12 +197,7 @@ def test_update_refuses_an_unproven_boundary_and_leaves_the_expectation_byte_ide
 def test_a_safe_estate_still_publishes_its_digest_and_update_still_rewrites_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:
-    """The paired controls that keep the refusals above from being "the tool refuses everything now".
-
-    An ordinary staged unit with no `--oracle` still measures and publishes (exit 1 only because this
-    synthetic estate is not the expectation), and `--update` still rewrites it. `--oracle` is
-    deliberately absent - see the scope note on the summary control above.
-    """
+    """The paired controls that keep the refusals above from being "the tool refuses everything now"."""
     bundle, specs, _oracle = _estate(tmp_path)
     expectation = tmp_path / "expected.json"
     expectation.write_bytes(b'{"sha256": "sentinel"}\n')
@@ -255,11 +216,7 @@ def test_a_safe_estate_still_publishes_its_digest_and_update_still_rewrites_it(
 
 
 def test_the_boundary_gate_also_refuses_an_aliased_staged_unit(tmp_path: Path) -> None:
-    """The alias shape, through the SAME mechanism - cheap, because no staging is needed.
-
-    `stage()` only ever creates real directories, so an aliased unit cannot arise from it; the gate
-    is asked directly instead, which is the function `main` calls with the same spelling.
-    """
+    """The alias shape, through the SAME mechanism - cheap, because no staging is needed."""
     bundle, specs, _oracle = _estate(tmp_path)
     units, _unstaged = epgd.stage(bundle, specs, tmp_path / "work")
     alias = tmp_path / "alias"
@@ -282,12 +239,8 @@ def test_the_boundary_gate_also_refuses_an_aliased_staged_unit(tmp_path: Path) -
 def test_the_boundary_gate_catches_only_the_typed_refusal_and_not_every_exception(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Kills: broadening the gate's `except` to `Exception`.
-
-    A blanket catch would turn any unrelated failure into a tidy exit 3 - the
-    unassessable-collapsing-into-clean shape this gate exists to remove, inverted. An unrelated error
-    must still propagate.
-    """
+    """Kills: broadening the gate's `except` to `Exception`. A blanket catch would turn any unrelated failure into a
+    tidy exit 3 - the unassessable-collapsing-into-clean shape this gate exists to remove, inverted."""
     bundle, specs, _oracle = _estate(tmp_path)
     monkeypatch.chdir(tmp_path)
 

@@ -1,10 +1,5 @@
-"""Fidelity self-tests for the offline Tableau mock.
-
-Same rule as the Fabric mock's suite: each test names the evidence behind the behaviour it pins, and
-the ASSUMED ones say so. The bulk of the value here is that the REAL clients in ``scripts/`` -
-``assess_estate.Site`` and ``tableau_lineage`` - are driven against it unmodified, so a
-mock-vs-client mismatch is a test failure rather than a surprise on the day.
-"""
+"""Fidelity self-tests for the offline Tableau mock. Same rule as the Fabric mock's suite: each test names the
+evidence behind the behaviour it pins, and the ASSUMED ones say so."""
 
 from __future__ import annotations
 
@@ -122,11 +117,7 @@ def test_the_real_client_follows_pagination_to_the_end(served):
 
 
 def test_usage_statistics_are_absent_unless_requested(site):
-    """MEASURED: the ``usage`` block appears only with ``includeUsageStatistics=true``.
-
-    Always returning it would hide a client that forgot the flag and would then read zero traffic on
-    a live site - the input to the tiering decision.
-    """
+    """MEASURED: the ``usage`` block appears only with ``includeUsageStatistics=true``."""
     token = signed_in(site)
     base = f"http://x/api/{site.rest_version}/sites/{site.site_id}/views"
     _s, _h, without = site.handle("GET", base, {"x-tableau-auth": token}, b"")
@@ -698,11 +689,8 @@ def test_published_source_projection_refuses_non_loopback_origins(site, base_url
 
 
 def test_content_download_returns_real_bytes_with_tableaus_header_and_404s_unknown_luids(site):
-    """Real zip bytes, and MEASURED: ``Content-Disposition: name="X.twbx"`` with NO ``filename=``.
-
-    The engine's ``fetch_tds.derive_filename`` has a fallback precisely because of that header form.
-    Unknown workbook identities must not manufacture bytes.
-    """
+    """Real zip bytes, and MEASURED: ``Content-Disposition: name="X.twbx"`` with NO ``filename=``. The engine's
+    ``fetch_tds.derive_filename`` has a fallback precisely because of that header form."""
     token = signed_in(site)
     base = f"http://x/api/{site.rest_version}/sites/{site.site_id}/workbooks"
     status, headers, payload = site.handle(
@@ -733,11 +721,8 @@ def test_a_downloaded_workbook_parses_with_the_real_parser(site, tmp_path):
 
 
 def test_an_unsupported_graphql_query_is_an_error_not_an_empty_result(site):
-    """The strictest choice available, and it is the right one.
-
-    An empty ``{"data": {...}}`` is how a caller concludes "this estate has no dependencies" and
-    sequences the migration wrong. An ``errors`` array cannot be mistaken for an answer.
-    """
+    """The strictest choice available, and it is the right one. An empty ``{"data": {...}}`` is how a caller
+    concludes "this estate has no dependencies" and sequences the migration wrong."""
     token = signed_in(site)
     status, _headers, payload = site.handle(
         "POST",
@@ -750,11 +735,7 @@ def test_an_unsupported_graphql_query_is_an_error_not_an_empty_result(site):
 
 
 def test_the_structure_query_is_derived_from_the_served_bytes(site):
-    """The mock reads the workbook XML itself rather than repeating a hard-coded answer.
-
-    Independent of ``parse_tableau`` on purpose: if both sides shared the parser, a parser bug would
-    be invisible because the expectation would move with it.
-    """
+    """The mock reads the workbook XML itself rather than repeating a hard-coded answer."""
     token = signed_in(site)
     _status, _headers, payload = site.handle(
         "POST",
@@ -782,10 +763,8 @@ def test_the_lineage_query_reports_two_downstream_workbooks(served):
 
 
 def test_the_real_assessment_runs_end_to_end_against_the_mock(served, tmp_path):
-    """``assess_estate``'s three passes, scoring and SQLite store, all offline.
-
-    The deploy step mirrors folders FROM the project table, so the nesting has to survive the write.
-    """
+    """``assess_estate``'s three passes, scoring and SQLite store, all offline. The deploy step mirrors folders FROM
+    the project table, so the nesting has to survive the write."""
     import sqlite3  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
 
     site, base = served
@@ -809,23 +788,15 @@ def test_the_real_assessment_runs_end_to_end_against_the_mock(served, tmp_path):
 
 
 def test_running_an_engine_script_without_the_pat_variable_fails_loudly():
-    """MEASURED, and it cost 13 minutes of a real session.
-
-    ``estate_survey.py`` resolves its secret through ``credential_resolver``, whose last layer is a
-    ``getpass`` prompt. With ``TABLEAU_PAT_VALUE`` unset it does not fail - it blocks forever with no
-    output. The harness refuses to launch instead, which turns a silent hang into an error.
-    """
+    """MEASURED, and it cost 13 minutes of a real session. ``estate_survey.py`` resolves its secret through
+    ``credential_resolver``, whose last layer is a ``getpass`` prompt."""
     with pytest.raises(SystemExit) as raised:
         estate.run_engine_script("estate_survey.py", [], env={"TABLEAU_PAT_SECRET": "ours"})
     assert "TABLEAU_PAT_VALUE" in str(raised.value)
 
 
 def test_env_for_exports_both_names_and_only_loopback_hosts(served):
-    """Our scripts read ``TABLEAU_PAT_SECRET``; the engine reads ``TABLEAU_PAT_VALUE``.
-
-    The bridge in ``tableau_env.engine_child_env`` only reaches an engine script OUR python spawns,
-    so anything else needs both names set explicitly. Nothing may point at a real host.
-    """
+    """Our scripts read ``TABLEAU_PAT_SECRET``; the engine reads ``TABLEAU_PAT_VALUE``."""
     site, base = served
     assert base.startswith("http://127.0.0.1:")
     env = tableau.env_for(site, base)

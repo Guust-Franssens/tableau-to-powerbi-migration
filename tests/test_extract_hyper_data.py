@@ -55,13 +55,8 @@ def _csv_row_count(path: Path) -> int:
 
 
 def test_export_and_enrich_cover_every_relation_across_every_extract(tmp_path: Path) -> None:
-    """A federated multi-relation workbook must not silently keep only one relation per datasource.
-
-    ds.small reuses big's `"Extract"."Products.csv_DIM"` on purpose: distinct data sources must not
-    dedupe by qualified name. Enrichment then exercises both table-matching paths on real Hyper
-    relation names (which `str(table.name)` quotes): by name for ds.big's two tables, and the 1x1
-    shortcut for ds.small, whose Tableau table name need not equal the Hyper relation name.
-    """
+    """A federated multi-relation workbook must not silently keep only one relation per datasource. ds.small reuses
+    big's `"Extract"."Products.csv_DIM"` on purpose: distinct data sources must not dedupe by qualified name."""
     big_hyper = tmp_path / "big.hyper"
     small_hyper = tmp_path / "small.hyper"
     _create_hyper(
@@ -162,13 +157,8 @@ def _load_script_module():
 
 
 def test_duplicate_unqualified_table_names_are_omitted_rather_than_last_write_wins() -> None:
-    """Two schemas holding the same table name must yield no count, not a confidently wrong one.
-
-    THREE duplicates, not two, on purpose. With exactly two, `counts.pop` alone produces the right
-    answer and deleting `ambiguous.add(key)` leaves the suite green - the third occurrence is what
-    proves the `ambiguous` set is load-bearing, because without it the name resurrects with the
-    third value (mutation D2 in the re-review of PR #232).
-    """
+    """Two schemas holding the same table name must yield no count, not a confidently wrong one. THREE duplicates,
+    not two, on purpose. Refs PR #232."""
     module = _load_script_module()
     relations = [
         {"table": "Orders", "row_count": {"value": 3, "source": "hyper", "observed_at": "Z"}},
@@ -198,15 +188,8 @@ def test_a_null_hyper_file_is_reported_not_raised(tmp_path: Path) -> None:
 
 
 def test_schema_scratch_never_lands_beside_the_workbook(tmp_path: Path, monkeypatch) -> None:
-    """Extracted .hyper residue under migrations/<tree>/<slug>/source/ is NOT gitignored (issue #125).
-
-    Observes the scratch path WHILE IT EXISTS rather than asserting on source text. The source-text
-    form shipped first and was measured worthless in the re-review: `dir =args.workbook.parent`
-    (one space), `dir=Path(args.workbook).parent` and a local-variable indirection all survived it,
-    while merely adding a COMMENT naming the literal string made it fail - it punished the most
-    natural way to stop the mistake recurring. Listing the directory after the run is equally
-    vacuous, because TemporaryDirectory cleans up on success; the hazard is the kill path.
-    """
+    """Extracted .hyper residue under migrations/<tree>/<slug>/source/ is NOT gitignored (issue #125). Observes the
+    scratch path WHILE IT EXISTS rather than asserting on source text."""
     module = _load_script_module()
     source_dir = tmp_path / "source"
     source_dir.mkdir()

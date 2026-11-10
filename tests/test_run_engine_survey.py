@@ -14,12 +14,7 @@ import run_engine_survey as survey  # noqa: E402  # pylint: disable=wrong-import
 
 
 def _fake_engine(recorded: dict[str, object], returncode: int = 0):
-    """A ``subprocess.run`` stand-in that records the engine invocation instead of running it.
-
-    The engine must run as a CHILD process: ``os.exec*`` detaches on Windows and reports success,
-    which both destroys the engine's exit code and replaced the pytest process mid-run - so the
-    missing-credential test below could not fail (issue #189 review, B1/B3).
-    """
+    """A ``subprocess.run`` stand-in that records the engine invocation instead of running it. Refs #189."""
 
     def fake_run(command, env=None, check=False):
         recorded.update(command=command, env=env, check=check)
@@ -35,11 +30,7 @@ def _no_ambient_secret(monkeypatch) -> None:
 
 
 def test_main_bridges_the_documented_secret_adds_no_prompt_and_propagates_the_exit_code(tmp_path, monkeypatch):
-    """`estate_survey.py` returns 1 on unresolved dependencies or a degraded survey - keep it.
-
-    `os.execvpe` detached on Windows and reported 0 unconditionally, so an incomplete survey (#99)
-    looked like a clean one and the runbook's next step ran before the JSON existed.
-    """
+    """`estate_survey.py` returns 1 on unresolved dependencies or a degraded survey - keep it. Refs #99."""
     dotenv = tmp_path / ".env"
     dotenv.write_text("TABLEAU_PAT_SECRET=documented-secret\n", encoding="utf-8")
     called: dict[str, object] = {}
@@ -118,12 +109,7 @@ def test_help_needs_no_credential_and_launches_nothing(monkeypatch, capsys):
 
 
 def test_main_names_the_documented_key_when_the_survey_secret_is_missing(tmp_path, monkeypatch):
-    """The #183 fix itself: no secret must fail fast, naming the ONE documented spelling.
-
-    Both the engine and the subprocess are faked so that deleting the `require()` gate fails THIS
-    assertion rather than dying on an unrelated missing plugin - and so that the credential check is
-    proven to happen BEFORE the engine is launched.
-    """
+    """The #183 fix itself: no secret must fail fast, naming the ONE documented spelling."""
     launched: dict[str, object] = {}
 
     _no_ambient_secret(monkeypatch)

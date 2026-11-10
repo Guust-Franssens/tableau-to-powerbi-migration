@@ -1,14 +1,5 @@
-"""Provenance is what makes a finding reproducible weeks later.
-
-Every test here pins a way the stamp could quietly lie. The motivating case is real: three defects
-were filed against Tableau's Superstore sample, and each cited exact figures (`SUM(Sales) =
-15,357,898`, `41 rows`, one distinct date). Tableau's samples differ between releases and between the
-Desktop copy and the Cloud *Samples* copy, so a reader with a different build gets different numbers
-and no way to tell that is what happened. The stamp exists so they can tell.
-
-The rule these tests exist to enforce: **a same-named workbook is not the same workbook.** Recording
-"this came from Superstore" without confirming the bytes is the failure, not the absence of a record.
-"""
+"""Provenance is what makes a finding reproducible weeks later. Every test here pins a way the stamp could quietly
+lie."""
 
 from __future__ import annotations
 
@@ -381,16 +372,7 @@ def _fixture_luid(index: int) -> str:
 
 
 class RecordingSite(prov.TableauLookup):
-    """The production client with exactly ONE substitution: its transport.
-
-    ``_call`` is the only network boundary in the module, so recording there counts what a customer's
-    Tableau site would actually be asked, and cannot be satisfied by production code that merely
-    stops calling a mocked method name.
-
-    Content is answered with DIFFERENT bytes on every call for the same LUID, so a second download
-    is detectable in the recorded digests and not only in the call count - which is also the real
-    behaviour: a `.twbx` is repacked per download.
-    """
+    """The production client with exactly ONE substitution: its transport."""
 
     def __init__(  # pylint: disable=too-many-arguments
         self,
@@ -470,11 +452,7 @@ def _harvested(tmp_path: Path, count: int) -> list[dict]:
 
 
 def test_one_downloaded_payload_feeds_both_the_raw_sha_and_the_revision_key(tmp_path, monkeypatch):
-    """The two digests must describe the SAME bytes, not two downloads that merely look alike.
-
-    The fixture answers different bytes on every content call, so a second download would show up in
-    the recorded digests as well as in the call count.
-    """
+    """The two digests must describe the SAME bytes, not two downloads that merely look alike."""
     inventory = _harvested(tmp_path, 1)
     site = _install(monkeypatch, RecordingSite(LIVE_ENV, workbooks=inventory))
 
@@ -495,10 +473,8 @@ def test_one_downloaded_payload_feeds_both_the_raw_sha_and_the_revision_key(tmp_
     ],
 )
 def test_a_dead_inventory_is_asked_once_and_every_input_keeps_its_fingerprint(tmp_path, monkeypatch, kwargs, expected):
-    """Measured: 66 inputs produced 66 identical failing listings. One answer is enough.
-
-    Each input still records its own redacted reason - latching the CALL must not latch the record.
-    """
+    """Measured: 66 inputs produced 66 identical failing listings. One answer is enough. Each input still records its
+    own redacted reason - latching the CALL must not latch the record."""
     _harvested(tmp_path, 12)
     site = _install(monkeypatch, RecordingSite(LIVE_ENV, **kwargs))
     reporter = RecordingReporter()
@@ -519,11 +495,8 @@ def test_a_dead_inventory_is_asked_once_and_every_input_keeps_its_fingerprint(tm
 
 
 def test_a_dead_content_call_latches_that_luid_only(tmp_path, monkeypatch):
-    """A workbook that cannot be downloaded must not condemn a different workbook.
-
-    Two inputs share the dead LUID (one attempt between them) and a third resolves to a healthy one,
-    which is still fetched and still matched.
-    """
+    """A workbook that cannot be downloaded must not condemn a different workbook. Two inputs share the dead LUID
+    (one attempt between them) and a third resolves to a healthy one, which is still fetched and still matched."""
     dead, alive = _fixture_luid(1), _fixture_luid(2)
     _twbx(tmp_path, f"{dead}_Dead_A")
     _twbx(tmp_path, f"{dead}_Dead_B")
@@ -597,11 +570,7 @@ def _twbx_with_members(path: Path, member_names: list[str]) -> Path:
 
 
 def test_a_scrub_failure_still_redacts_the_local_strings_it_keeps(tmp_path, monkeypatch):
-    """Finding 1a. The local half is not automatically clean - it is merely UNSCRUBBED.
-
-    Here the first scrub (over the whole tree, live half included) fails and the retry over the
-    reduced local-only tree succeeds - so the filename is REDACTED rather than dropped.
-    """
+    """Finding 1a. The local half is not automatically clean - it is merely UNSCRUBBED."""
     secret = "SYNTHETIC_FILENAME_SECRET_42"
     env = dict(LIVE_ENV, TABLEAU_PAT_SECRET=secret)
     _twbx(tmp_path, secret)
@@ -625,11 +594,8 @@ def test_a_scrub_failure_still_redacts_the_local_strings_it_keeps(tmp_path, monk
 
 
 def test_an_unusable_redactor_keeps_only_derived_evidence(tmp_path, monkeypatch):
-    """Finding 1b. When redaction itself cannot be trusted, every COPIED string goes.
-
-    PAT secret == the filename, PAT name == a member name, session token == another member name.
-    A digest, a byte count and a CRC are values this module computed and cannot carry a credential.
-    """
+    """Finding 1b. When redaction itself cannot be trusted, every COPIED string goes. PAT secret == the filename, PAT
+    name == a member name, session token == another member name."""
     secret, pat_name, token = "SECRET_AS_FILENAME_42", "PAT_NAME_AS_MEMBER_42", "session-token"
     env = dict(LIVE_ENV, TABLEAU_PAT_NAME=pat_name, TABLEAU_PAT_SECRET=secret)
     _twbx_with_members(tmp_path / f"{secret}.twbx", [f"{pat_name}.twb", f"Data/{token}.csv"])
@@ -659,11 +625,7 @@ def test_an_unusable_redactor_keeps_only_derived_evidence(tmp_path, monkeypatch)
 
 
 def test_an_unreadable_site_copy_is_unavailable_not_a_byte_difference(tmp_path, monkeypatch):
-    """Finding 2. A 404 read as `match: "name_only"` plus "the bytes DIFFER from the site copy".
-
-    The reason is the status NUMBER, never the reflected body; a healthy sibling that really differs
-    is still reported as a difference.
-    """
+    """Finding 2. A 404 read as `match: "name_only"` plus "the bytes DIFFER from the site copy"."""
     luid, healthy = _fixture_luid(3), _fixture_luid(5)
     _twbx(tmp_path, f"{luid}_Refused_A")
     _twbx(tmp_path, f"{luid}_Refused_B")
@@ -801,11 +763,8 @@ def test_a_normalized_result_is_a_complete_publishable_document():
 
 
 class RecordingReporter(prov.NullReporter):
-    """The supervisor channel, captured in-process.
-
-    `checkpoint` runs the SAME reduction the real reporter does, so a mutation that checkpoints the
-    raw fingerprint is visible here rather than only across a process boundary.
-    """
+    """The supervisor channel, captured in-process. `checkpoint` runs the SAME reduction the real reporter does, so a
+    mutation that checkpoints the raw fingerprint is visible here rather than only across a process boundary."""
 
     def __init__(self, cancel_after=None, cancel_completed=1):
         self.messages = []
@@ -877,12 +836,8 @@ def _drain(conn):
 
 
 def test_a_checkpoint_carries_only_derived_evidence_while_the_snapshot_may_carry_names(tmp_path, monkeypatch):
-    """The privacy split that makes an early checkpoint safe at all.
-
-    A checkpoint is emitted BEFORE the live half has been scrubbed, so it holds only what this module
-    COMPUTED - sizes, digests, CRCs. The safe snapshot is emitted AFTER scrub, so it may legitimately
-    hold copied strings. Neither may carry raw exception text.
-    """
+    """The privacy split that makes an early checkpoint safe at all. A checkpoint is emitted BEFORE the live half has
+    been scrubbed, so it holds only what this module COMPUTED - sizes, digests, CRCs."""
     luid = _fixture_luid(3)
     _twbx_with_members(tmp_path / f"{luid}_Fixture.twbx", ["Superstore Extract.hyper"])
     site = _install(monkeypatch, RecordingSite(LIVE_ENV, workbooks=[{"id": luid, "name": "Fixture"}]))
@@ -931,11 +886,7 @@ def test_the_safe_snapshot_leaves_before_a_failing_sign_out_and_the_failure_is_t
 
 
 def test_the_worker_returns_a_typed_terminal_result_when_the_build_itself_raises(tmp_path, monkeypatch):
-    """A failure `build` cannot describe is still a complete, publishable, TEXT-FREE document.
-
-    The message the exception carried is a host path here, which is exactly the kind of string that
-    must not travel to the parent or reach the artifact.
-    """
+    """A failure `build` cannot describe is still a complete, publishable, TEXT-FREE document."""
     secret = str(tmp_path / "customer-secret")
 
     def fail(*_args, **_kwargs):
@@ -955,11 +906,7 @@ def test_the_worker_returns_a_typed_terminal_result_when_the_build_itself_raises
 
 
 def test_the_worker_reports_progress_it_can_no_longer_send(tmp_path):
-    """The parent closes its end at the deadline; the worker must not die of a broken pipe.
-
-    It is about to be terminated anyway, and raising here would replace a typed timeout artifact with
-    an unhandled exception in a process nobody is reading.
-    """
+    """The parent closes its end at the deadline; the worker must not die of a broken pipe."""
     _twbx(tmp_path)
     recv, send = multiprocessing.Pipe(duplex=False)
     recv.close()
@@ -1103,11 +1050,7 @@ def test_dynamic_exception_class_names_are_not_a_diagnostic_escape(tmp_path: Pat
 def test_production_live_wire_reconciles_with_independent_transport_counts(
     tmp_path: Path, monkeypatch, scenario: str, physical: int, downloads: int
 ) -> None:
-    """The real reporter and parent agree; the transport, not either validator, is the #582 oracle.
-
-    66 is the measured field case: per-input inventory listing or a second download per LUID cost
-    200 calls before the cache, and a cache hit must not be reported as a new content attempt.
-    """
+    """The real reporter and parent agree; the transport, not either validator, is the #582 oracle."""
     import run_estate as estate  # pylint: disable=import-outside-toplevel
 
     if scenario == "cached":

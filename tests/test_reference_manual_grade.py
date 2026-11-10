@@ -1,16 +1,4 @@
-"""The `manual` reference provider must not silently claim `validation_grade`.
-
-Reported by a user running the toolkit against a real estate: any PNG dropped in `reference/` was
-recorded as `validation_grade` - the tier `pbi-migration-validator` requires before it may sign off
-visual fidelity - with nothing verifying resolution, filter-state pinning, or even that the image
-came from the handed-over workbook rather than a newer published revision.
-
-It failed OPEN, which is what makes it worth a regression test: the provider with the WEAKEST
-provenance claimed the STRONGEST guarantee, by default, with no operator action. It also inverted
-the grading against its own siblings - a live Tableau Server REST render is honestly graded
-layout+text (captured in the view's default state, no `?vf_` pinning), so a random dropped file
-outranked it.
-"""
+"""The `manual` reference provider must not silently claim `validation_grade`."""
 
 from __future__ import annotations
 

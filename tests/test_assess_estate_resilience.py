@@ -1,14 +1,4 @@
-"""Transport-failure resilience for scripts/assess_estate.py (issue #193).
-
-Split from ``test_assess_estate.py`` on subject, not duplicated: that file owns the four REFUSALS
-(never retire on a metric, never guess a dependency, never claim a usage window, never map IAM).
-This one owns the HTTP layer - what happens when the server answers late, badly, or not at all.
-
-Everything here injects the failure at ``urllib.request.urlopen``; nothing touches a network, and
-nothing reads the real ``.env``. The distinction under test throughout is the one the live defect
-turned on: a status code is an ANSWER (a 403 means "you may not see this"), while a timeout is NO
-answer, and only the first may be reported as a fact about the estate.
-"""
+"""Transport-failure resilience for scripts/assess_estate.py (issue #193)."""
 
 import http.client
 import importlib.util
@@ -40,13 +30,8 @@ TRANSPORT_FAILURES = [
 
 
 class _Response:
-    """The slice of ``http.client.HTTPResponse`` that ``Site._raw`` actually touches.
-
-    ⚠️ Plus ``headers``, which ``Site._raw`` does NOT touch and ``tableau_http._request`` does. The
-    assessment probes ``/serverinfo`` through that shared transport (#474), so a double missing the
-    attribute fails the probe with ``AttributeError`` -- a fixture gap that would read as "the
-    fail-soft path works", because a soft failure is exactly what a broken probe produces.
-    """
+    """The slice of ``http.client.HTTPResponse`` that ``Site._raw`` actually touches. ⚠️ Plus ``headers``, which
+    ``Site._raw`` does NOT touch and ``tableau_http._request`` does. Refs #474."""
 
     def __init__(self, status: int, payload: bytes) -> None:
         self.status = status
@@ -77,11 +62,7 @@ SES_SERVERINFO = (
 
 
 def serverinfo_reporting(version: str) -> bytes:
-    """The same body with an arbitrary ``restApiVersion`` -- including one that is not a version.
-
-    ⚠️ ``<restApiVersion>`` is response text, and before #475's review it was trusted whatever it
-    said and whatever status carried it. Both halves are exercised end to end below.
-    """
+    """The same body with an arbitrary ``restApiVersion`` -- including one that is not a version. Refs #475."""
     return SES_SERVERINFO.replace(b"<restApiVersion>3.27<", f"<restApiVersion>{version}<".encode())
 
 
@@ -680,12 +661,7 @@ def test_a_timeout_on_a_PRIMARY_listing_exits_3_and_names_what_is_missing(monkey
 
 
 def test_a_clean_run_exits_0_and_reports_the_render_ceiling_in_both_artifacts(monkeypatch, no_sleep, tmp_path):
-    """An operator learns "this site tops out at PDF" HERE, not as a capture-time warning later.
-
-    Driven through the real ``main()`` so a mutation that stops probing in ``collect``, or drops the
-    section from ``render_report``, fails -- both survived a unit-only version of this test. Also the
-    redaction negative control: a legitimate product version, build and release name survive.
-    """
+    """An operator learns "this site tops out at PDF" HERE, not as a capture-time warning later."""
     code = _run_main(monkeypatch, tmp_path, FakeTableau())
     out = tmp_path / "_assessment"
     assessment = json.loads((out / "assessment.json").read_text(encoding="utf-8"))
@@ -718,12 +694,7 @@ def test_a_clean_run_exits_0_and_reports_the_render_ceiling_in_both_artifacts(mo
 
 
 def test_a_site_that_refuses_serverinfo_reports_UNKNOWN_and_still_assesses_cleanly(monkeypatch, no_sleep, tmp_path):
-    """Fail soft: an unanswered probe is the third state, never a degraded inventory.
-
-    Also the negative control for the test above -- a run that cannot establish the ceiling must not
-    print per-rung verdicts as if they were known, and must not turn a clean assessment into a
-    degraded one.
-    """
+    """Fail soft: an unanswered probe is the third state, never a degraded inventory."""
     code = _run_main(monkeypatch, tmp_path, FakeTableau(serverinfo=None))
     out = tmp_path / "_assessment"
     assessment = json.loads((out / "assessment.json").read_text(encoding="utf-8"))
@@ -799,20 +770,7 @@ def test_the_pat_secret_never_reaches_a_persisted_artifact(monkeypatch, no_sleep
 
 
 def test_a_NUMERIC_credential_reflected_as_the_REST_VERSION_reaches_no_surface(monkeypatch, no_sleep, tmp_path, caplog):
-    """`NUMERIC_REST_TOKEN_200`. The exemption that survived round 2, and why it had to go.
-
-    `restApiVersion` was returned untransformed on the grounds that it had been proved to match a
-    numeric API-version grammar "no credential can satisfy". Nothing enforces that: `Site` accepts
-    `creds["token"]` with **no shape validation at all**, so a server -- or an intermediary -- can
-    issue a session token that is literally `3.27` and reflect it here. It passes the grammar, takes
-    the untransformed branch, and lands in `assessment.json`, `report.md` and the console. Measured;
-    the redactor knew it was a credential and the code went around it.
-
-    ⚠️ This is the same defect class as the `UNAUTHENTICATED-SOURCE` exemption retired one round
-    earlier -- an assumption standing where an enforced property was needed -- which is why the fix
-    is NOT a tighter grammar. A tighter grammar narrows the overlap between credential shapes and
-    version shapes without removing the assumption, and the next token shape walks through it.
-    """
+    """`NUMERIC_REST_TOKEN_200`. The exemption that survived round 2, and why it had to go."""
 
     class Echoing(FakeTableau):
         """The site's `/serverinfo` reports a version that IS this run's credential."""
@@ -861,12 +819,7 @@ def test_a_NUMERIC_credential_reflected_as_the_REST_VERSION_reaches_no_surface(m
 
 
 class _GraphqlLeak(FakeTableau):
-    """A Metadata API that answers 200 but reflects the caller's credential in its ``errors`` array.
-
-    The sibling of the HTTPError ``Echoing`` gateway above, on the ONE path that returns PARSED JSON straight
-    from ``_request_json`` and so never met the byte scrubber (issue #196). ``data.workbooks`` stays
-    non-empty (inherited from the parent), so the structure failure is SECONDARY and the run exits 0.
-    """
+    """A Metadata API that answers 200 but reflects the caller's credential in its ``errors`` array. Refs #196."""
 
     def _payload(self, url: str) -> dict:
         payload = super()._payload(url)
@@ -876,10 +829,7 @@ class _GraphqlLeak(FakeTableau):
 
 
 def test_estate_db_records_whether_the_run_was_degraded(tmp_path):
-    """`estate.db` is read programmatically by harvest/deploy, which never open `assessment.json`.
-    Before #196 a survived-but-partial DB was indistinguishable from a clean run of a smaller
-    estate; it must now carry the marker itself - the run-level flags and one row per failed
-    listing. A clean run carries it too, or its absence is ambiguous (clean vs. an old DB)."""
+    """`estate.db` is read programmatically by harvest/deploy, which never open `assessment.json`. Refs #196."""
     raw = _raw_fixture([_error("workbooks", assess_estate.PRIMARY)])
     store = assess_estate.write_store(tmp_path / "degraded", raw, assess_estate.assemble(raw, 0.99))
     conn = assess_estate.sqlite3.connect(store)

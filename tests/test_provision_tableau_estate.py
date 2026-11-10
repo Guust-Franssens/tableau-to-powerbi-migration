@@ -1,31 +1,4 @@
-"""Behavioural contract for `provision_tableau_estate.py`.
-
-This module publishes to a LIVE Tableau site, and until these tests existed nothing exercised
-`capture`, `apply_manifest` or `empty_leaf_projects` at all: the three invariants its own docstrings
-call load-bearing were entirely unpinned. A blind review applied four mutations at once - publishing
-workbooks before datasources, forcing `mode = "Overwrite"`, returning a `"/"`-joined path string, and
-gutting the seed template - and the full suite still passed, exit 0.
-
-No network, no credentials, no live site. `tsc.Pager` and the four endpoints are replaced by the
-fakes below; the ITEM classes are the real `tableauserverclient` ones, so a wrong value (an invalid
-`content_permissions`, say) is rejected here exactly as Tableau's client would reject it.
-
-What each block pins:
-
-* **dry run** - the critical defect. `path_to_id` was written only outside `if not dry_run`, so a dry
-  run against an EMPTY site resolved no parent from depth 2 down and reported all ten descendants of
-  `ZZ Deep` as orphans, exit 1. It survived because a dry run against the POPULATED source site
-  pre-fills `path_to_id` from the live server - i.e. it worked everywhere except the one scenario the
-  tool exists for.
-* **ordering** - datasources strictly before workbooks. A workbook published first silently rebinds
-  to nothing, which is the empty-report failure the rest of the pipeline spends its effort detecting.
-* **identity** - project paths are SEGMENTS. The trial site has a project literally named `R/D`; a
-  `/`-joined key makes it indistinguishable from `D` nested inside `R`.
-* **secrets** - this is the one script that puts a warehouse password in a request body, and its
-  error text reaches a durable `manifest.json`.
-* **refusals** - never write customer content to a path git would commit; never overwrite a workbook
-  we cannot prove we published; never recreate a project whose ancestry we could not resolve.
-"""
+"""Behavioural contract for `provision_tableau_estate.py`."""
 
 from __future__ import annotations
 
@@ -345,13 +318,8 @@ def assets_dir(tmp_path: Path, *names: str) -> Path:
 
 
 def test_dry_run_against_an_empty_site_plans_exactly_what_a_real_run_creates(install, tmp_path, capsys):
-    """The defect, exactly as reported: 11 nested projects, empty target, `--dry-run`.
-
-    Before the fix this printed `+ project CREATE ZZ Deep` and then ten problems - one per level -
-    and exited 1. A plan that does not match the run it previews is worse than no plan, and each
-    created child must name the parent that was just created. The completion note is the only place
-    a user learns what did NOT come back.
-    """
+    """The defect, exactly as reported: 11 nested projects, empty target, `--dry-run`. Before the fix this printed
+    `+ project CREATE ZZ Deep` and then ten problems - one per level - and exited 1."""
     paths = deep_chain()
     server = install(FakeServer())
     code = prov.apply_manifest(manifest(paths), tmp_path, ENV, dry_run=True, overwrite=False)
@@ -770,11 +738,8 @@ def test_only_empty_unmanaged_leaves_other_than_the_fixture_are_seed_targets(ins
 
 
 def test_seed_dry_run_reports_the_refusal_the_real_run_would_make(install, tmp_path, capsys):
-    """`name.startswith("Seed - ")` is a naming convention, not proof of authorship: a genuine
-    workbook named like a seed was once replaced by a 1.8 KB stub. The authorship check also lived
-    inside `_publish_seed`, which a dry run skips - so the plan printed a successful replace, exit 0,
-    for a target the real run refuses, exit 1. A plan that disagrees with its run is worse than none.
-    """
+    """`name.startswith("Seed - ")` is a naming convention, not proof of authorship: a genuine workbook named like a
+    seed was once replaced by a 1.8 KB stub."""
 
     def _site() -> FakeServer:
         return FakeServer(
@@ -916,13 +881,7 @@ def test_the_manifest_lands_under_the_guarded_directory(tmp_path, capture_spy):
 
 
 def test_the_guard_asks_about_the_files_CAPTURE_actually_writes(tmp_path, capture_spy):
-    """`capture` writes `manifest.json`; the harvester writes `parse-sweep.*`. Passing harvest's
-    default artifact names would still refuse an entirely unignored `--out`, so the obvious test
-    passes for the wrong reason and `CAPTURE_ARTIFACTS` goes unverified.
-
-    This `.gitignore` separates them: every harvest artifact is ignored, `manifest.json` is not. With
-    the default names the guard says SAFE; only the capture names see the leak.
-    """
+    """`capture` writes `manifest.json`; the harvester writes `parse-sweep.*`."""
     repo = tmp_path / "repo"
     repo.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True, capture_output=True)

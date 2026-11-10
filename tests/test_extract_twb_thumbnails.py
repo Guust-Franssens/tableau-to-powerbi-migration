@@ -1,13 +1,5 @@
-"""Regression tests for scripts/extract_twb_thumbnails.py.
-
-These build their own fixtures in ``tmp_path`` rather than editing the shared
-``tests/fixtures/minimal.twb``, so they cannot collide with the parser tests.
-
-The behaviour under test exists because a real migration signed off a wrong chart type after every
-agent concluded "no reference images exist" for an offline ``.twbx``. Tableau embeds a PNG render per
-worksheet; these tests pin that we find them, in both container formats, and that we refuse to write
-anything that is not actually a PNG.
-"""
+"""Regression tests for scripts/extract_twb_thumbnails.py. These build their own fixtures in ``tmp_path`` rather than
+editing the shared ``tests/fixtures/minimal.twb``, so they cannot collide with the parser tests."""
 
 from __future__ import annotations
 

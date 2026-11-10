@@ -1,14 +1,4 @@
-"""Tests for scripts/assess_estate.py.
-
-Weighted deliberately toward the four REFUSALS and the two defects a live run against a real
-Tableau Cloud site exposed, because those are the failures that produce a confident wrong answer
-rather than an error:
-
-* a dependency-key guess that parsed ZERO edges and reported "order unknown" (the exact failure
-  the survey exists to prevent),
-* a sparse-usage guard written as ``== 0`` that stayed silent on an estate with ONE view event
-  and printed a coverage curve built on nothing.
-"""
+"""Tests for scripts/assess_estate.py."""
 
 import importlib.util
 import sys
@@ -96,11 +86,7 @@ def test_dependencies_read_the_documented_survey_key():
 
 
 def test_declared_but_unparsable_dependencies_RAISE():
-    """A guess that yields nothing is indistinguishable from a genuine absence.
-
-    This is the live defect: an earlier version read ``datasource``/``name``, parsed zero edges,
-    and reported "order unknown" for an estate that had nine real ones.
-    """
+    """A guess that yields nothing is indistinguishable from a genuine absence."""
     survey = {"workbooks": [{"name": "Sales", "published_dependencies": [{"datasource": "Finance Master"}]}]}
     with pytest.raises(RuntimeError, match="none parsed"):
         assess_estate._parse_dependencies(survey)

@@ -1,25 +1,6 @@
-"""
-purpose: gate the three-state contract for "why did `?format=svg` fail" (#474) -- the message this
-         repo prints, the `remedy` it persists per view, and the render ceiling the ASSESSMENT now
-         reports before anyone captures anything.
-usage:   pytest tests/test_svg_server_ceiling.py -q
-
-Why this exists
----------------
-A customer on an on-prem Tableau Server (``productVersion 2025.3.3`` / ``restApiVersion 3.27``) was
-told, in the loudest line of the run:
-
-    Set TABLEAU_REST_API_VERSION=3.29 in .env and re-run
-
-Their server's ceiling is **3.27**. Raising a *client* preference cannot make a 3.27 server export
-SVG, so the one actionable-looking instruction in the run was false for them -- and the code that
-printed it already had the advertised ceiling in scope and ignored it.
-
-Every assertion below therefore names WHICH of the three states fired, never merely that "a warning
-was emitted". This codebase is fail-closed-heavy: several guards can satisfy a broad "it refused"
-assertion at once, and a test that cannot distinguish them is credited as coverage while covering
-nothing. Each state also carries a **negative control** -- a case that must NOT produce it.
-"""
+"""purpose: gate the three-state contract for "why did `?format=svg` fail" (#474) -- the message this repo prints,
+the `remedy` it persists per view, and the render ceiling the ASSESSMENT now reports before anyone captures
+anything. usage:   pytest tests/test_svg_server_ceiling.py -q"""
 
 from __future__ import annotations
 
@@ -118,11 +99,8 @@ def test_a_server_above_the_floor_names_the_env_knob_but_never_claims_the_tier_w
 
 
 def test_an_exact_floor_server_is_NEVER_advised_above_its_own_advertised_ceiling():
-    """#475 finding 1: `3.29` is the ceiling AND the floor, so every "later" is impossible.
-
-    Every REST-version-shaped token the remedy names is held against the ceiling. Release NAMES are
-    excluded first: `release_for("3.29")` contains `2026.2`, which is not a REST version.
-    """
+    """#475 finding 1: `3.29` is the ceiling AND the floor, so every "later" is impossible. Every REST-version-shaped
+    token the remedy names is held against the ceiling."""
     result = advice(EXACT_FLOOR)
     assert result.cause == capability.SVG_CAUSE_SERVER_MEETS_FLOOR
     assert RAISE_THE_PIN in result.remedy and "or later" not in result.remedy
@@ -278,11 +256,7 @@ def test_an_ABSENT_product_version_stays_None_rather_than_becoming_an_empty_stri
 
 
 def test_a_NUMERIC_credential_reflected_as_the_VERSION_is_redacted_but_still_yields_a_CEILING(monkeypatch):
-    """A session token has no validated shape, so one that is literally `3.27` satisfies the grammar.
-
-    The raw value is compared inside `server_info`; the derived capability travels separately from
-    the displayable text, so suppression costs the printed digits and nothing else.
-    """
+    """A session token has no validated shape, so one that is literally `3.27` satisfies the grammar."""
     info = _probe(monkeypatch, 200, _serverinfo_xml("3.27"), redactor=lambda text: text.replace("3.27", "[REDACTED]"))
     assert info["rest_api_version"] == "[REDACTED]"
     assert info["rest_api_version_reflected"] is True
