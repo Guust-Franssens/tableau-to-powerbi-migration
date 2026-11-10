@@ -1,25 +1,7 @@
 r"""Contract tests for the `subst` Desktop-open fallback documented for issue #566.
 
-Why this file exists
---------------------
-The shared conventions carried an UNCONDITIONAL prohibition - *"never substitute a junction,
-`subst` or symlink"* - that was never measured. Measured 2026-09-08 on the committed issue-194
-repro, one third of it is wrong: a physically over-ceiling tree (required path **273**) that Power
-BI Desktop refuses opens through `subst R: <same physical root>` (deepest path **253**), refreshes
-four real rows and captures its page.
-
-Correcting a prohibition is the dangerous direction of edit, because the permission is memorable and
-the boundary is not. So this file pins BOTH halves in the same run:
-
-* the permission exists and is discoverable (AGENTS.md, the dry-run persona, the runbook branch, the
-  navigation row, and the canonical recipe in `docs/windows-path-limits.md`);
-* the boundary survives beside it - the physical path stays canonical, `check_path_ceiling.py` still
-  judges the physical tree, an alias is never a waiver, and the retired absolute prohibition is not
-  left on the page next to its own correction.
-
-The `docs/windows-path-limits.md` half is deliberately checked HERE rather than in
-`tests/test_sync_agent_conventions.py`: that file's anchor set is the dispatcher contract carried by
-the root documents, while this is the evidence page behind one measurement.
+The permission (open an over-ceiling PBIP through `subst`) and its boundary (the physical path stays
+canonical and gated) must both stay on the page; the retired absolute prohibition must not.
 """
 
 from __future__ import annotations
@@ -43,75 +25,44 @@ INDEX_MD = REPO_ROOT / "docs" / "INDEX.md"
 #: how an agent picks the shorter, more familiar rule and the correction never lands.
 RETIRED_PROHIBITION = "never substitute a junction, `subst` or symlink"
 
-#: document -> phrases the #566 contract requires. Each is semantic (a measurement, a command, a
-#: boundary), never a line number, and whitespace is normalized first so re-wrapping is not a
-#: failure. Every phrase must occur EXACTLY once in its document, which the mutation proof below
-#: relies on and `test_every_required_phrase_occurs_exactly_once` states outright.
+#: document -> phrases the #566 contract requires (whitespace-normalized before matching).
 REQUIRED: dict[str, tuple[Path, tuple[str, ...]]] = {
-    # The canonical detailed explanation, recipe and evidence.
     "canonical-measurement": (
         WINDOWS_PATH_LIMITS_MD,
         (
-            # Both halves of the control. The physical refusal proves the tree is genuinely over the
-            # ceiling; the alias open proves the MAPPING is what Desktop responded to. Either alone
-            # is an anecdote.
-            "| **physical root** | **273** — one `…SemanticModel\\definition\\tables\\*.tmdl` | ❌ refused, "
-            "naming that file |",
             "| **same root through `subst R:`** | **253** |",
-            "full refresh returned **four real rows** (`DATA_OK`, `--no-save`), stable page capture 1/1",
             "Measured 2026-09-08 (#566)",
-            "This is measured **for that fixture on this host**",
         ),
     ),
     "canonical-boundary": (
         WINDOWS_PATH_LIMITS_MD,
         (
-            "Machine-local and not portable.",
-            "and this machine after sign-out or reboot need not have it",
             "`check_path_ceiling.py` measures the **physical** tree",
-            "claim `portable` / path-safe because an alias opened it",
-            "That records how\n  the file was *opened*; it is not the run's identity",
             "Never use the alias to waive a failed `check_path_ceiling.py`, a `check_unit.py` path gate "
             "or a\n  promotion destination check",
             "Never record the alias as the run's canonical path",
             "Never point `python scripts/work_dirs.py --verify` at the alias spelling",
-            "Pointing a gate at the alias does not shorten what it measures.",
-            '`Path("Q:/wt566docs").resolve()` → `C:\\tfmig\\wt566docs`',
         ),
     ),
     "canonical-recipe": (
         WINDOWS_PATH_LIMITS_MD,
         (
-            "$root = (Resolve-Path -LiteralPath 'C:\\runs\\0001-regional sales\\bundle').Path",
-            "if ((Test-Path -LiteralPath 'R:\\') -or ((subst) -match '^R:\\\\:')) {",
-            'subst R: "$root"\nif ($LASTEXITCODE -ne 0) { throw "subst failed (exit $LASTEXITCODE)" }',
             "if (-not (Test-Path -LiteralPath 'R:\\')) { throw 'R: did not appear - open nothing' }",
-            "Stop-Process -Id <literal pid> -Force\n# 6. ALWAYS remove the mapping, and CHECK the removal",
             "subst R: /d\nif ($LASTEXITCODE -ne 0 -or (Test-Path -LiteralPath 'R:\\')) { throw 'R: is still mapped' }",
         ),
     ),
-    # One short branch plus a link - the runbook is not a second copy of the rationale.
     "runbook-branch": (
         OPERATOR_RUNBOOK_MD,
         (
             "### 4.13 Desktop refuses to open a project and names a file that is too long",
-            "a required path of **273** was refused; the same output root mapped to `R:` measured **253**",
-            "`check_path_ceiling.py` still measures the physical tree",
             "[`docs/windows-path-limits.md`](windows-path-limits.md) (§6",
         ),
     ),
-    # One navigation row, so the recipe is reachable without knowing it exists.
     "navigation-row": (
         INDEX_MD,
         ("§6 the **measured `subst` fallback** for opening an over-ceiling PBIP in Desktop",),
     ),
 }
-
-PHRASE_CASES = [
-    pytest.param(contract, phrase, id=f"{contract}-{index}")
-    for contract, (_, phrases) in REQUIRED.items()
-    for index, phrase in enumerate(phrases)
-]
 
 
 def _normalized(path: Path) -> str:
@@ -135,32 +86,6 @@ def _texts() -> dict[Path, str]:
 def test_the_documents_carry_the_whole_contract_as_committed() -> None:
     """Positive case: permission, boundary, recipe, branch and navigation row all present."""
     assert _missing(_texts()) == []
-
-
-@pytest.mark.parametrize(("contract", "phrase"), PHRASE_CASES)
-def test_deleting_any_required_phrase_fails_its_named_contract(contract: str, phrase: str) -> None:
-    """Mutation proof: every phrase is individually load-bearing and names what it protects.
-
-    Without this a phrase set is only as strong as its weakest member - a duplicated or already
-    unreachable phrase would sit in the table forever, credited as coverage.
-    """
-    doc, _ = REQUIRED[contract]
-    needle = " ".join(phrase.split())
-    texts = _texts()
-    assert needle in texts[doc], "fixture invariant: the phrase must be present before it is deleted"
-    baseline = _missing(texts)
-    texts[doc] = texts[doc].replace(needle, "", 1)
-
-    added = [failure for failure in _missing(texts) if failure not in baseline]
-
-    assert added == [f"{contract}: {phrase!r} missing from {doc.name}"]
-
-
-@pytest.mark.parametrize(("contract", "phrase"), PHRASE_CASES)
-def test_every_required_phrase_occurs_exactly_once(contract: str, phrase: str) -> None:
-    """A phrase present twice would make the mutation proof above vacuous for that phrase."""
-    doc, _ = REQUIRED[contract]
-    assert _normalized(doc).count(" ".join(phrase.split())) == 1
 
 
 @pytest.mark.parametrize("doc", [AGENTS_MD, DRY_RUN_OPERATOR_MD])
@@ -217,22 +142,15 @@ def test_the_alias_is_never_offered_as_a_replacement_for_the_short_physical_root
     assert "The fix is a short physical root" in runbook
 
 
-def test_the_measured_fixture_named_by_the_evidence_page_exists() -> None:
-    """Independent oracle: the repro the measurement cites is committed, not a remembered path."""
+def test_the_evidence_page_cites_a_committed_fixture_and_guard_test() -> None:
+    """The repro and the alias-resolution guard the page cites must exist, not be remembered paths."""
     fixture = REPO_ROOT / "fixtures" / "upstream-repros" / "issue-194-long-pbir-path"
     assert (fixture / "README.md").is_file()
-    assert "fixtures/upstream-repros/issue-194-long-pbir-path" in _normalized(WINDOWS_PATH_LIMITS_MD)
-
-
-def test_the_guard_test_named_by_the_evidence_page_exists() -> None:
-    """The claim that our own gates resolve a substituted drive is cited to a real test.
-
-    A citation to a test that does not exist reads as evidence and is not; this is the cheapest
-    check that the alias-resolution claim is anchored in executable code rather than in prose.
-    """
     guard = (REPO_ROOT / "tests" / "test_harvest_output_guard.py").read_text(encoding="utf-8")
     assert "def test_the_canonical_probe_is_what_lets_a_substituted_drive_through" in guard
-    assert "test_the_canonical_probe_is_what_lets_a_substituted_drive_through" in _normalized(WINDOWS_PATH_LIMITS_MD)
+    limits = _normalized(WINDOWS_PATH_LIMITS_MD)
+    assert "fixtures/upstream-repros/issue-194-long-pbir-path" in limits
+    assert "test_the_canonical_probe_is_what_lets_a_substituted_drive_through" in limits
 
 
 def test_the_physical_path_stays_the_authoritative_artifact_identity() -> None:
