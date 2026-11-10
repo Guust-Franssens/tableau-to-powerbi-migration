@@ -471,13 +471,7 @@ def test_interrupt_after_replace_returns_before_installed_flag_preserves_alignme
 
 
 def test_the_builder_reproduces_a_real_cache_abf_header() -> None:
-    """The fixtures' oracle: rebuild a REAL cache's first block header and total size, byte for byte.
-
-    Without this, `_abf_bytes` and `_abf_rejection_reason` could drift together into a second private
-    format nobody has ever written - exactly how round 3's CFBF fixtures kept a broken predicate
-    green. The numbers come from `health-tracker`'s 116,237-byte cache, written by this script's own
-    ImageSave: block 1 declares 770,048 uncompressed bytes and 116,127 bytes from the magic onward.
-    """
+    """The fixtures' oracle: rebuild a REAL cache's first block header and total size, byte for byte."""
     blob = _abf_bytes(((_REAL_ABF_UNCOMPRESSED, _REAL_ABF_PAYLOAD_BYTES),))
     assert blob[:100] == _ABF_PREAMBLE
     assert blob[100:114].hex() == _REAL_ABF_HEADER_HEX
@@ -492,12 +486,7 @@ def test_is_complete_abf_accepts_a_multi_block_backup(tmp_path: Path) -> None:
 
 
 def test_is_complete_abf_rejects_a_compound_file_binary(tmp_path: Path) -> None:
-    """The round-3 regression pin: a structurally valid CFBF is NOT a cache.abf and must be rejected.
-
-    Round 3 asserted the opposite and shipped a predicate that accepted only compound files - which no
-    real cache is - so the staged write never swapped. If this test ever starts failing, the predicate
-    has re-acquired that defect.
-    """
+    """The round-3 regression pin: a structurally valid CFBF is NOT a cache.abf and must be rejected."""
     blob = tmp_path / "cache.abf"
     blob.write_bytes(_cfbf_bytes())
     assert refresh_pbip_model._is_complete_abf(blob) is False
@@ -520,13 +509,7 @@ def test_is_complete_abf_rejects_a_payload_truncation(tmp_path: Path) -> None:
 
 
 def test_is_complete_abf_rejects_a_truncation_on_a_block_boundary(tmp_path: Path) -> None:
-    """The truncation a chain-walk ALONE cannot see: the file ends exactly where a block ends.
-
-    Every one of the 60 measured non-final blocks declares a full 2 MiB uncompressed and every one of
-    the 13 final blocks declares less, so a file whose LAST block is full-sized stopped on a chunk
-    boundary with more still due. Dropping that rule is a mutation the suite must catch: without it
-    this file walks cleanly to EOF and is accepted.
-    """
+    """The truncation a chain-walk ALONE cannot see: the file ends exactly where a block ends."""
     full = _abf_bytes(((_ABF_MAX_BLOCK_BYTES, 4096), (131_072, 2048)))
     boundary = tmp_path / "cache.abf"
     boundary.write_bytes(full[: 102 + 8 + 4 + 4096])
@@ -543,8 +526,7 @@ def test_boundary_truncated_abf_is_rejected_for_review_chunk_sizes(tmp_path: Pat
 
 
 def test_the_rejection_reason_names_the_defect(tmp_path: Path) -> None:
-    """A rejection must SAY why. Round 3's bug survived a whole round because the predicate could only
-    say "no": every run silently fell back to the UI save with no clue as to the cause."""
+    """A rejection must SAY why."""
     blob = tmp_path / "cache.abf"
     blob.write_bytes(b"not a backup at all")
     reason = refresh_pbip_model._abf_rejection_reason(blob)
@@ -570,11 +552,7 @@ def test_a_rejected_staged_write_prints_the_reason(tmp_path: Path, capsys) -> No
 
 
 def test_every_real_cache_abf_on_this_machine_is_accepted() -> None:
-    """Ground truth. The corpus that disproved round 3: every real cache must be ACCEPTED.
-
-    Round 3's predicate scored 0 out of 13 here, and no synthetic fixture could have shown that -
-    which is why this test reads the artefacts Desktop and this very script actually produced.
-    """
+    """Ground truth. The corpus that disproved round 3: every real cache must be ACCEPTED."""
     corpus = _real_cache_abf_files()
     if not corpus:
         pytest.skip("no real cache.abf on this machine (they are gitignored); set PBIP_REFRESH_REAL_ABF")
@@ -583,12 +561,7 @@ def test_every_real_cache_abf_on_this_machine_is_accepted() -> None:
 
 
 def test_a_real_cache_abf_is_staged_and_swapped_in(tmp_path: Path) -> None:
-    """End to end on a REAL cache: the staged write must actually commit it.
-
-    This is the failure the round-3 predicate produced - not a crash, but `_staged_image_write`
-    returning False forever, so `_persist_image` always reported "not persisted" and every run fell
-    back to the UI save. Copies the real bytes into tmp_path; the source cache is never touched.
-    """
+    """End to end on a REAL cache: the staged write must actually commit it."""
     corpus = _real_cache_abf_files()
     if not corpus:
         pytest.skip("no real cache.abf on this machine (they are gitignored); set PBIP_REFRESH_REAL_ABF")
@@ -639,12 +612,7 @@ def test_a_failed_write_does_not_destroy_an_existing_good_cache(tmp_path: Path) 
 
 
 def test_a_raising_write_that_produced_partial_bytes_does_not_replace_the_cache(tmp_path: Path) -> None:
-    """A disk-full/interrupted write that left PARTIAL bytes must not be mistaken for a success.
-
-    This is the exact outcome #113 was filed to prevent: round-1 treated any non-empty staging file
-    as a completed write and swapped it in, so an interrupted write destroyed the existing good cache.
-    Now the raise propagates, the partial staging file is discarded, and the old cache survives.
-    """
+    """A disk-full/interrupted write that left PARTIAL bytes must not be mistaken for a success (#113)."""
     cache = _model(tmp_path)
     cache.parent.mkdir(parents=True)
     cache.write_bytes(b"GOOD-EXISTING-CACHE")
@@ -675,13 +643,7 @@ def test_a_successful_write_swaps_the_new_cache_in(tmp_path: Path) -> None:
 
 
 def test_persist_rolls_back_the_compat_bump_when_the_write_fails(tmp_path: Path) -> None:
-    """A failed persist must undo the provisional compatibilityLevel alignment, byte-for-byte.
-
-    Otherwise database.tmdl - part of the deployable artifact - is left declaring a level that was
-    never actually written to a cache, and the generated-edit ledger records a change that did not
-    stick. An engine-run manifest is present so the alignment DOES append a ledger entry, letting us
-    prove that entry is rolled back too (not just database.tmdl).
-    """
+    """A failed persist must undo the provisional compatibilityLevel alignment, byte-for-byte."""
     cache = _model(tmp_path, compat=1604)
     model_dir = cache.parent.parent
     database_tmdl = model_dir / "definition" / "database.tmdl"
@@ -733,14 +695,7 @@ def test_persist_aligns_and_writes_on_success(tmp_path: Path) -> None:
 
 
 def test_a_failed_rollback_is_fatal_and_raises_compat_rollback_error(tmp_path: Path, monkeypatch) -> None:
-    """If the write did not land AND the compat rollback itself fails, that is FATAL, not a soft return.
-
-    A partial state where database.tmdl was bumped but the cache was never written, and the bump
-    cannot be undone, must NOT be quietly converted into a UI-save fallback (round-3 blocker 2): saving
-    would persist the mismatch. `_persist_image` raises `CompatRollbackError` so the caller can stop.
-    Here the write cleanly does nothing (not committed) and the rollback's `os.replace` onto
-    database.tmdl is blocked.
-    """
+    """If the write did not land AND the compat rollback itself fails, that is FATAL, not a soft return."""
     cache = _model(tmp_path, compat=1604)
     model_dir = cache.parent.parent
 
@@ -761,13 +716,7 @@ def test_a_failed_rollback_is_fatal_and_raises_compat_rollback_error(tmp_path: P
 
 
 def test_every_rollback_path_is_attempted_even_when_the_first_fails(tmp_path: Path, monkeypatch) -> None:
-    """A failure on one rollback path must not abandon the others (round-3 blocker 2).
-
-    The alignment touches TWO files - database.tmdl and the generated-edit ledger. If restoring the
-    first fails, the second must STILL be restored (the round-2 loop stopped at the first failure,
-    leaving a subset reverted). We block database.tmdl's restore and assert the ledger was rolled back
-    regardless, while the overall failure is still surfaced as fatal.
-    """
+    """A failure on one rollback path must not abandon the others (round-3 blocker 2)."""
     cache = _model(tmp_path, compat=1604)
     model_dir = cache.parent.parent
     database_tmdl = model_dir / "definition" / "database.tmdl"
@@ -818,13 +767,7 @@ def test_every_rollback_path_is_attempted_even_when_the_first_fails(tmp_path: Pa
 
 
 def test_a_keyboard_interrupt_right_after_alignment_rolls_back_and_reraises(tmp_path: Path, monkeypatch) -> None:
-    """Ctrl+C the instant the 1702 bump lands, before the cache write even starts.
-
-    Injected by wrapping `align_declared_compatibility` so the real bump is written and THEN the
-    interrupt is raised - the narrowest possible bricking window. On the fixed code the bump is rolled
-    back and the interrupt re-raised; reverted to `except Exception`, the interrupt escapes with
-    `database.tmdl` still at 1702.
-    """
+    """Ctrl+C the instant the 1702 bump lands, before the cache write even starts."""
     cache = _model(tmp_path, compat=1604)
     model_dir = cache.parent.parent
     database_tmdl = model_dir / "definition" / "database.tmdl"
@@ -874,14 +817,7 @@ def _reaped_pid() -> int:
 
 
 def test_two_interleaved_staged_writes_keep_private_staging_files(tmp_path: Path) -> None:
-    """Forced hostile interleaving at the staging seam: run B must not disturb run A's staging file.
-
-    Run A's `write_image` stages its complete backup and THEN drives a second run B fully through
-    `_staged_image_write` before A finishes. On the fixed code each run stages to a private
-    `cache.abf.<pid>-<token>.tmp`, so B's own `if staging.exists(): unlink` targets B's file and A's
-    survives; A then commits its OWN bytes. Reverting to the shared fixed `cache.abf.tmp` makes B
-    delete A's staging, so `staging_a.exists()` (and the distinct-path assertion) fail.
-    """
+    """Forced hostile interleaving at the staging seam: run B must not disturb run A's staging file."""
     cache = _model(tmp_path)
     cache.parent.mkdir(parents=True)
     cache.write_bytes(b"OLD")
@@ -907,10 +843,7 @@ def test_two_interleaved_staged_writes_keep_private_staging_files(tmp_path: Path
 
 
 def test_model_lock_is_exclusive_and_times_out_then_releases(tmp_path: Path) -> None:
-    """The per-model lock is mutually exclusive, bounds the wait, and cleans up on release.
-
-    Reverting the fix removes `model_lock`/`ModelLockTimeout` entirely, so this test errors out.
-    """
+    """The per-model lock is mutually exclusive, bounds the wait, and cleans up on release."""
     lock_path = tmp_path / "cache.abf.lock"
     with refresh_pbip_model.model_lock(lock_path, timeout=2.0, poll=0.02):
         assert lock_path.exists()
@@ -923,11 +856,7 @@ def test_model_lock_is_exclusive_and_times_out_then_releases(tmp_path: Path) -> 
 
 
 def test_model_lock_recovers_from_a_dead_holder(tmp_path: Path) -> None:
-    """A lock left behind by a process that has since died must be reclaimable, not a permanent block.
-
-    A lock that can wedge the tool forever is its own outage, so the acquirer detects the dead PID and
-    reclaims the lock instead of waiting out the timeout.
-    """
+    """A lock left behind by a process that has since died must be reclaimable, not a permanent block."""
     lock_path = tmp_path / "cache.abf.lock"
     dead_pid = _reaped_pid()
     lock_path.write_text(f"{dead_pid}\n{socket.gethostname()}\n{time.time()}\n", encoding="utf-8")
@@ -942,14 +871,7 @@ def test_model_lock_recovers_from_a_dead_holder(tmp_path: Path) -> None:
 
 
 def test_a_locked_out_persist_cannot_touch_compat_or_cache(tmp_path: Path) -> None:
-    """Forced interleaving through `_persist_image`: while run A holds the lock, run B mutates nothing.
-
-    This is the reviewer's compat race: the shared resource is the alignment on `database.tmdl`, not
-    just the temp file. With run A holding the per-model lock across its transaction, run B's
-    `_persist_image` must be locked out BEFORE it can align or write - so `database.tmdl` and the
-    absent cache are exactly as A left them. Reverting the fix removes the lock (and the `lock_timeout`
-    parameter), so B is no longer serialised and this test errors/fails.
-    """
+    """Forced interleaving through `_persist_image`: while run A holds the lock, run B mutates nothing."""
     cache = _model(tmp_path, compat=1604)
     model_dir = cache.parent.parent
     database_tmdl = model_dir / "definition" / "database.tmdl"
@@ -1084,9 +1006,7 @@ def test_model_lock_write_failure_removes_its_file_and_refuses(monkeypatch, tmp_
 
 @pytest.mark.parametrize("observe", [True], ids=["observation"])
 def test_imagesave_with_an_unwritable_lock_writes_nothing(monkeypatch, tmp_path, observe):
-    """Through the real lock: no ImageSave, no compat edit, no cache. Legacy callers get the typed error;
-    the observation boundary closes it to TOOL_UNAVAILABLE, the vocabulary its callers already refuse on
-    (preserving the type would escape the capture tool's handlers instead of refusing)."""
+    """Through the real lock: no ImageSave, no compat edit, no cache."""
     cache = _model(tmp_path, compat=1604)
     cache.parent.mkdir()
     database_tmdl = cache.parent.parent / "definition" / "database.tmdl"
@@ -1106,11 +1026,7 @@ def test_imagesave_with_an_unwritable_lock_writes_nothing(monkeypatch, tmp_path,
 
 
 def test_refresh_refuses_ui_save_when_the_cache_folder_cannot_be_created(tmp_path, monkeypatch, capsys) -> None:
-    """`.pbi` absent and its creation denied (a model-folder ACL deny) is the same refusal as an unwritable lock.
-
-    The folder is created before the lock is taken, so a raw `PermissionError` there used to reach the
-    generic ImageSave handler; it must stay the typed pre-write lock refusal.
-    """
+    """`.pbi` absent and its creation denied (a model-folder ACL deny) is the same refusal as an unwritable lock."""
     cache = _model(tmp_path, compat=1604)
     database_tmdl = cache.parent.parent / "definition" / "database.tmdl"
     before = database_tmdl.read_bytes()

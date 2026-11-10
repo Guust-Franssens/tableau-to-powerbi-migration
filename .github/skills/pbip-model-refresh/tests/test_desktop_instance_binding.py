@@ -48,13 +48,7 @@ AUTO_DATE_TEMPLATE = "DateTableTemplate_0a1b2c3d-4e5f-6789-abcd-ef0123456789"
 
 
 def test_the_suite_exercises_the_scripts_bundled_beside_it() -> None:
-    """A copied skill must test ITS OWN scripts, not a same-named module from the host repo.
-
-    This repo keeps forwarding shims at `scripts/probe_desktop_query.py` (so existing agent
-    invocations do not break), which is exactly the shape that could shadow the real modules if
-    anything put the host repo's `scripts/` on `sys.path` first. Then every test below would pass
-    while proving nothing about the files that actually ship.
-    """
+    """A copied skill must test ITS OWN scripts, not a same-named module from the host repo."""
     for module in (probe_desktop_query, refresh_pbip_model):
         assert Path(module.__file__).resolve().parent == SKILL_ROOT / "scripts", (
             f"{module.__name__} was imported from {module.__file__}, not from this skill's scripts/"
@@ -121,11 +115,7 @@ def test_single_instance_without_a_pid_still_works(monkeypatch) -> None:
 
 
 def test_msmdsrv_lookup_scopes_by_pid_and_dedupes_its_output(monkeypatch) -> None:
-    """The PowerShell boundary: the pid reaches it, and one port per process comes back.
-
-    `Get-NetTCPConnection` can report the same listener twice (IPv4 + IPv6), which would otherwise
-    look like "this pid owns two ports" and abort a perfectly good run.
-    """
+    """The PowerShell boundary: the pid reaches it, and one port per process comes back."""
     seen: dict[str, object] = {}
 
     def fake_run(cmd, **kwargs):
@@ -651,22 +641,13 @@ def _stub_live_to_match_disk(monkeypatch, cache: Path) -> None:
 
 
 def test_tmdl_tables_reads_through_a_byte_order_mark(tmp_path: Path) -> None:
-    """Desktop writes TMDL with a BOM, and a BOM before `table` would empty the whole fingerprint.
-
-    That fails OPEN - an empty fingerprint reports "identity unverified", which the gate lets
-    through - so it would silently switch the check off on exactly the real-world files it guards.
-    `check_datamodel.py` already strips `\\ufeff` for the same file set, so this shape is not theoretical.
-    """
+    """Desktop writes TMDL with a BOM, and a BOM before `table` would empty the whole fingerprint."""
     cache = _model_folder(tmp_path, "MyMigration", ["Orders"], bom=True)
     assert tmdl_tables(cache.parent.parent) == {"Orders"}
 
 
 def test_auto_date_tables_on_disk_do_not_look_like_a_stranger(monkeypatch, tmp_path: Path) -> None:
-    """A PBIP with auto date/time on serializes `LocalDateTable_*.tmdl` into `definition/tables/`.
-
-    The live side already strips them, so leaving them in the disk side would report them as
-    "missing from the connected model" and abort every such migration with WRONG_MODEL.
-    """
+    """A PBIP with auto date/time on serializes `LocalDateTable_*.tmdl` into `definition/tables/`."""
     cache = _model_folder(tmp_path, "MyMigration", ["Orders", AUTO_DATE_LOCAL, AUTO_DATE_TEMPLATE])
     assert tmdl_tables(cache.parent.parent) == {"Orders"}
     _stub_live_to_match_disk(monkeypatch, cache)
@@ -675,27 +656,13 @@ def test_auto_date_tables_on_disk_do_not_look_like_a_stranger(monkeypatch, tmp_p
 
 
 def test_a_user_table_named_like_the_auto_date_prefix_stays_in_the_disk_fingerprint(tmp_path: Path) -> None:
-    """A GENUINE user table like `LocalDateTableSales` must NOT be mistaken for auto date/time scaffolding.
-
-    The round-2 filter matched anything starting with `LocalDateTable`/`DateTableTemplate`, so a real
-    user table with that prefix vanished from the fingerprint entirely - columns, measures and all -
-    hiding real differences between two models (round-3 blocker 4). Only the exact GUID-suffixed shape
-    is scaffolding; everything else is compared.
-    """
+    """A GENUINE user table like `LocalDateTableSales` must NOT be mistaken for auto date/time scaffolding."""
     cache = _model_folder(tmp_path, "MyMigration", ["Orders", "LocalDateTableSales", "DateTableTemplateArchive"])
     assert tmdl_tables(cache.parent.parent) == {"Orders", "LocalDateTableSales", "DateTableTemplateArchive"}
 
 
 def test_same_model_refuses_a_superset_schema(monkeypatch, tmp_path: Path) -> None:
-    """A sibling holding ALL your tables PLUS more is a different model, not a lagging TMDL.
-
-    This test used to assert the opposite (`test_same_model_accepts_the_model_that_owns_the_cache`
-    expected ok=True and "more not in TMDL"). That fail-open subset match is the exact #114 hole: the
-    check only required the TMDL tables to be PRESENT in the engine, so a richer sibling passed and
-    was reported "confirmed". Concurrent Desktop instances are supported, so that sibling is
-    reachable, not hypothetical - and once its model is confirmed, its rows get written into this
-    project's cache.abf. An exact match now refuses it.
-    """
+    """A sibling holding ALL your tables PLUS more is a different model, not a lagging TMDL (#114)."""
     cache = _model_folder(tmp_path, "MyMigration", ["Orders", "Date Table"])
     monkeypatch.setattr(refresh_pbip_model, "_live_tables", lambda port: {"orders", "Date Table", "Extra"})
     ok, message = same_model(52001, cache)
@@ -713,13 +680,7 @@ def test_same_model_refuses_a_siblings_model(monkeypatch, tmp_path: Path) -> Non
 
 
 def test_same_model_fails_closed_when_it_cannot_verify(monkeypatch, tmp_path: Path) -> None:
-    """'Cannot verify' must FAIL CLOSED, because this gate guards a write into a project.
-
-    No model folder resolved, or no TMDL tables to fingerprint, is 'unknown' - and unknown is not
-    'fine'. This test used to assert the opposite (ok=True + "unverified"): a hiccup that left the
-    destination unresolved let the write straight through. That fail-open path is #114; both shapes
-    now return False.
-    """
+    """'Cannot verify' must FAIL CLOSED, because this gate guards a write into a project (#114)."""
     monkeypatch.setattr(refresh_pbip_model, "_live_tables", lambda port: {"Whatever"})
     ok, message = same_model(52001, None)
     assert not ok and "UNVERIFIED" in message.upper()
@@ -731,14 +692,7 @@ def test_same_model_fails_closed_when_it_cannot_verify(monkeypatch, tmp_path: Pa
 
 
 def test_same_model_refuses_when_a_column_differs(monkeypatch, tmp_path: Path) -> None:
-    """Matching table NAMES but a different column is a different model - tables alone are not enough.
-
-    Once `cache_file`'s binding is authoritative (round-2 blocker 3a), a same-named sibling is
-    reachable on a widened/wrong port, so the table-only fingerprint stops being defence-in-depth and
-    becomes the ONLY control - and a sibling sharing table names but differing in columns passes it.
-    The fingerprint therefore reaches columns (#114, round-2 blocker 3): here the tables match exactly
-    but the connected model has `Orders[Y]` where the TMDL has `Orders[X]`, and it must be refused.
-    """
+    """Matching table NAMES but a different column is a different model - tables alone are not enough (#114)."""
     cache = _model_folder(tmp_path, "MyMigration", ["Orders"])  # disk column: Orders[X]
     monkeypatch.setattr(refresh_pbip_model, "_live_tables", lambda port: {"Orders"})
     monkeypatch.setattr(
@@ -750,12 +704,7 @@ def test_same_model_refuses_when_a_column_differs(monkeypatch, tmp_path: Path) -
 
 
 def test_same_model_refuses_when_a_measure_differs(monkeypatch, tmp_path: Path) -> None:
-    """Matching tables and columns but a different measure is still a different model.
-
-    The measure dimension is the second half of the finer fingerprint (#114, round-2 blocker 3): two
-    models can agree on every table and column yet differ in their measures. Here the connected model
-    carries a `Total Sales` measure the TMDL does not, so `same_model` must refuse.
-    """
+    """Matching tables and columns but a different measure is still a different model (#114)."""
     cache = _model_folder(tmp_path, "MyMigration", ["Orders"])  # disk: Orders[X], no measures
     monkeypatch.setattr(refresh_pbip_model, "_live_tables", lambda port: {"Orders"})
     monkeypatch.setattr(
@@ -853,12 +802,7 @@ class _FingerprintConn:  # pylint: disable=too-few-public-methods
 
 
 def test_column_names_filters_rownumber_and_auto_date_columns() -> None:
-    """The live column fingerprint drops the auto RowNumber index and the auto date/time scaffolding.
-
-    Those never appear in TMDL, so comparing them would make a legitimate model fail its own identity
-    gate - the false-negative the reviewer flagged (#114, round-2 blocker 3). Everything else is kept,
-    preferring the explicit model name over the engine's inferred one.
-    """
+    """The live column fingerprint drops the auto RowNumber index and the auto date/time scaffolding (#114)."""
     conn = _FingerprintConn(
         tables={"t1": "Orders", "t2": AUTO_DATE_LOCAL},
         columns=[
@@ -905,11 +849,7 @@ def test_resolve_pid_keeps_the_single_instance_shortcut(monkeypatch) -> None:
 
 
 def test_main_aborts_before_refreshing_a_wrong_bound_instance(monkeypatch, tmp_path: Path, capsys) -> None:
-    """End to end: a wrong port must never reach refresh, ImageSave or the row count.
-
-    Those three are exactly the checks that agree with each other while all being wrong, so the
-    identity gate has to run first - not as one more opinion afterwards.
-    """
+    """End to end: a wrong port must never reach refresh, ImageSave or the row count."""
     _model_folder(tmp_path, "MyMigration", ["Orders"])
     _stub_bridge(monkeypatch, [{"pid": 111, "currentFilePath": str(tmp_path / "MyMigration.pbip")}])
     monkeypatch.setattr(refresh_pbip_model, "discover_port", lambda pid: 52001)
@@ -922,18 +862,7 @@ def test_main_aborts_before_refreshing_a_wrong_bound_instance(monkeypatch, tmp_p
 
 
 def test_no_save_leaves_the_project_byte_identical(monkeypatch, tmp_path: Path, capsys) -> None:
-    """With `--no-save`, a refresh must NOT write `cache.abf` or touch the project.
-
-    Persisting is the DEFAULT (it is this script's stated purpose), so the opt-OUT is what needs
-    pinning. `--no-save` exists for read-only consumers: the validator is read-only by contract, and
-    saving rewrites `database.tmdl`'s declared compatibilityLevel - so a validator that forgot this
-    flag would mutate the very artifact it is judging.
-
-    This test used to assert the opposite (`test_not_saving_is_the_default`). That default came from
-    a real but MIS-ATTRIBUTED finding: a persisted cache was believed to make the PBIP unopenable,
-    when the actual cause was a compatibility-level mismatch between the cache and the project
-    (root-caused 2026-08-07). `image_save` now aligns them the way Desktop's own Save does.
-    """
+    """With `--no-save`, a refresh must NOT write `cache.abf` or touch the project."""
     cache = _model_folder(tmp_path, "MyMigration", ["Orders"])
     _stub_bridge(monkeypatch, [{"pid": 111, "currentFilePath": str(tmp_path / "MyMigration.pbip")}])
     monkeypatch.setattr(refresh_pbip_model, "discover_port", lambda pid: 52001)
@@ -950,13 +879,7 @@ def test_no_save_leaves_the_project_byte_identical(monkeypatch, tmp_path: Path, 
 
 
 def test_persisting_is_the_default(monkeypatch, tmp_path: Path, capsys) -> None:
-    """With no flags at all, a refresh MUST persist.
-
-    This is the script's stated purpose - "so the next agent (and the next Desktop open) sees real
-    data instead of an empty model" - and it was off for a while only because of a misdiagnosed
-    defect. Pinned because the failure it prevents is silent and expensive: an agent handed an
-    unrefreshed model queries it, gets nothing, and reports findings about an empty model.
-    """
+    """With no flags at all, a refresh MUST persist."""
     cache = _model_folder(tmp_path, "MyMigration", ["Orders"])
     _stub_bridge(monkeypatch, [{"pid": 111, "currentFilePath": str(tmp_path / "MyMigration.pbip")}])
     monkeypatch.setattr(refresh_pbip_model, "discover_port", lambda pid: 52001)
@@ -979,13 +902,7 @@ def test_persisting_is_the_default(monkeypatch, tmp_path: Path, capsys) -> None:
 
 
 def test_a_compat_rollback_failure_is_fatal_and_does_not_fall_back_to_ui_save(monkeypatch, tmp_path, capsys):
-    """A `CompatRollbackError` from persist is FATAL - the run must NOT drive the UI Save on top of it.
-
-    When the cache write fails AND the compatibility alignment cannot be rolled back, database.tmdl
-    declares a level no cache was written at. Saving over that inconsistent state would persist the
-    mismatch, so `main` must exit with an error (round-3 blocker 2). There is no UI-save fallback at all
-    since #831; this pins that a rollback failure is still the fatal exit 2, not a NOT_PERSISTED exit 1.
-    """
+    """A `CompatRollbackError` from persist is FATAL - the run must NOT drive the UI Save on top of it (#831)."""
     cache = _model_folder(tmp_path, "MyMigration", ["Orders"])
     _stub_bridge(monkeypatch, [{"pid": 111, "currentFilePath": str(tmp_path / "MyMigration.pbip")}])
     monkeypatch.setattr(refresh_pbip_model, "discover_port", lambda pid: 52001)
@@ -1045,14 +962,7 @@ def test_compatibility_alignment_declares_generated_edit(tmp_path: Path) -> None
 
 
 def test_a_timeout_does_not_assert_a_desktop_observer(monkeypatch, tmp_path: Path, capsys) -> None:
-    """A refresh timeout must report the cause as UNKNOWN, never as "this needs a human".
-
-    Regression test for the most expensive defect found on 2026-08-04. The old message named a
-    data-source sign-in modal and said "THIS NEEDS A HUMAN. Do not retry" on ANY timeout - the one
-    blocker an agent is forbidden to retry - so a false positive converted a transient slowdown into
-    a permanent dead end. It fired on 2 of 5 Desktop instances opened on the SAME bundle that
-    refreshed cleanly on the other 3 (38.8s good run, >87s slow run, 90s ceiling).
-    """
+    """A refresh timeout must report the cause as UNKNOWN, never as "this needs a human"."""
     cache = _model_folder(tmp_path, "MyMigration", ["Orders"])
     _stub_bridge(monkeypatch, [{"pid": 111, "currentFilePath": str(tmp_path / "MyMigration.pbip")}])
     monkeypatch.setattr(refresh_pbip_model, "discover_port", lambda pid: 52001)
@@ -1103,24 +1013,14 @@ def _project_with_two_models(root: Path, bypath: str | None, *, stem_decoy: bool
 
 
 def test_cache_file_refuses_to_guess_when_the_binding_is_ambiguous(monkeypatch, tmp_path: Path) -> None:
-    """No name match and no resolvable binding => None, so the identity gate fails closed.
-
-    Neither `Alpha` nor `Zed` matches the `.pbip` stem `Proj`, and there is no binding, so nothing
-    names the owner. The old `models[0]` fallback would have grabbed `Alpha` (first sorted) with no
-    evidence; returning None is what makes the downstream gate refuse.
-    """
+    """No name match and no resolvable binding => None, so the identity gate fails closed."""
     pbip = _project_with_two_models(tmp_path, None, stem_decoy=False)
     _stub_bridge(monkeypatch, [{"pid": 111, "currentFilePath": str(pbip)}])
     assert refresh_pbip_model.cache_file(111) is None
 
 
 def test_cache_file_uses_the_stem_only_when_no_binding_resolves(monkeypatch, tmp_path: Path) -> None:
-    """The stem heuristic is a legitimate FALLBACK - it just must never run ahead of the binding.
-
-    With no binding but a single stem-matching sibling (`Proj`), naming it is the best available
-    evidence, so `cache_file` may return it. This pins that the round-2 reordering did not delete the
-    fallback, only demoted it below the authoritative binding.
-    """
+    """The stem heuristic is a legitimate FALLBACK - it just must never run ahead of the binding."""
     pbip = _project_with_two_models(tmp_path, None, stem_decoy=True)
     _stub_bridge(monkeypatch, [{"pid": 111, "currentFilePath": str(pbip)}])
     resolved = refresh_pbip_model.cache_file(111)
@@ -1164,13 +1064,7 @@ def _project_with_binding_outside_the_folder(root: Path, *, target_exists: bool)
 
 
 def test_cache_file_follows_a_binding_that_points_outside_the_folder(monkeypatch, tmp_path: Path) -> None:
-    """A binding to a model OUTSIDE the `.pbip` folder wins over the lone adjacent decoy (round-3 mandate).
-
-    The authoritative binding is resolved DIRECTLY from the byPath, not intersected with the `.pbip`
-    folder's `*.SemanticModel` siblings, so it resolves the real owner even though it lives elsewhere -
-    and the single adjacent `Decoy` model never shadows it. Round-2 returned the decoy via the
-    `len(models)==1` shortcut that ran ahead of the binding.
-    """
+    """A binding to a model OUTSIDE the `.pbip` folder wins over the lone adjacent decoy (round-3 mandate)."""
     pbip = _project_with_binding_outside_the_folder(tmp_path, target_exists=True)
     _stub_bridge(monkeypatch, [{"pid": 111, "currentFilePath": str(pbip)}])
     resolved = refresh_pbip_model.cache_file(111)
@@ -1179,26 +1073,14 @@ def test_cache_file_follows_a_binding_that_points_outside_the_folder(monkeypatch
 
 
 def test_cache_file_fails_closed_when_the_binding_points_at_a_missing_model(monkeypatch, tmp_path: Path) -> None:
-    """A binding present but UNRESOLVABLE (its target is gone) fails closed - it must NOT fall to the decoy.
-
-    "Binding absent" (heuristics may apply) and "binding present but unresolvable" (fail closed) are
-    different conditions and must not share a code path. Here the byPath names a model that does not
-    exist, so `cache_file` returns None rather than silently writing the lone adjacent `Decoy` - the
-    wrong-project write the round-3 mandate closes.
-    """
+    """A binding present but UNRESOLVABLE (its target is gone) fails closed - it must NOT fall to the decoy."""
     pbip = _project_with_binding_outside_the_folder(tmp_path, target_exists=False)
     _stub_bridge(monkeypatch, [{"pid": 111, "currentFilePath": str(pbip)}])
     assert refresh_pbip_model.cache_file(111) is None
 
 
 def test_a_mismatched_port_aborts_before_any_read_or_write(monkeypatch, tmp_path: Path, capsys) -> None:
-    """`--port` must EQUAL the pid-derived port, or the run aborts before touching anything.
-
-    A `--port` pointing at another instance is the wrong-instance write in one argument: the
-    destination is resolved from the pid, so a stray port reads (and, via ImageSave, persists) a
-    sibling's model into this project's own correct cache.abf. #114 closes it by refusing any
-    mismatch up front - the identity probe, refresh, row count and save must never run.
-    """
+    """`--port` must EQUAL the pid-derived port, or the run aborts before touching anything (#114)."""
     _model_folder(tmp_path, "MyMigration", ["Orders"])
     _stub_bridge(monkeypatch, [{"pid": 111, "currentFilePath": str(tmp_path / "MyMigration.pbip")}])
     monkeypatch.setattr(refresh_pbip_model, "discover_port", lambda pid: 52001)
@@ -1213,13 +1095,7 @@ def test_a_mismatched_port_aborts_before_any_read_or_write(monkeypatch, tmp_path
 
 
 def test_an_implicit_probe_downgrades_to_table_ok_but_still_persists(monkeypatch, tmp_path: Path, capsys) -> None:
-    """No `--tables`: only the first queryable table is probed, so the verdict names that one table.
-
-    A model-level `DATA_OK` from an implicit single-table probe is the #115 defect: a static
-    parameter/CSV table (here 'Parameters') can return rows while every live source failed to load.
-    The verdict must be `TABLE_OK 'Parameters'`, never `DATA_OK`. Persistence is a separate axis and
-    is unaffected.
-    """
+    """No `--tables`: only the first queryable table is probed, so the verdict names that one table (#115)."""
     cache = _model_folder(tmp_path, "MyMigration", ["Orders"])
     _stub_bridge(monkeypatch, [{"pid": 111, "currentFilePath": str(tmp_path / "MyMigration.pbip")}])
     monkeypatch.setattr(refresh_pbip_model, "discover_port", lambda pid: 52001)
@@ -1285,12 +1161,7 @@ def _explode(name: str):
 
 
 def test_timeout_recovery_command_quotes_a_path_with_spaces(monkeypatch, tmp_path: Path, capsys) -> None:
-    """The printed recovery command must QUOTE the arbiter path, or a space breaks `powershell -File`.
-
-    Verified experimentally in the round-2 review: `powershell -File C:\\Program Files\\...` parses as
-    `-File 'C:\\Program'`. The arbiter is bundled and can sit under a spaced directory (a user profile
-    with a space is the common case), so the command must read `-File "<path>"` (#118, round-2 major 4).
-    """
+    """The printed recovery command must QUOTE the arbiter path, or a space breaks `powershell -File` (#118)."""
     cache = _model_folder(tmp_path, "MyMigration", ["Orders"])
     spaced = tmp_path / "Program Files" / "probe_desktop_credential.ps1"
     spaced.parent.mkdir(parents=True)

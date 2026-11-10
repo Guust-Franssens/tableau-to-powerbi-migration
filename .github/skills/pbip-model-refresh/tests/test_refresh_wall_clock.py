@@ -109,11 +109,7 @@ def test_the_worker_is_a_daemon_so_a_parked_engine_cannot_outlive_the_process(pa
 
 
 def test_the_bound_is_the_ceiling_plus_grace_not_a_replacement_for_it() -> None:
-    """Keep 300s: cold starts are real (a 1-row probe against a suspended warehouse took 167s).
-
-    The fix was always scope, never duration - shortening the ceiling would turn a cold start into a
-    false TIMEOUT, which is the error this repo already made once at 90s.
-    """
+    """Keep 300s: cold starts are real (a 1-row probe against a suspended warehouse took 167s)."""
     assert REFRESH_TIMEOUT_SECONDS == 300
     assert REFRESH_WALL_CLOCK_GRACE_SECONDS > 0, "XMLA must get the chance to raise the better error first"
 

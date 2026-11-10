@@ -288,13 +288,7 @@ def test_the_named_window_is_the_one_whose_owner_is_disabled() -> None:
 
 
 def test_an_unowned_zero_area_helper_window_does_not_block() -> None:
-    """A window with NO owner and NO pixels blocks nothing - on two independent grounds, not on size.
-
-    `Internet Explorer_Hidden` at 0x0 rides along on healthy instances. It is excluded because it has
-    no owner to disable AND nothing to display, never because of its name or its geometry: the same
-    class at 900x700, and the same 0x0 shape with an owner, are both classified (see the round-3
-    tests below).
-    """
+    """A window with NO owner and NO pixels blocks nothing - on two independent grounds, not on size."""
     state = inspect_desktop_observer(
         111,
         lambda _pid: [
@@ -308,12 +302,7 @@ def test_an_unowned_zero_area_helper_window_does_not_block() -> None:
 
 @pytest.mark.timing
 def test_direct_refresh_stops_at_t0_for_a_dialog_it_could_not_read(monkeypatch) -> None:
-    """An unreadable dialog present BEFORE we start anything must stop immediately, not wait for XMLA.
-
-    t=0 is the one moment a dialog finding is acted on rather than latched: nothing of ours is running,
-    the dialog is somebody else's, and stacking a refresh on an unclassified dialog is what the
-    2026-08-28 field report had to unpick by hand.
-    """
+    """An unreadable dialog present BEFORE we start anything must stop immediately, not wait for XMLA."""
     monkeypatch.setattr(refresh_pbip_model, "_credential_state", lambda _pid: dialog_state())
     monkeypatch.setattr(refresh_pbip_model, "_load_adomd", explode("_load_adomd"))
 
@@ -328,12 +317,7 @@ def test_direct_refresh_stops_at_t0_for_a_dialog_it_could_not_read(monkeypatch) 
 
 @pytest.mark.timing
 def test_direct_refresh_raises_desktop_gone_fast_at_t0(monkeypatch) -> None:
-    """#158: a Desktop already dead at t=0 must bail immediately, never start the XMLA wait.
-
-    The t=0 pre-check (``_raise_if_blocked``) is load-bearing: if the process was gone before the worker
-    even started, waiting out the deadline learns nothing. The reason is harvested from the real
-    detector, so this pins the terminal path against the exact string production emits.
-    """
+    """#158: a Desktop already dead at t=0 must bail immediately, never start the XMLA wait."""
     reason = harvested_desktop_gone_reason()
     monkeypatch.setattr(refresh_pbip_model, "_credential_state", lambda _pid: Observation(process_gone=reason))
     monkeypatch.setattr(refresh_pbip_model, "_load_adomd", explode("_load_adomd"))
@@ -394,11 +378,7 @@ def test_refresh_banner_is_flushed_and_heartbeat_reports_elapsed_total(monkeypat
 
 
 def test_unknown_refresh_banner_does_not_claim_no_dialog(monkeypatch, parked, capsys) -> None:
-    """A minimized owner emits the UNKNOWN banner and, once latched, ends as CREDENTIAL_UNKNOWN.
-
-    Before #154 this fell through to a bare ``TimeoutError`` (which the parent blamed on a slow
-    source). The reason is harvested from the real detector, not hand-written (the #153 blind-spot).
-    """
+    """A minimized owner emits the UNKNOWN banner and, once latched, ends as CREDENTIAL_UNKNOWN (#154, #153)."""
     reason = harvested_minimized_reason()
     monkeypatch.setattr(
         refresh_pbip_model,
@@ -419,16 +399,7 @@ def test_unknown_refresh_banner_does_not_claim_no_dialog(monkeypatch, parked, ca
 
 
 def test_refresh_latches_desktop_unready_seen_only_by_initial_precheck(monkeypatch, parked) -> None:
-    """#158's twin of the #154 latch: DESKTOP_UNREADY at t=0 must survive a healthy first poll.
-
-    The untested twin of `test_refresh_latches_unknown_seen_only_by_initial_precheck`. It is reachable
-    only through a direct ``refresh(desktop_pid=...)`` call - `main` terminates at exit 2 before this -
-    but that is exactly why it needs pinning rather than skipping: without the initial-state carry, a
-    t=0-only readiness failure decays into a bare ``TimeoutError``, which the parent classifier reads
-    as a slow source. That wrong-verdict family is the whole reason this change exists, so the fact
-    that the *unknown* half is tested and the *unready* half is not is a coverage hole, not a
-    reachability argument.
-    """
+    """#158's twin of the #154 latch: DESKTOP_UNREADY at t=0 must survive a healthy first poll."""
     reason = harvested_zero_window_alive_reason()
     states = iter([Observation(desktop_unready=reason)])
 
@@ -461,14 +432,7 @@ class _FakeClock:
 
 
 def test_refresh_and_save_wires_a_dialog_finding_to_exit_3(monkeypatch, capsys) -> None:
-    """#376 wiring: a DialogFoundError must surface at exit 3, never in the exit-1 hard-stop band.
-
-    Exit 1 is reserved for a matched credential signature. This module cannot establish that a dialog
-    BLOCKS anything, so nothing it observes about one may enter that band - and the retired
-    ``probe_live_source`` mapped the exit-1 credential family to "you may NOT build; a person must sign in".
-    The finding is a real classification and the verdict line is the real emitter's, so this pins raise -> emit -> exit
-    code with no hand-written text.
-    """
+    """#376 wiring: a DialogFoundError must surface at exit 3, never in the exit-1 hard-stop band."""
 
     def _raise_dialog(*_args, **_kwargs):
         raise DialogFoundError(111, dialog_finding())
@@ -485,14 +449,7 @@ def test_refresh_and_save_wires_a_dialog_finding_to_exit_3(monkeypatch, capsys) 
 
 
 def test_refresh_and_save_wires_desktop_gone_to_exit_2(monkeypatch, capsys) -> None:
-    """#158 wiring: a DesktopGoneError must surface as the ERROR-family exit 2, distinct from UNKNOWN.
-
-    A dead Desktop is a local-environment failure, not an indeterminate credential state: it must NOT
-    reuse exit 3 (CREDENTIAL_UNKNOWN) nor exit 1 (blocked). Exit 2 is the ERROR family the parent maps
-    to ``ERROR`` (source not implicated). The reason is harvested from the real detector and the verdict
-    line is the real emitter's, so this pins the whole raise -> emit -> exit-code path with no
-    hand-written text.
-    """
+    """#158 wiring: a DesktopGoneError must surface as the ERROR-family exit 2, distinct from UNKNOWN."""
     reason = harvested_desktop_gone_reason()
 
     def _raise_gone(*_args, **_kwargs):
@@ -534,13 +491,7 @@ def test_refresh_main_returns_desktop_gone_before_port_discovery(monkeypatch, tm
 
 
 def test_refresh_main_returns_desktop_unready_from_the_real_detector(monkeypatch, tmp_path: Path, capsys) -> None:
-    """#158: an alive-but-window-less Desktop terminates the mutating CLI, on EVERY platform.
-
-    Composed from the real `inspect_desktop_observer` with injected Win32 primitives rather than a
-    hand-built `Observation`, so the detector's own zero-window/alive branch and the CLI's
-    branch on it are proven as one chain - and proven identically on Linux CI and on Windows, which the
-    un-stubbed `_credential_state` cannot do (its `os.name` guard returns a healthy state off Windows).
-    """
+    """#158: an alive-but-window-less Desktop terminates the mutating CLI, on EVERY platform."""
     model_folder(tmp_path, "MyMigration")
     monkeypatch.setattr(
         refresh_pbip_model,
@@ -611,11 +562,7 @@ def test_probe_query_main_returns_desktop_gone_before_port_discovery(monkeypatch
 
 
 def test_probe_query_main_returns_desktop_unready_from_the_real_detector(monkeypatch, capsys) -> None:
-    """#158: the read-only CLI terminates on an alive-but-window-less Desktop, on EVERY platform.
-
-    The read-only twin of the refresh test above, and composed the same way: the real detector with
-    injected Win32 primitives, so Linux CI exercises the branch Windows actually takes.
-    """
+    """#158: the read-only CLI terminates on an alive-but-window-less Desktop, on EVERY platform."""
     monkeypatch.setattr(probe_desktop_query, "_credential_state", real_detector_for_zero_windows(alive=True))
     monkeypatch.setattr(probe_desktop_query, "discover_port", explode("discover_port"))
 
@@ -628,18 +575,7 @@ def test_probe_query_main_returns_desktop_unready_from_the_real_detector(monkeyp
 
 
 def test_the_two_entry_points_get_an_explicit_desktop_state_baseline() -> None:
-    """`conftest`'s autouse baseline must really be in force on BOTH entry points.
-
-    17 tests drive `main(["--pid", "111", ...])` without naming a Desktop state. If the baseline stops
-    applying they fall back to the production `_credential_state`, whose result is decided by the host
-    OS: a healthy `Observation()` on Linux, and a real `process_gone` detection on Windows
-    (pid 111 does not exist). Measured 2026-08-15, that split is exactly how 17 Windows-only failures
-    passed green on `ubuntu-latest`.
-
-    Asserting on the RETURNED VALUE could not catch it - off Windows the un-stubbed function also
-    returns a bare `Observation()`, so a value check is a test that cannot fail on the one
-    platform CI runs. The marker on the stub is checkable on every platform.
-    """
+    """`conftest`'s autouse baseline must really be in force on BOTH entry points."""
     for module in (refresh_pbip_model, probe_desktop_query):
         assert getattr(module._credential_state, "is_test_baseline", False), (
             f"{module.__name__}._credential_state is not conftest's baseline stub, so un-stubbed tests "
@@ -703,12 +639,7 @@ def test_probe_query_worker_cannot_print_after_credential_verdict(monkeypatch, c
 
 
 def test_an_enabled_owner_is_the_only_thing_that_exonerates_a_dialog() -> None:
-    """Modality is a ONE-WAY test, and it is the only suppression mechanism left.
-
-    An ENABLED owner proves this window is blocking nothing, because a modal disables its owner. A
-    DISABLED owner proves nothing either way - Power BI's refresh dialog disables the owner too - and
-    ``None`` (no owner) means the test did not apply, which is not the same as passing it.
-    """
+    """Modality is a ONE-WAY test, and it is the only suppression mechanism left."""
     exonerated = owned_dialog(owner_enabled=True)
     disabled_owner = owned_dialog(owner_enabled=False)
     no_owner_test = DesktopWindow("", "Cls", 702, 355, hwnd=0x40004, owner_hwnd=MAIN_HWND, owner_enabled=None)
@@ -725,12 +656,7 @@ def test_an_enabled_owner_is_the_only_thing_that_exonerates_a_dialog() -> None:
 
 
 def test_an_unowned_window_that_renders_pixels_is_still_classified() -> None:
-    """`renders_nothing` needs BOTH conjuncts: no owner AND no pixels. Neither alone suppresses.
-
-    An unowned 900x700 window displays something to a human even though it disables nobody. Dropping
-    the area conjunct would silently exclude every unowned window - including the AAD host in its
-    unowned form - and would also empty ``main_frame``'s fallback candidate set.
-    """
+    """`renders_nothing` needs BOTH conjuncts: no owner AND no pixels. Neither alone suppresses."""
     frame = main_window()
     unowned_visible = DesktopWindow("", "Internet Explorer_Hidden", 900, 700, hwnd=0x70007)
 
@@ -746,13 +672,7 @@ def test_an_unowned_window_that_renders_pixels_is_still_classified() -> None:
 
 
 def test_ownership_is_followed_transitively_to_the_unowned_root() -> None:
-    """Round 4: "first owner" is itself a proxy for "the root", and it hid a credential modal.
-
-    An owned window can own another popup. With a Z-order of ``tooltip -> credential dialog -> frame``
-    the first owner reached is the CREDENTIAL DIALOG, and whatever ``main_frame`` picks is excluded
-    from the prepass AND from classification - so the modal disappeared. Measured on the round-3 build:
-    the frame came back as the ``#32770`` credential dialog and no modal was reported.
-    """
+    """Round 4: "first owner" is itself a proxy for "the root", and it hid a credential modal."""
     frame_hwnd, cred_hwnd, tip_hwnd = 0xF001, 0xC002, 0x7003
     frame = DesktopWindow("sample", "WindowsForms10.Window.8.app.0.x", 2011, 1298, hwnd=frame_hwnd)
     cred = DesktopWindow("", "#32770", 702, 355, hwnd=cred_hwnd, owner_hwnd=frame_hwnd, owner_enabled=False)
@@ -767,13 +687,7 @@ def test_ownership_is_followed_transitively_to_the_unowned_root() -> None:
 
 
 def test_ambiguous_frame_identity_excludes_nothing() -> None:
-    """Failing closed means EXCLUDING NOTHING - the cost is a loud exit 3, never a silent clear.
-
-    Both halves matter, and the second is round 5's: ambiguity has to survive the PRESENCE of owned
-    windows too. An ownership-derived root is not better evidence than a window sitting there rendering
-    pixels - believing it was the whole defect - so a tooltip owned by either candidate must not
-    promote its owner into the application.
-    """
+    """Failing closed means EXCLUDING NOTHING - the cost is a loud exit 3, never a silent clear."""
     frame = DesktopWindow("sample", "WindowsForms10.Window.8.app.0.x", 2011, 1298, hwnd=0xF001)
     other = DesktopWindow("second", "Cls", 800, 600, hwnd=0x9001)
 
