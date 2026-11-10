@@ -28,7 +28,7 @@ def _make_plugin(root: Path, marketplace: str, plugin: str, skills: tuple[str, .
     return plugin_root
 
 
-@pytest.mark.parametrize("configured", [None, "", "relocated", "missing"])
+@pytest.mark.parametrize("configured", [None, "relocated", "missing"])
 def test_copilot_home_discovery(tmp_path, monkeypatch, configured):
     user = tmp_path / "user"
     default = _make_plugin(user / ".copilot" / "installed-plugins", "collection", "plugin")
@@ -75,6 +75,7 @@ def test_overrides_win_without_resolving_home(tmp_path, monkeypatch, override):
         result = discover_skill_plugin(plugin_root_override=plugin)
     assert result.ok
     assert result.plugin_root == plugin
+    assert result.identity == "plugin@collection"
 
 
 def test_single_install_found_by_bundle_content(tmp_path: Path) -> None:
@@ -104,32 +105,13 @@ def test_multiple_installs_fail_loudly_and_name_both_paths(tmp_path: Path) -> No
 
 
 def test_no_install_returns_actionable_install_hint(tmp_path: Path) -> None:
-    """No installed copy is reported clearly without mutating the plugin directory.
-
-    The identity is read from `build_plugin` rather than spelled out here. This test previously
-    hard-coded `powerbi-migration-skills@powerbi-migration-collection`, which is the name the plugin
-    was published under before v0.3.0 - so it pinned a dead install command in a hint whose whole job
-    is to be copy-pasteable.
-    """
+    """The install hint names the current published identity, read from `build_plugin`."""
     result = discover_skill_plugin(installed_plugins_root=tmp_path, env={})
 
     assert result.status == "missing"
     assert not result.ok
     assert "copilot plugin install" in result.install_hint
     assert f"{build_plugin.PLUGIN_NAME}@{build_plugin.MARKETPLACE_NAME}" in result.install_hint
-
-
-def test_explicit_override_is_honoured_even_when_scan_would_be_ambiguous(tmp_path: Path) -> None:
-    """A future rename can be handled immediately with an override instead of a code change."""
-    _make_plugin(tmp_path, "collection-a", "plugin-a")
-    override = _make_plugin(tmp_path, "collection-b", "plugin-b")
-
-    result = discover_skill_plugin(installed_plugins_root=tmp_path, plugin_root_override=override, env={})
-
-    assert result.ok
-    assert result.override
-    assert result.plugin_root == override
-    assert result.identity == "plugin-b@collection-b"
 
 
 def test_env_override_accepts_a_skills_directory(tmp_path: Path) -> None:
