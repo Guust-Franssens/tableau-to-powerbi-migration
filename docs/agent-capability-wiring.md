@@ -120,6 +120,7 @@ appear only where the tier is not obvious. `scripts/README.md` remains the advan
 | `scripts/connection_target.py` | `internal` | |
 | `scripts/copilot_home.py` | `internal` | Shared path-only library for toolkit consumers. |
 | `scripts/current_artifact_revision.py` | `internal` | |
+| `scripts/engine_input_staging.py` | `internal` | Imported by `run_estate.py`; deleted at #836 S4. |
 | `scripts/generated_edit_declarations.py` | `internal` | |
 | `scripts/harvest_gap_report.py` | `internal` | |
 | `scripts/harvest_gap_shapes.py` | `internal` | |

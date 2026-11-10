@@ -164,7 +164,7 @@ import zipfile
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 from check_empty_model import REPORT_NAME as EMPTY_MODEL_REPORT
 from check_empty_model import STATUS_EMPTY_MODELS
@@ -188,9 +188,15 @@ from check_path_ceiling import (
     utf16_len,
 )
 from check_path_ceiling import scan as scan_path_ceiling
+from engine_input_staging import EngineInputStagingError
 from engine_source import EngineNotFoundError, NonCanonicalEngineError, engine_provenance, resolve_engine
 from manifest_scope import redact_host_paths
 from migration_bundle import ENGINE_RECEIPT, sha256_file, write_engine_receipt
+from object_identity import harvest_luid
+import engine_input_staging
+import generated_edit_declarations as declarations
+import unit_ids
+import work_dirs
 
 import stamp_tableau_provenance as prov  # isort: skip  # the provenance worker AND its result vocabulary
 
@@ -213,6 +219,7 @@ EXIT_BLANK_PLACEHOLDER = 8
 EXIT_BUNDLE_REWRITE = 9
 EXIT_PATH_CEILING = 10
 EXIT_PROVENANCE_FAILED = 11
+EXIT_UNIT_IDS = 12
 GENERATED_ARTIFACTS_KEY = "generated_artifacts"
 SLICE_ONLY_COVERAGE = "slice_only_backfill"
 SOURCE_PROVENANCE_REPORT = "source-provenance.json"
@@ -448,7 +455,7 @@ def _input_candidates(input_dir: Path) -> list[Path] | None:
     return candidates
 
 
-def _engine_unit_names(engine: Path, input_dir: Path) -> list[str] | None:
+def _engine_unit_records(engine: Path, input_dir: Path) -> list[dict[str, Any]] | None:
     """Ask the selected engine for its real datasource-then-workbook folder allocation."""
     scripts_dir = engine / "skills" / "tableau-migration" / "scripts"
     if not (scripts_dir / "migrate_estate.py").is_file():
@@ -460,12 +467,13 @@ def _engine_unit_names(engine: Path, input_dir: Path) -> list[str] | None:
         "from migrate_estate import LocalFilesSource, _safe_folder\n"
         "source = LocalFilesSource(Path(sys.argv[2]))\n"
         "used = set()\n"
-        "names = []\n"
-        "for asset_id in source.list_datasources():\n"
-        "    names.append(_safe_folder(source.asset_name(asset_id), used))\n"
-        "for asset_id in source.list_workbooks():\n"
-        "    names.append(_safe_folder(source.asset_name(asset_id), used))\n"
-        "print(json.dumps(names, ensure_ascii=False))\n"
+        "records = []\n"
+        'for kind, asset_ids in (("datasource", source.list_datasources()), ("workbook", source.list_workbooks())):\n'
+        "    for asset_id in asset_ids:\n"
+        "        name = source.asset_name(asset_id)\n"
+        '        records.append({"kind": kind, "asset_path": str(Path(asset_id).resolve()), '
+        '"name": name, "legacy_folder": _safe_folder(name, used)})\n'
+        "print(json.dumps(records, ensure_ascii=False))\n"
     )
     try:
         result = subprocess.run(
@@ -476,16 +484,89 @@ def _engine_unit_names(engine: Path, input_dir: Path) -> list[str] | None:
         )
         if result.returncode != 0:
             return None
-        names = json.loads(result.stdout)
+        records = json.loads(result.stdout)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
         return None
     if (
-        not isinstance(names, list)
-        or not names
-        or any(not isinstance(name, str) or not name for name in names)
-        or len({name.casefold() for name in names}) != len(names)
+        not isinstance(records, list)
+        or not records
+        or any(
+            not isinstance(record, dict)
+            or record.get("kind") not in {"workbook", "datasource"}
+            or any(
+                not isinstance(record.get(key), str) or not record[key]
+                for key in ("asset_path", "name", "legacy_folder")
+            )
+            for record in records
+        )
+        or len({record["legacy_folder"].casefold() for record in records}) != len(records)
     ):
         return None
+    for record in records:
+        record["luid"] = harvest_luid(Path(record["asset_path"]).stem) if record["kind"] == "workbook" else None
+    return records
+
+
+def _engine_unit_names(engine: Path, input_dir: Path) -> list[str] | None:
+    """Legacy folder names from the selected engine's exact selection and dedupe."""
+    records = _engine_unit_records(engine, input_dir)
+    return [record["legacy_folder"] for record in records] if records is not None else None
+
+
+def _owning_run_dir(args: argparse.Namespace) -> tuple[Path | None, str]:
+    """The intact run whose `bundle/` is `--output` and which contains `--input`, else the legacy reason."""
+    if args.slice_only:
+        return None, "slice_only"
+    output = Path(args.output).resolve()
+    run_dir = output.parent
+    if output.name != "bundle" or output != (run_dir / "bundle").resolve():
+        return None, "output_not_run_bundle"
+    if not args.input or not Path(args.input).resolve().is_relative_to(run_dir):
+        return None, "input_outside_run"
+    try:
+        manifest = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None, "output_not_run_bundle"
+    if work_dirs.check_run_location(manifest, run_dir).state != work_dirs.RUN_LOCATION_INTACT:
+        return None, "output_not_run_bundle"
+    return run_dir, "run_bundle"
+
+
+def _unit_layout(args: argparse.Namespace) -> tuple[str, str, Path | None, list[dict[str, Any]] | None]:
+    """Derive legacy vs workbook-ID layout from run identity and actual engine output."""
+    run_dir, reason = _owning_run_dir(args)
+    if run_dir is None:
+        return "legacy", reason, None, None
+    try:
+        entries = unit_ids.read_unit_index(run_dir)
+    except unit_ids.UnitIndexInvalid as exc:
+        return "refuse", f"invalid unit index ({exc.reason})", run_dir, None
+    if entries is not None:
+        return "workbook-ids", "unit_index_present", run_dir, entries
+    if _looks_like_bundle(run_dir / "bundle"):
+        return "legacy", "legacy_output_present", run_dir, None
+    return "workbook-ids", "fresh_run_bundle", run_dir, []
+
+
+def _provisional_unit_names(args: argparse.Namespace, engine: Path) -> list[str] | None:
+    """Project IDs for the path gate without reserving them; None keeps the legacy projection."""
+    layout, _reason, run_dir, entries = _unit_layout(args)
+    records = _engine_unit_records(engine, args.input) if layout == "workbook-ids" else None
+    if records is None or run_dir is None or entries is None:
+        return None
+    indexed = {entry["key"]: entry["id"] for entry in entries}
+    next_number = unit_ids.highest_reserved(run_dir.parent)
+    names = []
+    for record in records:
+        if record["kind"] != "workbook":
+            names.append(record["legacy_folder"])
+            continue
+        key = Path(record["asset_path"]).resolve().relative_to(run_dir.resolve()).as_posix()
+        unit_id = indexed.get(key)
+        if unit_id is None:
+            next_number += 1
+            unit_id = unit_ids.format_unit_id(next_number)
+        names.append(unit_id)
     return names
 
 
@@ -558,11 +639,20 @@ _SHORT_ROOT_HINT = (
 )
 
 
-def preflight_estate_path_ceiling(input_dir: Path, output_root: Path, engine: Path | None = None) -> tuple[bool, str]:
+def preflight_estate_path_ceiling(
+    input_dir: Path,
+    output_root: Path,
+    engine: Path | None = None,
+    unit_names: list[str] | None = None,
+) -> tuple[bool, str]:
     """Refuse an estate whose canonical downstream PBIP skeleton exceeds Desktop's ceilings."""
     try:
         candidates = _input_candidates(input_dir)
-        names = _engine_unit_names(engine, input_dir) if engine and candidates else None
+        names = (
+            unit_names
+            if unit_names is not None
+            else (_engine_unit_names(engine, input_dir) if engine and candidates else None)
+        )
         projection = project_estate_path_ceiling(output_root, names)
     except (OSError, RuntimeError, UnicodeEncodeError, ValueError) as exc:
         return False, (f"CANNOT ASSESS downstream PBIP path length ({type(exc).__name__}: {exc}). {_SHORT_ROOT_HINT}")
@@ -1127,7 +1217,7 @@ def _scope_engine_match(physical: ScopeFile, assets: list, reports: list) -> tup
     }, None
 
 
-def write_scope_bridge(bundle: Path, report: dict, inputs: ScopeInputs) -> None:
+def write_scope_bridge(bundle: Path, report: dict, inputs: ScopeInputs, engine_input_root: Path | None = None) -> None:
     """Upsert producer evidence before the existing manifest writers and final receipt seal it."""
     path = bundle / "input_manifest.json"
     manifest_doc = _scope_document(path)
@@ -1149,7 +1239,9 @@ def write_scope_bridge(bundle: Path, report: dict, inputs: ScopeInputs) -> None:
         link_issues.append("input_manifest_unavailable")
     if not all(isinstance(report.get(collection), list) for collection in ("workbooks", "datasources")):
         link_issues.append("report_collections_unavailable")
-    assets, reports = _scope_observations(manifest, report, inputs.root) if not link_issues else ([], [])
+    assets, reports = (
+        _scope_observations(manifest, report, engine_input_root or inputs.root) if not link_issues else ([], [])
+    )
     for row in bridge["occurrences"]:
         match, issue = _scope_match(row, inputs, assets, reports)
         row["issues"] = list(link_issues)
@@ -3276,6 +3368,59 @@ def _looks_like_bundle(bundle: Path) -> bool:
     )
 
 
+def _declared_display_restore_paths(bundle: Path, entries: list[dict[str, Any]]) -> set[str]:
+    """Only ID-member report files, and consolidation-bound model files, can be host restores."""
+    try:
+        rows = {row.get("name"): row for row in read_report(bundle).get("workbooks", []) if isinstance(row, dict)}
+    except (OSError, ValueError):
+        rows = {}
+    allowed = set()
+    for entry in entries:
+        if entry["source"]["kind"] != "workbook":
+            continue
+        unit_id = entry["id"]
+        allowed.add(f"pbip/{unit_id}/{unit_id}.Report/.platform")
+        model_target = engine_input_staging.consolidated_model_target(bundle, unit_id, rows.get(unit_id))
+        if model_target:
+            allowed.add(model_target)
+    return allowed
+
+
+def _attested_restore(bundle: Path, record: dict[str, Any], allowed: set[str], run_id: str, known: dict) -> bool:
+    """Whether one declaration is this run's restore of an allowed target, from its baseline to today's bytes."""
+    target = record.get("target")
+    if target not in allowed or record.get("script_identity") != engine_input_staging.RESTORE_SCRIPT_IDENTITY:
+        return False
+    if (
+        record.get("run_id") != run_id
+        or record.get("kind") != "changed"
+        or record.get("baseline_sha256") != known.get(target)
+    ):
+        return False
+    try:
+        return sha256_file(bundle / Path(target)) == record.get("expected_sha256")
+    except OSError:
+        return False
+
+
+def _without_declared_display_restores(bundle: Path, coverage: BundleCoverage, drift: BundleDrift) -> BundleDrift:
+    """Drop only the exact, indexed, run-bound restore attested by its generated-edit record (#836)."""
+    try:
+        entries = unit_ids.read_unit_index(bundle.parent)
+    except unit_ids.UnitIndexInvalid:
+        return drift
+    run_id = engine_input_staging.generated_run_id(bundle)
+    if entries is None or run_id is None:
+        return drift
+    allowed = _declared_display_restore_paths(bundle, entries)
+    restored = {
+        record["target"]
+        for record in declarations.load_generated_edit_declarations(bundle)
+        if _attested_restore(bundle, record, allowed, run_id, coverage.known)
+    }
+    return BundleDrift(sorted(set(drift.modified) - restored), drift.added, drift.missing)
+
+
 def assess_bundle_rewrite(args: argparse.Namespace, engine: Path | None) -> BundleRewriteFindings:
     """Decide, BEFORE the engine runs, whether this run may rewrite `--output`.
 
@@ -3301,10 +3446,12 @@ def assess_bundle_rewrite(args: argparse.Namespace, engine: Path | None) -> Bund
     receipt, receipt_gap = read_engine_receipt(bundle)
     coverage = assess_coverage(bundle, receipt, receipt_gap)
     recorded_version, running_version = _engine_versions(receipt, engine)
+    drift = detect_downstream_work(bundle, coverage)
+    drift = _without_declared_display_restores(bundle, coverage, drift)
     return BundleRewriteFindings(
         bundle,
         True,
-        detect_downstream_work(bundle, coverage),
+        drift,
         coverage,
         recorded_version,
         running_version,
@@ -3611,18 +3758,38 @@ def resolve_run_engine(args: argparse.Namespace) -> tuple[Path | None, int]:
         "canonical plugin" if provenance["canonical"] else "NON-CANONICAL OVERRIDE",
     )
     if args.input:
-        path_ok, path_detail = preflight_estate_path_ceiling(args.input, args.output, engine)
+        path_ok, path_detail = preflight_estate_path_ceiling(
+            args.input, args.output, engine, _provisional_unit_names(args, engine)
+        )
         print(path_detail)
         if not path_ok:
             return None, EXIT_PATH_CEILING
     return engine, EXIT_OK
 
 
-def print_dry_run(args: argparse.Namespace, engine: Path | None) -> None:
+def _unit_id_plan(
+    records: list[dict[str, Any]] | None, run_dir: Path | None, entries: list[dict[str, Any]] | None
+) -> str | None:
+    """How many selected workbooks would reuse an indexed ID and how many would reserve a new one."""
+    if records is None or run_dir is None or entries is None:
+        return None
+    indexed = {entry["key"] for entry in entries}
+    keys = [
+        Path(record["asset_path"]).resolve().relative_to(run_dir.resolve()).as_posix()
+        for record in records
+        if record["kind"] == "workbook"
+    ]
+    reuse = sum(key in indexed for key in keys)
+    return f"would reuse {reuse} / reserve {len(keys) - reuse} workbook unit ID(s); nothing is reserved in dry-run"
+
+
+def print_dry_run(args: argparse.Namespace, engine: Path | None, unit_id_plan: str | None = None) -> None:
     """Say exactly what would run, including WHICH engine and at what version."""
     version = engine_provenance(engine)["version"] if engine else None
     print(f"DRY RUN: engine={engine} version={version or '(n/a)'}")
     print(f"         input={args.input}  output={args.output}")
+    if unit_id_plan:
+        print(f"         unit-ids={unit_id_plan}")
     print(f"         approved-dax={args.approved_dax or '(none)'}")
     print(f"         storage-decision={args.storage_decision or '(none)'}")
     if getattr(args, "scope_survey", None) is not None:
@@ -3633,14 +3800,17 @@ def print_dry_run(args: argparse.Namespace, engine: Path | None) -> None:
     print("         storage decision content/policy is not validated in dry-run; the engine validates it on execution.")
 
 
-def run_engine_phase(args: argparse.Namespace, engine: Path | None, phases: list[dict]) -> int:
+def run_engine_phase(
+    args: argparse.Namespace, engine: Path | None, phases: list[dict], engine_input: Path | None = None
+) -> int:
     """Run the deterministic engine and record its timing. Returns an exit code; 0 means proceed."""
     started = time.monotonic()
     phases.append({"phase": "engine_run", "started_wall": time.time()})
+    input_dir = engine_input or args.input
     if args.storage_decision is None:
-        code, output = run_engine(engine, args.input, args.output, args.approved_dax)
+        code, output = run_engine(engine, input_dir, args.output, args.approved_dax)
     else:
-        code, output = run_engine(engine, args.input, args.output, args.approved_dax, args.storage_decision)
+        code, output = run_engine(engine, input_dir, args.output, args.approved_dax, args.storage_decision)
     elapsed = time.monotonic() - started
     phases[-1].update({"elapsed_sec": round(elapsed, 1), "exit_code": code})
     log.info("ENGINE: exit %d in %.0fs", code, elapsed)
@@ -3651,8 +3821,117 @@ def run_engine_phase(args: argparse.Namespace, engine: Path | None, phases: list
     return EXIT_OK
 
 
+class StagedUnitIds(NamedTuple):
+    """The hard-link staging one compact-ID run hands to the engine and to its post-conversion checks."""
+
+    engine_input: Path
+    entries: list[dict[str, Any]]
+    records: list[dict[str, Any]]
+    source_hashes: dict[str, str]
+
+
+def _unit_id_selection(
+    args: argparse.Namespace, engine: Path | None
+) -> tuple[int, Path | None, list[dict[str, Any]] | None, list[dict[str, Any]] | None]:
+    """Decide the unit layout after the barrier: ``(exit code, run dir, index entries, engine records)``.
+
+    Records stay None for a legacy run. Datasource folders stay legacy in this slice, so a selection
+    without a workbook has nothing to stage or reserve.
+    """
+    layout, reason, run_dir, entries = _unit_layout(args)
+    records = None
+    if layout == "workbook-ids" and run_dir is not None and entries is not None:
+        records = _engine_unit_records(engine, args.input)
+        if records is None and entries:
+            layout, reason = "refuse", "cannot establish the engine's input selection"
+        elif records is None or not any(record["kind"] == "workbook" for record in records):
+            layout, reason, records = "legacy", "no_selected_workbooks", None
+    if layout == "refuse":
+        print(f"ESTATE: UNIT_IDS - {reason}", file=sys.stderr)
+        return EXIT_UNIT_IDS, run_dir, entries, None
+    print(f"UNIT LAYOUT: {layout} ({reason})")
+    return EXIT_OK, run_dir, entries, records
+
+
+def stage_engine_input(
+    args: argparse.Namespace,
+    engine: Path | None,
+    run_dir: Path | None,
+    records: list[dict[str, Any]] | None,
+) -> tuple[StagedUnitIds | None, int]:
+    """Reserve IDs, stage hard links, prove the engine selects them, then project the exact names.
+
+    A legacy run (no records) stages nothing and returns ``(None, EXIT_OK)``.
+    """
+    if records is None or run_dir is None:
+        return None, EXIT_OK
+    try:
+        engine_input, entries, staged_records, source_hashes = engine_input_staging.stage_unit_ids(
+            Path(args.input), run_dir, records
+        )
+        staged_engine_records = _engine_unit_records(engine, engine_input)
+        if staged_engine_records is None or not engine_input_staging.verify_engine_selection(
+            staged_engine_records, staged_records
+        ):
+            raise EngineInputStagingError("engine selection of engine-input/ disagrees with the staged unit IDs")
+    except (EngineInputStagingError, unit_ids.UnitIdError, OSError, ValueError) as exc:
+        print(f"ESTATE: UNIT_IDS - {exc}", file=sys.stderr)
+        return None, EXIT_UNIT_IDS
+    path_ok, path_detail = preflight_estate_path_ceiling(
+        engine_input, args.output, engine, [record["legacy_folder"] for record in staged_engine_records]
+    )
+    print(path_detail)
+    if not path_ok:
+        return None, EXIT_PATH_CEILING
+    return StagedUnitIds(engine_input, entries, staged_records, source_hashes), EXIT_OK
+
+
+def _verify_staged_output(
+    report: dict[str, Any], staged_records: list[dict[str, Any]], source_hashes: dict[str, str]
+) -> bool:
+    """Prove that the engine consumed the staged workbooks and shared no mutated source bytes."""
+    rows = report.get("workbooks")
+    if not isinstance(rows, list):
+        return False
+    for staged in (record for record in staged_records if record["id"]):
+        matches = [
+            row
+            for row in rows
+            if isinstance(row, dict)
+            and row.get("name") == staged["id"]
+            and isinstance(row.get("source_id"), str)
+            and os.path.normcase(row["source_id"]) == os.path.normcase(staged["asset_path"])
+        ]
+        if len(matches) != 1:
+            return False
+    try:
+        return all(sha256_file(Path(path)) == digest for path, digest in source_hashes.items())
+    except OSError:
+        return False
+
+
+def _record_unit_artifacts(bundle: Path, entries: list[dict[str, Any]]) -> None:
+    """Record each ID unit's run-relative PBIP paths; the model comes from the report's own binding."""
+    for entry in entries:
+        unit_id = entry["id"]
+        unit_folder = f"{bundle.name}/pbip/{unit_id}"
+        model = engine_input_staging.bound_model(bundle, unit_id)
+        unit_ids.set_unit_artifacts(
+            bundle.parent,
+            unit_id,
+            {
+                "project_file": f"{unit_folder}/{unit_id}.pbip",
+                "report": f"{unit_folder}/{unit_id}.Report",
+                "semantic_model": model.relative_to(bundle.parent.resolve()).as_posix() if model else None,
+            },
+        )
+
+
 def produce_and_gate_output(
-    args: argparse.Namespace, engine: Path | None, phases: list[dict]
+    args: argparse.Namespace,
+    engine: Path | None,
+    phases: list[dict],
+    staged: StagedUnitIds | None = None,
 ) -> tuple[dict | None, int]:
     """Run the engine, baseline what it wrote, and refuse a tree nothing downstream may consume.
 
@@ -3668,10 +3947,11 @@ def produce_and_gate_output(
     Returns ``(report, exit code)``; the report is None only when there was no output to read.
     """
     scope_inputs = None
+    engine_input = staged.engine_input if staged is not None else None
     if not args.slice_only:
         if getattr(args, "scope_survey", None) is not None:
             scope_inputs = capture_scope_inputs(args.scope_survey, args.input)
-        code = run_engine_phase(args, engine, phases)
+        code = run_engine_phase(args, engine, phases, engine_input)
         if code != EXIT_OK:
             # A failed engine has no output to judge, so nothing is measured and no path report is
             # written - the engine's own verdict keeps precedence.
@@ -3680,8 +3960,18 @@ def produce_and_gate_output(
     report = read_report(args.output)
     if not args.slice_only:
         if scope_inputs is not None:
-            write_scope_bridge(args.output, report, scope_inputs)
+            write_scope_bridge(args.output, report, scope_inputs, engine_input)
         record_engine_output(args.output, report, phases, engine)
+        if staged is not None:
+            if not _verify_staged_output(report, staged.records, staged.source_hashes):
+                print("ESTATE: UNIT_IDS - staged inputs or engine report disagree; bundle retained", file=sys.stderr)
+                return report, EXIT_UNIT_IDS
+            try:
+                engine_input_staging.restore_display_names(Path(args.output), report, staged.entries, engine)
+                _record_unit_artifacts(Path(args.output), staged.entries)
+            except (EngineInputStagingError, unit_ids.UnitIdError, OSError, ValueError) as exc:
+                print(f"ESTATE: UNIT_IDS - {exc}", file=sys.stderr)
+                return report, EXIT_UNIT_IDS
     else:
         backfill_slice_only_baseline(args.output, report, phases)
 
@@ -3815,14 +4105,22 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-loca
     if rewrite.blocking:
         return EXIT_BUNDLE_REWRITE
 
+    unit_code, run_dir, index_entries, records = _unit_id_selection(args, engine)
+    if unit_code != EXIT_OK:
+        return unit_code
+
     if args.dry_run:
-        print_dry_run(args, engine)
+        print_dry_run(args, engine, _unit_id_plan(records, run_dir, index_entries))
         return EXIT_OK
 
     record_bundle_rewrite_acknowledgement(rewrite)
 
+    staged, staging_code = stage_engine_input(args, engine, run_dir, records)
+    if staging_code != EXIT_OK:
+        return staging_code
+
     # --- phase 1 + 1a: the engine, its recorded output, and the ceilings that output must meet --
-    report, code = produce_and_gate_output(args, engine, phases)
+    report, code = produce_and_gate_output(args, engine, phases, staged)
     if code != EXIT_OK:
         return code
 

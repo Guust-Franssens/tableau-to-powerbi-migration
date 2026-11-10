@@ -609,6 +609,11 @@ The brief is a **file**, not a conversation: it survives a dropped session and g
 the same intent. **Issue each unit's current v2 brief before packaging** at the final private path
 `<absolute-run>\assessment\briefs\<exact-unit>\migration-brief.md`, using the front door's printed
 bundle/handover/reference paths. The front door creates no brief draft or `dispatch.md`.
+For a run using compact workbook IDs, `<exact-unit>` is the printed `uNNNN` unit ID, and the brief's
+front-matter `unit` must use that same ID. Keep the run's `engine-input/` directory for the run's
+lifetime: the bundle's source and handover paths refer to those hard-linked files. The front door's
+`UNITS` file (`UNITS.md`) and `t2p units` output carry original source names, so treat them as
+private run evidence like the brief.
 Use the [current v2 schema](../scripts/README.md#current-packaged-numeric-scope-authority-363).
 Ask **once**, in one message, reusing known answers:
 
@@ -1036,8 +1041,9 @@ and 2/5 reproduced by running the command:
 | `7` | `EXIT_INVALID_PBIR` | **live** ✅ reproduced — a shipped report FAILS the first-party `powerbi-report-author validate` (measured: `PBIR_ROLE_REQUIRED_MISSING` from a stubbed calc whose projection was dropped) | read `<bundle>/pbir-validity-check.json`; **bind the stub**, do not delete the visual |
 | `8` | `EXIT_BLANK_PLACEHOLDER` | **live** ✅ reproduced — a handover-backed `BLANK()` placeholder is consumed by a report filter or visual field binding | read `<bundle>/blank-placeholder-check.json`; translate the calc or remove the consuming report dependency knowingly |
 | `9` | `EXIT_BUNDLE_REWRITE` | **pre-engine refusal** (#250) — the `--output` bundle holds work an engine re-run would delete, a **different engine version** built it, **or the barrier cannot assess either question** (missing/empty/truncated baseline, `--slice-only`-backfilled baseline, unreadable engine version) | land into a FRESH `--output`, or acknowledge with `--accept-bundle-rewrite` / `--accept-engine-version-change`; the acknowledgement, the destroyed files **and the coverage gaps** are written to `<bundle>/bundle-rewrite-acknowledgement.json` |
-| `10` | `EXIT_PATH_CEILING` | **pre-engine refusal** (#479) — the projected canonical PBIP path exceeds Power BI Desktop's measured UTF-16 file or directory ceiling, or the estate cannot be assessed safely | allocate a run under a short EXTERNAL parent instead: `python scripts/work_dirs.py <unit> --runs-parent <short-dir> --json`, then point `--output` at that run's `bundle/` and retry — `LongPathsEnabled` and `\\?\` prefixes do not make Desktop accept these paths |
+| `10` | `EXIT_PATH_CEILING` | **pre-engine refusal** (#479): the projected canonical PBIP path exceeds Power BI Desktop's measured UTF-16 file or directory ceiling, or the estate cannot be assessed safely; workbook IDs do not shorten datasource or other residual source-derived paths | allocate a run under a short EXTERNAL parent instead: `python scripts/work_dirs.py <unit> --runs-parent <short-dir> --json`, then point `--output` at that run's `bundle/` and retry: `LongPathsEnabled` and `\\?\` prefixes do not make Desktop accept these paths |
 | `11` | `EXIT_PROVENANCE_FAILED` | **post-engine refusal** (#576) — `<bundle>/source-provenance.json` could not be published, or the published result is not a pass: a failed or empty stamp, or one that contradicts itself (a `success`/`local_only` status carrying no inputs, a count that disagrees with its list) | read `<bundle>/source-provenance.json` — `phase.status` and `phase.errors[].code` name the cause; nothing downstream (adjudication, handover slices) ran |
+| `12` | `EXIT_UNIT_IDS` | **staging or identity refusal** (#836): the host cannot hard-link selected workbooks, reconcile or enumerate the `engine-input/` mirror, verify the engine's report paths and unchanged source bytes, or safely restore a declared display name | keep the bundle as evidence; resolve the named source/destination or identity discrepancy and retry the same run. No copy fallback is attempted; a hard-link probe refusal occurs before reservation, while later failures reuse already reserved IDs |
 
 ❌ **Correction: exits 5 and 6 are NOT "pending branch only"** — the previous edition said so, and
 §5.1 check 10 was written against the same stale assumption. Both shipped 2026-08-13 (#109, #111).
@@ -1170,8 +1176,12 @@ Run a dry run first and confirm the item count drops by the withheld unit's mode
 ```powershell
 python scripts\deploy_estate.py --bundle <bundle> --workspace <workspace-id> --skip-empty-models --dry-run
 # or, for one known unit:
-python scripts\deploy_estate.py --bundle <bundle> --workspace <workspace-id> --skip <unit-folder> --dry-run
+python scripts\deploy_estate.py --bundle <bundle> --workspace <workspace-id> --skip <unit-id-or-legacy-name> --dry-run
 ```
+
+On compact-ID runs, `--skip` accepts either the physical `uNNNN` unit ID or its indexed legacy name.
+The pair key and empty-model withholding stay keyed by the physical ID; only the Fabric item name and
+project placement use the legacy name.
 
 The count dropping by exactly **2** (the model and its report) is the confirmation signal — a drop of
 1, or no drop, means you withheld a model-only unit or named the wrong folder. A `--skip` name that
@@ -1277,7 +1287,7 @@ final check; moving a bound package invalidates applicable binding. Detailed
 [authority/exit contract](reference-readiness.md#final-package-start_ready-562-622).
 
 **`--out` now names the canonical `packages/` directory itself.** Each unit lands directly at
-`packages/<Unit>/`. Both gates recognize a target beneath `packages/` as package-shaped even if an
+`packages/<Unit>/`. On a compact-ID run, `<Unit>` is the `uNNNN` unit ID. Both gates recognize a target beneath `packages/` as package-shaped even if an
 interrupted assembly has not written `package-manifest.json`, so it never borrows the run's flat
 `oracle/` or `reference/` evidence. A completed package's marker preserves the same isolation when
 the package is copied elsewhere. Nested `packages/<batch>/<Unit>/` layouts remain readable for
@@ -2130,12 +2140,12 @@ Placeholders used in this document — and where the real value lives:
 
 `—` means that script cannot return that exit code.
 
-| script | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| `preflight.ps1` | ready | critical missing | — | — | — | — | — | — | — | — | — | — |
-| `assess_estate.py` | assessed (may be secondary-degraded) | nothing assessed · sign-in refused (raises) | usage | **a PRIMARY listing is incomplete** | — | — | — | — | — | — | — | — |
-| `run_estate.py` | READY | engine failed | usage | **DoD failed** | approval collision | non-canonical engine | **empty model** | **invalid PBIR** | **BLANK() placeholder** | **bundle rewrite refused** | **path ceiling / cannot assess** | **provenance not published / not a pass** |
-| `deploy_estate.py` | all deployed | item failed / refused | preflight | **incomplete by skip** | — | — | — | — | — | — | — | — |
+| script | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| `preflight.ps1` | ready | critical missing | — | — | — | — | — | — | — | — | — | — | — |
+| `assess_estate.py` | assessed (may be secondary-degraded) | nothing assessed · sign-in refused (raises) | usage | **a PRIMARY listing is incomplete** | — | — | — | — | — | — | — | — | — |
+| `run_estate.py` | READY | engine failed | usage | **DoD failed** | approval collision | non-canonical engine | **empty model** | **invalid PBIR** | **BLANK() placeholder** | **bundle rewrite refused** | **path ceiling / cannot assess** | **provenance not published / not a pass** | **unit-ID staging / identity refused** |
+| `deploy_estate.py` | all deployed | item failed / refused | preflight | **incomplete by skip** | — | — | — | — | — | — | — | — | — |
 
 One run returns **one** code, in the order collision → DoD → invalid PBIR → BLANK() placeholder →
 empty model — so a bundle can trip a gate the exit code never mentions. Read the log body,

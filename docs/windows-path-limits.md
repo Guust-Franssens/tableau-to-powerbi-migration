@@ -131,6 +131,17 @@ The two counts reconcile exactly: **82 files over 259 + 101 directories over 247
 file-only measurement reports 80; the extra 103 are the directory rule, which §4 shows is the one
 that fails *silently*.
 
+Eligible new runs now use workbook-only compact IDs as an interim structural fix: `run_estate.py`
+hard-links each engine-selected workbook into the run's persistent `engine-input/` mirror as
+`<luid>_uNNNN.twb[x]` (or `uNNNN.twb[x]` without a LUID). This shortens duplicated workbook-folder
+segments without changing the engine or moving output. The working PBIR report `.platform` display
+name is restored with a generated-edit declaration; pristine `reports/` is not changed. Datasource
+names, single-source caption-derived model folders, table names and resource names remain unchanged,
+so residual paths can still exceed Desktop's limits. Exit 10 remains the path-ceiling refusal; exit
+12 refuses staging or identity disagreements. Existing engine output without a unit index stays
+legacy, and ID staging never falls back to copying. Keep `engine-input/` for the run's lifetime:
+generated source paths point into it.
+
 ### 3 of 51 units are already over the ceiling as they sit
 
 | unit | paths over | longest tail | root budget |
@@ -370,6 +381,11 @@ A short **physical** root is still the fix: allocate with
 and re-run the engine into it. The alias is for the case where the tree already exists and relocating
 or rebuilding it is blocked, and you need Desktop only to open, refresh or capture.
 
+Compact workbook unit IDs (#836) do not retire either fallback. They shorten only the workbook folder
+segments of an eligible new run; a long datasource name, a caption-derived model folder or any other
+residual source-derived path can still exceed the ceilings, and then a short physical root (or, for an
+existing tree, this alias) is still the route.
+
 ### The safe sequence
 
 ⚠️ Two things this sequence is deliberately explicit about, both measured 2026-09-09 on this host:
@@ -433,6 +449,14 @@ it somewhere else. So the check answers **both** questions:
 **Why absolute stays blocking:** it is not hypothetical. At its current location the estate bundle
 breaks git *today* (exit 128, or a silent partial commit) and Desktop refuses it. "Where it sits" is a
 real place where real tools run — this repo's own build root is 90 characters.
+
+For `run_estate.py`, the pre-engine projection is provisional: an eligible new run projects workbook
+units under IDs while datasource names retain their legacy paths. After hard-link staging, a
+definitive projection checks the exact staged names; after conversion, the unchanged emitted-path
+gate measures the whole bundle, including generated-edit declaration and temporary-write paths.
+Exit 12 is separate from the path gate: it means the host could not establish the hard-link staging
+or verify that the engine consumed the selected IDs and source bytes. A short physical root remains
+necessary for any datasource or residual source-derived path that still exceeds the ceilings.
 
 ⚠️ **The root budget is a minimum across both ceilings, not `259 − longest_tail`.** A short filename
 makes the stricter **directory** rule decisive, and that is the ordinary PBIR shape rather than a
