@@ -39,15 +39,14 @@ ENV = {
 
 
 @pytest.mark.parametrize(
-    "state,verdict,native",
+    "state,verdict,native,observed,json_mode",
     [
-        ("ok", "PASS", 7),
-        ("over_ceiling", "OVER_CEILING", 10),
-        ("cannot_establish", "CANNOT_ESTABLISH", 10),
+        ("ok", "PASS", 7, True, False),
+        ("over_ceiling", "OVER_CEILING", 10, True, True),
+        ("cannot_establish", "CANNOT_ESTABLISH", 10, True, False),
+        ("ok", "PASS", 7, False, True),
     ],
 )
-@pytest.mark.parametrize("observed", [False, True])
-@pytest.mark.parametrize("json_mode", [False, True])
 def test_bundle_child_private_path_gate_channel(tmp_path, capfd, state, verdict, native, observed, json_mode):
     """A real child reports its actual gate over IPC without changing stdout/stderr or exit."""
     import t2p

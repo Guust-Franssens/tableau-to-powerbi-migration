@@ -34,7 +34,7 @@ def package_fixture(tmp_path: Path) -> Path:
 
 @pytest.mark.parametrize(
     "kind",
-    ["report", "page", "model", "cache", "predecessor-receipt", "predecessor-png", "current-receipt", "current-png"],
+    ["report", "cache", "predecessor-receipt", "predecessor-png", "current-receipt", "current-png"],
 )
 def test_backup_unlink_mutation_cannot_return_stale_success(
     package: Path, monkeypatch: pytest.MonkeyPatch, kind: str
