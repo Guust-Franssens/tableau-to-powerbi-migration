@@ -871,6 +871,10 @@ def test_credential_string_cannot_reach_a_pending_receipt_write(package: Path) -
     [
         "Authorization: fake-review-token",
         "Authorization%3A%20fake-review-token",
+        "token=synthetic-token",
+        "password=synthetic-password",
+        "Bearer fake-token",
+        "x-tableau-auth: synthetic-session",
         "https://customer.example/site/unit",
         "prefix " + "X:" + chr(92) + "private" + chr(92) + "file",
         "two\nlines",
