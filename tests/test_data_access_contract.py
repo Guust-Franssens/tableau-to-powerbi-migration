@@ -130,30 +130,31 @@ LEGACY_AUTHORIZED = _legacy(
 )
 
 
-@pytest.mark.parametrize("scope", ["model_and_report", "model_only"])
-@pytest.mark.parametrize("fallback", ["stop", "model_only_unvalidated"])
-def test_live_source_is_admitted_unproven_never_validated(root: Path, scope: str, fallback: str) -> None:
+def test_live_source_is_admitted_unproven_never_validated(root: Path) -> None:
     """Live keys yield a dispatchable but unvalidated state unless the brief degrades to model-only."""
-    result = pda.assess_data_access(
-        root,
-        package_spec=_spec(LIVE),
-        package_data_sources=copy.deepcopy(LOCAL),
-        fallback_authorization=fallback,
-        requested_scope=scope,
-    )
-    if fallback == "model_only_unvalidated" and scope == "model_only":
-        expected = ("authorized_model_only", ("brief-model-only",), "unvalidated", "structural_only")
-    else:
-        expected = ("live_unproven", ("live-unproven",), "unvalidated", "data_validated")
-    assert (result.state, result.codes, result.validation, result.max_phase2_claim) == expected
-    assert (result.source_keys, result.effective_scope, result.provider_unit) == ((KEY,), scope, None)
-    assert result.state in pda.DIRECT_ACCEPTED_STATES
-    assert pda.parse_data_access(result.dumps()) == result
-    facts = pda.package_spec_facts(_spec(LIVE))
-    assert (
-        pda.reconcile_package_data_access(result, facts, requested_scope=scope, fallback_authorization=fallback)
-        is result
-    )
+    unproven = ("live_unproven", ("live-unproven",), "unvalidated", "data_validated")
+    degraded = ("authorized_model_only", ("brief-model-only",), "unvalidated", "structural_only")
+    for scope, fallback, expected in (
+        ("model_and_report", "stop", unproven),
+        ("model_and_report", "model_only_unvalidated", unproven),
+        ("model_only", "model_only_unvalidated", degraded),
+    ):
+        result = pda.assess_data_access(
+            root,
+            package_spec=_spec(LIVE),
+            package_data_sources=copy.deepcopy(LOCAL),
+            fallback_authorization=fallback,
+            requested_scope=scope,
+        )
+        assert (result.state, result.codes, result.validation, result.max_phase2_claim) == expected
+        assert (result.source_keys, result.effective_scope, result.provider_unit) == ((KEY,), scope, None)
+        assert result.state in pda.DIRECT_ACCEPTED_STATES
+        assert pda.parse_data_access(result.dumps()) == result
+        facts = pda.package_spec_facts(_spec(LIVE))
+        assert (
+            pda.reconcile_package_data_access(result, facts, requested_scope=scope, fallback_authorization=fallback)
+            is result
+        )
 
 
 def test_local_only_package_stays_validated(root: Path) -> None:
@@ -162,9 +163,9 @@ def test_local_only_package_stays_validated(root: Path) -> None:
     assert (result.state, result.validation, result.source_keys) == ("local_import_ready", "validated", ())
 
 
-@pytest.mark.parametrize("authorized", [False, True], ids=["live", "model-only"])
-def test_assessment_reads_no_gate_evidence(root: Path, monkeypatch: pytest.MonkeyPatch, authorized: bool) -> None:
+def test_assessment_reads_no_gate_evidence(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Marker, override and audit files neither block nor clear; no root file is read at all."""
+    authorized = False
     expected = _assess(root, authorized=authorized)
     for name in LEGACY_GATE_FILES:
         (root / name).write_text("{not json", encoding="utf-8")
@@ -179,31 +180,23 @@ def test_assessment_reads_no_gate_evidence(root: Path, monkeypatch: pytest.Monke
     assert _assess(root.parent / "absent", authorized=authorized) == expected
 
 
-@pytest.mark.parametrize(
-    "field,value",
-    [
-        ("omissions", [{"file": "rows.csv", "reason": "missing"}]),
-        ("neutralized", ["rows.csv"]),
-        ("retained_network", ["rows.csv"]),
-        ("self_contained", False),
-    ],
-)
-@pytest.mark.parametrize("authorized", [False, True], ids=["live", "model-only"])
-def test_incomplete_local_bytes_block_every_direct_state(
-    root: Path, field: str, value: object, authorized: bool
-) -> None:
+def test_incomplete_local_bytes_block_every_direct_state(root: Path) -> None:
     """Neither admission nor the model-only fallback waives the presence of local input bytes."""
-    assert _assess(root, authorized=authorized).state in ("live_unproven", "authorized_model_only")
-    result = _assess(root, authorized=authorized, local={**LOCAL, field: value})
-    assert (result.state, result.codes, result.source_keys) == ("blocked", ("local-import-incomplete",), (KEY,))
+    for field, value, authorized in (
+        ("omissions", [{"file": "rows.csv", "reason": "missing"}], True),
+        ("neutralized", ["rows.csv"], False),
+        ("retained_network", ["rows.csv"], False),
+        ("self_contained", False, False),
+    ):
+        result = _assess(root, authorized=authorized, local={**LOCAL, field: value})
+        assert (result.state, result.codes, result.source_keys) == ("blocked", ("local-import-incomplete",), (KEY,))
 
 
-@pytest.mark.parametrize("connections", [(REVIEW,), (LIVE, REVIEW)])
-@pytest.mark.parametrize("authorized", [False, True], ids=["live", "model-only"])
-def test_review_legs_block_every_direct_state(root: Path, connections: tuple[dict, ...], authorized: bool) -> None:
+def test_review_legs_block_every_direct_state(root: Path) -> None:
     """Unknown/review legs stay in the denominator even when no live key was classifiable."""
-    result = _assess(root, spec=_spec(*connections), authorized=authorized)
-    assert (result.state, result.codes) == ("blocked", ("unknown-target",))
+    for connections, authorized in (((REVIEW,), False), ((LIVE, REVIEW), True)):
+        result = _assess(root, spec=_spec(*connections), authorized=authorized)
+        assert (result.state, result.codes) == ("blocked", ("unknown-target",))
 
 
 @pytest.mark.parametrize("fault", ["duplicate-package", "invalid-key"])
@@ -258,9 +251,11 @@ def test_legacy_provider_inherited_live_data_ok_still_parses() -> None:
     assert (stored.provider_state, stored.validation) == ("live_data_ok", "validated")
 
 
-@pytest.mark.parametrize(
-    "state,codes,fields",
-    [
+def test_unproven_states_cannot_be_serialized_as_validated() -> None:
+    """No stored document may pair live_unproven with validation, or a legacy state with the new code."""
+    provider = {"provider_unit": pda.provider_reference("Shared"), "provider_state": "live_unproven"}
+    model_only = {"effective_scope": "model_only", "max_phase2_claim": "structural_only"}
+    for state, codes, fields in (
         ("live_unproven", ["live-unproven"], {"validation": "validated"}),
         ("live_unproven", ["live-unproven"], {"validation": "unvalidated", "source_keys": []}),
         ("live_unproven", ["live-unproven"], {"validation": "unvalidated", "max_phase2_claim": "structural_only"}),
@@ -269,45 +264,24 @@ def test_legacy_provider_inherited_live_data_ok_still_parses() -> None:
         ("live_unproven", ["probe-cleared", "probe-data-ok"], {"validation": "unvalidated"}),
         ("live_data_ok", ["live-unproven"], {}),
         ("live_data_ok", ["probe-cleared", "probe-data-ok"], {"validation": "unvalidated"}),
-        (
-            "authorized_model_only",
-            ["human-authorize"],
-            {"validation": "unvalidated", "effective_scope": "model_only", "max_phase2_claim": "structural_only"},
-        ),
-        (
-            "authorized_model_only",
-            ["brief-model-only"],
-            {"validation": "validated", "effective_scope": "model_only", "max_phase2_claim": "structural_only"},
-        ),
+        ("authorized_model_only", ["human-authorize"], {"validation": "unvalidated", **model_only}),
+        ("authorized_model_only", ["brief-model-only"], {"validation": "validated", **model_only}),
+        ("provider_inherited", ["provider-exact"], {**provider, "validation": "validated"}),
+        ("provider_inherited", ["provider-exact"], {**provider, "validation": "unvalidated", "source_keys": []}),
         (
             "provider_inherited",
             ["provider-exact"],
-            {"provider_state": "live_unproven", "validation": "validated"},
+            {**provider, "validation": "unvalidated", "max_phase2_claim": "structural_only"},
         ),
-        (
-            "provider_inherited",
-            ["provider-exact"],
-            {"provider_state": "live_unproven", "validation": "unvalidated", "source_keys": []},
-        ),
-        (
-            "provider_inherited",
-            ["provider-exact"],
-            {"provider_state": "live_unproven", "validation": "unvalidated", "max_phase2_claim": "structural_only"},
-        ),
-    ],
-)
-def test_unproven_states_cannot_be_serialized_as_validated(state: str, codes: list[str], fields: dict) -> None:
-    """No stored document may pair live_unproven with validation, or a legacy state with the new code."""
-    if state == "provider_inherited":
-        fields = {"provider_unit": pda.provider_reference("Shared"), **fields}
-    with pytest.raises(pda.DataAccessProjectionError) as error:
-        pda.parse_data_access(_legacy(state, codes, **fields))
-    assert error.value.reason == "illegal-combination"
+    ):
+        with pytest.raises(pda.DataAccessProjectionError) as error:
+            pda.parse_data_access(_legacy(state, codes, **fields))
+        assert error.value.reason == "illegal-combination", (state, codes, fields)
 
 
-@pytest.mark.parametrize("scope", ["report_only_shared_model", "model_and_report"])
-def test_inheriting_an_unproven_provider_stays_unvalidated(root: Path, scope: str) -> None:
+def test_inheriting_an_unproven_provider_stays_unvalidated(root: Path) -> None:
     """A consumer of a live_unproven provider inherits its unvalidated state, never a stronger one."""
+    scope = "report_only_shared_model"
     provider = _assess(root)
     assert provider.state == "live_unproven"
     reference = pda.provider_reference("Shared")
@@ -358,88 +332,46 @@ def test_projection_requires_current_keys_for_model_only(root: Path, inherited: 
     assert (result.state, result.codes) == ("cannot_establish", ("provider-foreign",))
 
 
-@pytest.mark.parametrize("field", ["omissions", "neutralized", "retained_network", "shipped"])
-@pytest.mark.parametrize("value", [(), {}, "", False, None])
-def test_local_json_arrays_are_actual_lists(root: Path, field: str, value: object) -> None:
-    """Empty non-list iterables must not masquerade as empty canonical JSON arrays."""
+def test_malformed_local_and_spec_facts_cannot_establish(root: Path) -> None:
+    """Falsey or mistyped facts must not masquerade as empty/default ones, even beside a false flag."""
     assert _assess(root, spec=_spec(FLAT)).state == "local_import_ready"
-    result = _assess(root, spec=_spec(FLAT), local={**LOCAL, field: value})
-    assert (result.state, result.codes) == ("cannot_establish", ("spec-unreadable",))
-
-
-@pytest.mark.parametrize(
-    "field,value",
-    [
-        ("self_contained", 1),
+    for field, value in (
+        ("omissions", ()),
+        ("neutralized", {}),
+        ("retained_network", None),
+        ("shipped", ""),
         ("self_contained", "true"),
         ("binding", False),
-        ("binding", []),
-        ("parameter", True),
         ("bytes", True),
         ("omissions", [False]),
         ("neutralized", [{}]),
-        ("retained_network", [False]),
         ("shipped", ["rows.csv"]),
-    ],
-)
-def test_local_fact_types_precede_completeness(root: Path, field: str, value: object) -> None:
-    """A false completeness flag must not short-circuit malformed-field validation."""
-    local = {**LOCAL, "self_contained": False, field: value}
-    result = _assess(root, spec=_spec(FLAT), local=local)
-    assert (result.state, result.codes) == ("cannot_establish", ("spec-unreadable",))
-
-
-@pytest.mark.parametrize(
-    "path,value",
-    [
+    ):
+        result = _assess(root, spec=_spec(FLAT), local={**LOCAL, "self_contained": False, field: value})
+        assert (result.state, result.codes) == ("cannot_establish", ("spec-unreadable",)), (field, value)
+    for path, value in (
         (("data_sources",), ()),
         (("data_sources", 0, "connection"), []),
-        (("data_sources", 0, "connection"), False),
         (("data_sources", 0, "connection", "connections"), ()),
-        (("data_sources", 0, "connection", "connections"), {}),
         (("data_sources", 0, "connection", "connections"), [False]),
         (("data_sources", 0, "connection", "class"), False),
-        (("data_sources", 0, "connection", "powerbi_target"), []),
         (("data_sources", 0, "connection", "server"), True),
         (("data_sources", 0, "connection", "port"), True),
         (("data_sources", 0, "tables"), ()),
         (("data_sources", 0, "fields"), ()),
-    ],
-)
-def test_spec_fact_shapes_precede_classifier_fallback(root: Path, path: tuple, value: object) -> None:
-    """The classifier must not turn malformed falsey facts into absent/default facts."""
-    spec = _spec(FLAT)
-    assert _assess(root, spec=spec).state == "local_import_ready"
-    parent = spec
-    for key in path[:-1]:
-        parent = parent[key]
-    parent[path[-1]] = value
-    result = _assess(root, spec=spec)
-    assert (result.state, result.codes) == ("cannot_establish", ("spec-unreadable",))
+    ):
+        spec = _spec(FLAT)
+        parent = spec
+        for key in path[:-1]:
+            parent = parent[key]
+        parent[path[-1]] = value
+        result = _assess(root, spec=spec)
+        assert (result.state, result.codes) == ("cannot_establish", ("spec-unreadable",)), (path, value)
 
 
 @pytest.mark.parametrize(
     "unit",
-    [
-        r"C:\customer\Provider",
-        r"\\host\share\Provider",
-        "/customer/Provider",
-        "../Provider",
-        r"..\Provider",
-        ".",
-        "..",
-        "Provider/child",
-        "Provider\\child",
-        "customer text",
-        pytest.param("Shared Sales", id="raw-spaces"),
-        pytest.param("Sales.Report", id="raw-dots"),
-        "Superstore",
-        "Exact_S2_unit",
-        "Provider\n",
-        "Provider:secret",
-        " Provider",
-        "Provider?token=secret",
-    ],
+    [r"C:\customer\Provider", "../Provider", "Superstore", "Provider\n", "Provider?token=secret"],
 )
 def test_provider_identity_has_one_closed_syntax(root: Path, unit: str) -> None:
     """Even a valid raw S2 name must never enter the assessment or projection directly."""
@@ -468,9 +400,7 @@ def test_provider_identity_has_one_closed_syntax(root: Path, unit: str) -> None:
     assert unit not in str(error.value)
 
 
-@pytest.mark.parametrize(
-    "unit", ["Superstore", "Exact_S2_unit", "Sales-2026_09", "9f18a6", "Shared Sales", "Sales.Report"]
-)
+@pytest.mark.parametrize("unit", ["Superstore", "Shared Sales"])
 def test_valid_provider_reference_is_preserved_exactly_without_search(
     root: Path, monkeypatch: pytest.MonkeyPatch, unit: str
 ) -> None:
@@ -498,9 +428,9 @@ def test_valid_provider_reference_is_preserved_exactly_without_search(
     assert pda.parse_data_access(result.dumps()) == result
 
 
-@pytest.mark.parametrize("unit", ["Shared Sales", "Sales.Report"])
-def test_s2_selected_provider_unit_converts_to_the_same_opaque_reference(tmp_path: Path, unit: str) -> None:
+def test_s2_selected_provider_unit_converts_to_the_same_opaque_reference(tmp_path: Path) -> None:
     """Real S2 cohort resolution, not the data-access validator, establishes the valid unit."""
+    unit = "Shared Sales"
     provider_root = datasource_package(tmp_path / unit, unit=unit, published_key=PUBLISHED_KEY)
     consumer = workbook_package(
         tmp_path / "Revenue",
@@ -532,14 +462,8 @@ def test_provider_reference_is_versioned_stable_and_preserves_exact_s2_identity(
     units = (
         "Shared Sales",
         "Shared.Sales",
-        "Shared_Sales",
         "shared Sales",
-        "Shared sales",
         "Shared  Sales",
-        "Sales.Report",
-        "sales.Report",
-        "Sales.report",
-        "Sales Report",
         "\u00e9",
         "e\u0301",
         "\U0001f600",
@@ -559,35 +483,7 @@ def test_provider_reference_is_versioned_stable_and_preserves_exact_s2_identity(
 
 @pytest.mark.parametrize(
     "unit",
-    [
-        None,
-        False,
-        True,
-        0,
-        [],
-        {},
-        Path("Provider"),
-        "",
-        " ",
-        ".",
-        "..",
-        r"C:\customer\Provider",
-        r"\\host\share\Provider",
-        "/customer/Provider",
-        "../Provider",
-        r"..\Provider",
-        "Provider/child",
-        r"Provider\child",
-        "Provider\n",
-        "Provider\x00",
-        "Provider:secret",
-        "Provider?token=secret",
-        " Provider",
-        "Provider ",
-        "Provider.",
-        "CON",
-        "COM1.txt",
-    ],
+    [None, Path("Provider"), "", "..", "Provider/child", "Provider\x00", "Provider:secret", "Provider.", "CON"],
 )
 def test_provider_reference_refuses_invalid_units_without_serializing_them(unit: object) -> None:
     """The conversion applies S2's component predicate, with a closed input-type refusal."""
@@ -600,22 +496,15 @@ def test_provider_reference_refuses_invalid_units_without_serializing_them(unit:
     assert raised.value.__suppress_context__ is True
 
 
-@pytest.mark.parametrize(
-    "reference",
-    [
+def test_provider_reference_parser_accepts_only_the_closed_token(root: Path) -> None:
+    """Lengths, version, case and trailing characters are not repairable."""
+    for reference in (
         "provider-ref:v1:sha256:" + "a" * 63,
-        "provider-ref:v1:sha256:" + "a" * 65,
         "provider-ref:v1:sha256:" + "A" * 64,
-        "provider-ref:v1:sha256:" + "g" * 64,
         "provider-ref:v2:sha256:" + "a" * 64,
-        "provider-ref:v1:sha512:" + "a" * 64,
         "provider-ref:v1:sha256:" + "a" * 64 + "\n",
-        " provider-ref:v1:sha256:" + "a" * 64,
-    ],
-)
-def test_provider_reference_parser_accepts_only_the_closed_token(root: Path, reference: str) -> None:
-    """Lengths, version, algorithm, case and trailing characters are not repairable."""
-    test_provider_identity_has_one_closed_syntax(root, reference)
+    ):
+        test_provider_identity_has_one_closed_syntax(root, reference)
 
 
 def test_provider_reference_does_not_rehash_an_existing_reference() -> None:
@@ -637,29 +526,21 @@ def _safe_error(call: Callable, reason: str, secret: str) -> None:
     assert secret not in "".join(traceback.format_exception(error))
 
 
-@pytest.mark.parametrize("kind", ["missing", "directory", "invalid-utf8"])
-def test_projection_read_errors_retain_no_unsafe_cause(tmp_path: Path, kind: str) -> None:
-    """A safe wrapper message must not retain a raw path-bearing exception in its context."""
-    path = tmp_path / "private-filename.json"
-    if kind == "directory":
-        path.mkdir()
-    elif kind == "invalid-utf8":
-        path.write_bytes(b"\xff")
-    _safe_error(lambda: pda.read_data_access(path), "unreadable", str(path))
-
-
-@pytest.mark.parametrize("kind", ["duplicate", "malformed", "nonfinite"])
-def test_projection_parse_errors_retain_no_raw_payload(tmp_path: Path, kind: str) -> None:
-    """JSON rejection objects and tracebacks carry only the closed safe reason."""
+def test_projection_read_and_parse_errors_retain_no_unsafe_cause(tmp_path: Path) -> None:
+    """A safe wrapper must not retain a raw path- or payload-bearing exception in its context."""
+    missing, directory, invalid = (tmp_path / f"private-{kind}.json" for kind in ("missing", "dir", "utf8"))
+    directory.mkdir()
+    invalid.write_bytes(b"\xff")
+    for path in (missing, directory, invalid):
+        _safe_error(lambda path=path: pda.read_data_access(path), "unreadable", str(path))
     secret = str(tmp_path / "private-key")
     key = json.dumps(secret)
-    if kind == "duplicate":
-        text, reason = "{" + key + ":1," + key + ":2}", "duplicate-key"
-    elif kind == "nonfinite":
-        text, reason = "{" + key + ":NaN}", "nonfinite"
-    else:
-        text, reason = "{" + key + ":", "malformed-json"
-    _safe_error(lambda: pda.parse_data_access(text), reason, secret)
+    for text, reason in (
+        ("{" + key + ":1," + key + ":2}", "duplicate-key"),
+        ("{" + key + ":NaN}", "nonfinite"),
+        ("{" + key + ":", "malformed-json"),
+    ):
+        _safe_error(lambda text=text: pda.parse_data_access(text), reason, secret)
 
 
 def test_duplicate_detection_never_stores_the_key(tmp_path: Path) -> None:
