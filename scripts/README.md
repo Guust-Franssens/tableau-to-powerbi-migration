@@ -8,6 +8,12 @@ Conventions: Python first (`.ps1` only where Windows-specific APIs make it unavo
 `purpose:` / `usage:` header docstring in every file, `ruff` + `pylint` clean. See
 [`CONTRIBUTING.md`](../CONTRIBUTING.md).
 
+## Repository automation
+
+| Script | What it does | Called by |
+|---|---|---|
+| `issue_intake_guard.py` | Clears stale routing/readiness before classification and refuses changed or closed issue targets before publication. Uses only the triggering issue and a fixed label set. | `.github/workflows/issue-intake.md`; not a migration command |
+
 ## Run every session / every migration
 
 At session start, run the direct command first:

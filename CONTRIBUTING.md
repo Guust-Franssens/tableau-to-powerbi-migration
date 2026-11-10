@@ -44,6 +44,43 @@ Approval removes `status:needs-decision` and adds `status:plan-approved`; readin
 `status:ready-for-implementation` **without removing approval**. A new blocker removes readiness;
 an invalidated plan also loses approval and returns to `status:needs-decision`.
 
+### Automated issue intake
+
+[Issue intake](.github/workflows/issue-intake.md) reviews opened, edited and reopened issues,
+including those filed through `gh issue create`. Use the form's headings in CLI-created issues:
+`Observed problem / current journey`, `Desired outcome / default`, optional `Plan seeds (optional)`,
+and `Privacy confirmation` with the form's checked privacy statement. The workflow comments on
+missing information; it never rewrites the issue body or approves a plan.
+
+Routing is advisory: `env:cloud-ok` means bounded offline implementation/validation appears possible;
+`env:local-only` includes unknown scope and carries `needs:desktop`, `needs:tableau-server`,
+`needs:engine-plugin`, `needs:credentials`, `needs:protected-files`, or `needs:details`.
+A mention of Desktop alone is not a local dependency. Persona/shared-convention/hash-pin edits stay
+local. The fixed labels are created on first use; no existing-issue backfill runs.
+
+**Editing or reopening an issue clears implementation readiness.** Every intake first clears old
+routing labels, so a failed run leaves the issue unclassified, not falsely cloud-ready. After review,
+a maintainer can reapply `status:ready-for-implementation`; this triggers fresh classification and
+may assign Copilot only if `env:cloud-ok`, `status:plan-approved` and readiness are all still present.
+The agent cannot grant any status label. Existing work/assignees should be resolved before rearming.
+Concurrent runs are superseded; changed/closed targets refuse publication. GitHub API operations
+are not transactional, and classification does not prove live-source access or correctness.
+
+**Activation requires human setup.** For this personal repository, configure `COPILOT_GITHUB_TOKEN`
+for inference (fine-grained PAT, account-level Copilot Requests permission) and `GH_AW_AGENT_TOKEN`
+for assignment (repository Actions, Contents, Issues and Pull requests read/write, Metadata read).
+Scope the latter to this repository. Add secrets through GitHub Settings, never in issue text or
+commands containing their values. Assignment credentials are not exposed to the agent.
+See [gh-aw authentication](https://github.github.com/gh-aw/reference/auth/) and
+[assignment requirements](https://github.github.com/gh-aw/reference/copilot-cloud-agent/).
+Inference and coding consume Copilot usage. Missing/expired credentials need a human; a green run
+alone does not prove assignment. Check the assignment summary and actual assignee.
+
+Edit the Markdown workflow, never its generated `.lock.yml`. Use gh-aw **v1.0.1** and run
+`gh aw compile issue-intake --strict --validate --no-check-update`; commit generated changes.
+The dedicated compile check detects drift, and ordinary pytest covers the issue-state guard.
+Disable the **Issue intake** Actions workflow to pause automation.
+
 ### Narrow mechanical exception
 
 A mechanical change is **byte-local**, with no runtime, policy, authority, safety, privacy, fidelity,
