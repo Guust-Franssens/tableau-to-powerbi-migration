@@ -26,6 +26,7 @@ import check_migration_progress as cmp  # noqa: E402  # pylint: disable=wrong-im
 import capture_tableau_reference as capture  # noqa: E402  # pylint: disable=wrong-import-position
 import check_reference_readiness as crr  # noqa: E402  # pylint: disable=wrong-import-position
 import check_unit as cu  # noqa: E402  # pylint: disable=wrong-import-position
+import host_paths as hp  # noqa: E402  # pylint: disable=wrong-import-position
 import manifest_scope as ms  # noqa: E402  # pylint: disable=wrong-import-position
 import package_unit as pkg  # noqa: E402  # pylint: disable=wrong-import-position
 import path_flavour as pf  # noqa: E402  # pylint: disable=wrong-import-position
@@ -2460,6 +2461,50 @@ def test_a_relative_path_escaping_the_capture_root_is_refused(tmp_path: Path, de
     )
 
 
+def test_a_DRIVE_RELATIVE_path_is_refused_by_the_PARSE_half_alone(tmp_path: Path) -> None:
+    """A drive-relative path (`C:secret.png`) is invisible to containment, so only the parse half refuses it."""
+    declared = "C:secret.png"
+    assert pkg._declares_non_relative(declared) is True  # pylint: disable=protected-access
+    assert hp.discloses_host_location(declared) is False, (
+        "the containment half must be silent, or this isolates nothing"
+    )
+
+    bundle, oracle = _bundle(tmp_path)
+    manifest = json.loads((oracle / "oracle-manifest.json").read_text(encoding="utf-8"))
+    manifest["views"][0]["image"] = {"status": "ok", "path": declared, "sha256": "x", "bytes": 3}
+    (oracle / "oracle-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    _package(tmp_path, bundle, oracle)
+
+    shipped = json.loads((_out(tmp_path) / UNIT / "oracle" / "oracle-manifest.json").read_text(encoding="utf-8"))
+    leg = shipped["views"][0]["image"]
+    assert leg["status"] == pkg.OMITTED_STATUS
+    assert leg["path"] == pkg.REFUSED_PATH, "the declared location must not be echoed back"
+    assert "non-relative" in leg["packaging_reason"], "only the PARSE half can diagnose this one"
+    assert declared not in json.dumps(shipped)
+
+
+def test_a_SINGLE_ROOTED_backslash_path_is_refused_by_the_PARSE_half_alone(tmp_path: Path) -> None:
+    """Issue #516: a single-backslash-rooted path has no drive, so only the parse half refuses it."""
+    declared = "\\Finance\\report.log"
+    assert pkg._declares_non_relative(declared) is True  # pylint: disable=protected-access
+    assert hp.discloses_host_location(declared) is False, (
+        "the containment half must be silent, or this isolates nothing"
+    )
+
+    bundle, oracle = _bundle(tmp_path)
+    manifest = json.loads((oracle / "oracle-manifest.json").read_text(encoding="utf-8"))
+    manifest["views"][0]["image"] = {"status": "ok", "path": declared, "sha256": "x", "bytes": 3}
+    (oracle / "oracle-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    _package(tmp_path, bundle, oracle)
+
+    shipped = json.loads((_out(tmp_path) / UNIT / "oracle" / "oracle-manifest.json").read_text(encoding="utf-8"))
+    leg = shipped["views"][0]["image"]
+    assert leg["status"] == pkg.OMITTED_STATUS
+    assert leg["path"] == pkg.REFUSED_PATH, "the declared location must not be echoed back"
+    assert "non-relative" in leg["packaging_reason"], "only the PARSE half can diagnose this one"
+    assert declared not in json.dumps(shipped)
+
+
 def test_a_LEGACY_data_leg_cannot_ship_a_host_path_under_retained_path(tmp_path: Path) -> None:
     """#480 round 4, finding 1. The containment guard was keyed to a FIELD NAME, not to the manifest. See #461."""
     bundle, oracle = _bundle(tmp_path)
@@ -2520,6 +2565,24 @@ def test_the_ORACLE_RESULT_itself_is_contained_not_only_the_scoped_manifest(tmp_
     ]
     assert leaked == [], f"no shipped artifact may carry the account name: {leaked}"
     assert not [path for path in root.rglob("*") if account in path.name], "nor may a filename stem"
+
+
+def test_a_host_path_WRAPPED_IN_PROSE_is_redacted_in_the_HANDOVER_slice_too(tmp_path: Path) -> None:
+    """Host paths inside prose, including non-profile roots, are redacted in the handover slice."""
+    bundle, oracle = _bundle(tmp_path)
+    path = bundle / "handover" / f"{UNIT}.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["workbook"]["wrapped_note"] = f"HTTP 503: {HOST_PATH_ROOT}{_SEP}private{_SEP}x could not be opened"
+    payload["workbook"]["non_profile_root"] = f"D:{_SEP}builds{_SEP}out"
+    payload["workbook"]["non_profile_in_prose"] = f"the build wrote to D:{_SEP}builds{_SEP}out and stopped"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    _package(tmp_path, bundle, oracle)
+    shipped = json.loads((_out(tmp_path) / UNIT / "handover" / f"{UNIT}.json").read_text(encoding="utf-8"))
+    assert shipped["workbook"]["wrapped_note"] == ms.REDACTED, "a host path inside prose must still be redacted"
+    assert shipped["workbook"]["non_profile_root"] == ms.REDACTED, "a non-profile location must still be redacted"
+    assert shipped["workbook"]["non_profile_in_prose"] == ms.REDACTED, "and it must not be rescued by a prefix"
+    account = HOST_PATH_ROOT.rsplit(_SEP, 1)[-1]
+    assert account not in json.dumps(shipped)
 
 
 # --------------------------------------------------------------------------------------------
@@ -2595,6 +2658,28 @@ def test_a_NON_PROFILE_absolute_WRAPPED_IN_PROSE_is_refused_in_EVERY_SPELLING(tm
         if path.is_file() and account in path.read_text(encoding="utf-8", errors="ignore")
     ]
     assert leaked == [], f"no shipped artifact may carry the account name in ANY spelling: {leaked}"
+
+
+def test_NOTHING_is_appended_to_the_oracle_manifest_after_its_last_containment_pass(tmp_path: Path) -> None:
+    """The final containment sweep runs on the stamped manifest, so dropped top-level keys cannot leak."""
+    profile_key = f"{HOST_PATH_ROOT}{_SEP}private{_SEP}secret"
+    location_key = f"D:{_SEP}builds{_SEP}out"
+    bundle, oracle = _bundle(tmp_path)
+    manifest = json.loads((oracle / "oracle-manifest.json").read_text(encoding="utf-8"))
+    manifest[profile_key] = "safe scalar"
+    manifest[location_key] = "safe scalar"
+    (oracle / "oracle-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    _package(tmp_path, bundle, oracle)
+
+    shipped = json.loads((_out(tmp_path) / UNIT / "oracle" / "oracle-manifest.json").read_text(encoding="utf-8"))
+    dropped = shipped["scope"]["dropped_fields"]
+    assert ms.REDACTED in dropped, f"a profile key must be redacted as the diagnostic is built: {dropped}"
+    assert pkg.REFUSED_PATH in dropped, f"the final sweep must refuse a non-profile location key: {dropped}"
+    assert profile_key not in json.dumps(shipped) and location_key not in json.dumps(shipped)
+    assert absolute_host_paths(shipped) == []
+    assert any(entry.startswith("scope.dropped_fields[") for entry in shipped["scope"]["refused_fields"]), (
+        "the refusal must be RECORDED, and by the path it refused"
+    )
 
 
 def test_the_containment_walk_contains_KEYS_and_reports_the_CONTAINED_key(tmp_path: Path) -> None:
@@ -3753,6 +3838,23 @@ def test_a_byConnection_report_makes_no_containment_claim(tmp_path: Path) -> Non
     record = json.loads((_out(tmp_path) / UNIT / "package-manifest.json").read_text(encoding="utf-8"))
     assert record["model_binding"]["kind"] == "byConnection"
     assert record["self_contained"] is True
+
+
+def test_the_exit_codes_are_distinct_and_the_docstring_names_every_one() -> None:
+    """Exit codes are a distinct, documented contract: 5 is unit failure (#478), 6 is cannot-assess."""
+    codes = {
+        pkg.EXIT_OK: "EXIT_OK",
+        pkg.EXIT_NO_WORKING_COPY: "EXIT_NO_WORKING_COPY",
+        pkg.EXIT_USAGE: "EXIT_USAGE",
+        pkg.EXIT_EDITS_REFUSED: "EXIT_EDITS_REFUSED",
+        pkg.EXIT_NOT_SELF_CONTAINED: "EXIT_NOT_SELF_CONTAINED",
+        pkg.EXIT_UNIT_FAILED: "EXIT_UNIT_FAILED",
+        pkg.EXIT_CANNOT_ASSESS: "EXIT_CANNOT_ASSESS",
+    }
+    assert len(codes) == 7, f"two exit codes collide: {codes}"
+    assert (pkg.EXIT_UNIT_FAILED, pkg.EXIT_CANNOT_ASSESS) == (5, 6)
+    for number in codes:
+        assert re.search(rf"^\| {number} \|", pkg.__doc__ or "", re.MULTILINE), f"exit {number} is undocumented"
 
 
 # --- the exit-code contract itself ------------------------------------------------------------
