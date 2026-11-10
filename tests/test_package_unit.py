@@ -5106,10 +5106,12 @@ def test_published_authority_survives_real_package_projection_and_seal(
     assert carried == expected, "C_PUBLISHED_AUTHORITY_CARRIED"
     assert json.dumps(carried, ensure_ascii=False).encode() == json.dumps(expected, ensure_ascii=False).encode()
     assert scoped["inputs"][0] == {
-        "input": {key: payload["inputs"][0]["input"][key] for key in ("file", "sha256")},
+        "input": {key: payload["inputs"][0]["input"][key] for key in ("file", "sha256", "revision_key")},
         "origin": {
             "workbook_luid": published_fixture.P_WORKBOOK,
             "match": "sha256",
+            "revision_match": payload["inputs"][0]["origin"]["revision_match"],
+            "remote_revision_key": payload["inputs"][0]["origin"]["remote_revision_key"],
             "published_dependencies": expected,
         },
     }, "C_UNRELATED_PUBLIC_PROVENANCE_UNCHANGED"
@@ -5554,6 +5556,8 @@ def test_published_authority_absence_never_uses_an_ancestor_or_name_fallback(
     assert scoped["inputs"][0]["origin"] == {
         "workbook_luid": published_fixture.P_WORKBOOK,
         "match": "sha256",
+        "revision_match": payload["inputs"][0]["origin"]["revision_match"],
+        "remote_revision_key": payload["inputs"][0]["origin"]["remote_revision_key"],
     }, "C_LEGACY_ABSENCE_NOT_RESCUED"
 
 
