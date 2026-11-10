@@ -11,6 +11,7 @@ import re
 import shutil
 import sys
 import types as reference_types
+from functools import partial
 from collections.abc import Callable
 from dataclasses import FrozenInstanceError
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -58,6 +59,57 @@ def _package_entries(root: Path) -> list[Path]:
         else:
             entries.append(path)
     return entries
+
+
+@pytest.mark.parametrize(
+    "policy",
+    [
+        "report",
+        "handover",
+        "precedence",
+        "continuation",
+        pytest.param("alias", marks=pytest.mark.skipif(os.name != "nt", reason="Windows-specific path spelling")),
+    ],
+)
+def test_transaction_setup_mutations_fail_existing_policy_assertions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], policy: str
+) -> None:
+    """Regress only setup ordering/mapping; existing independent policy assertions must catch it."""
+    from test_package_transactions import _mutant  # pylint: disable=import-outside-toplevel
+
+    controls = {
+        "report": partial(test_a_truncated_engine_report_is_refused_rather_than_packaged_unclassified, tmp_path),
+        "handover": partial(test_a_truncated_handover_slice_is_refused_rather_than_silently_absent, tmp_path),
+        "precedence": partial(test_cannot_assess_outranks_every_verdict_about_content, tmp_path),
+        "continuation": partial(
+            test_eleven_of_fourteen_keeps_the_original_denominator_and_names_every_blocker,
+            tmp_path,
+            monkeypatch,
+            capsys,
+        ),
+        "alias": partial(
+            test_construction_blocks_a_later_real_short_alias_without_overwriting_its_provider,
+            tmp_path,
+            monkeypatch,
+        ),
+    }
+    if policy == "alias":
+        _mutant(
+            pkg,
+            "package_unit",
+            "            except data_access.GateTransactionError:\n"
+            "                # A proven native destination alias retains its existing policy diagnostic.\n"
+            "                _claim_construction_directory(attempt, final)\n"
+            "                raise",
+            "            except data_access.GateTransactionError:\n                raise",
+            monkeypatch,
+        )
+        message = "native aliases must retain destination_alias"
+    else:
+        monkeypatch.setattr(pkg, "_gate_authority_root", lambda path: pkg.load_bundle(path).migration_dir)
+        message = "per-unit continuation must survive unreadable input" if policy == "continuation" else "cannot-assess"
+    with pytest.raises(AssertionError, match=message):
+        controls[policy]()
 
 
 WB_LUID = "11111111-2222-3333-4444-555555555555"
@@ -3537,6 +3589,26 @@ def _cli(tmp_path: Path, bundle: Path, *extra: str) -> int:
     return pkg.main(["--bundle", str(bundle), "--out", str(_out(tmp_path)), "--quiet", *extra])
 
 
+def test_a_truncated_engine_report_is_refused_rather_than_packaged_unclassified(tmp_path: Path) -> None:
+    """Reproduced: `exit 0  OK Book [unclassified]`; a corrupt report.json read as "classifies nothing"."""
+    bundle, _ = _bundle(tmp_path)
+    (bundle / "report.json").write_text('{"workbooks": [{"name": "Book"', encoding="utf-8")
+    assert _cli(tmp_path, bundle, "--unit", UNIT) == pkg.EXIT_CANNOT_ASSESS, (
+        "unreadable report must remain cannot-assess"
+    )
+    assert not (_out(tmp_path) / UNIT).exists(), "a package was written from input that could not be read"
+
+
+def test_a_truncated_handover_slice_is_refused_rather_than_silently_absent(tmp_path: Path) -> None:
+    """Reproduced: `exit 0`, and the handover slice simply not in the package."""
+    bundle, _ = _bundle(tmp_path)
+    (bundle / "handover" / f"{UNIT}.json").write_text('{"workbook": {"source_id"', encoding="utf-8")
+    assert _cli(tmp_path, bundle, "--unit", UNIT) == pkg.EXIT_CANNOT_ASSESS, (
+        "unreadable handover must remain cannot-assess"
+    )
+    assert not (_out(tmp_path) / UNIT).exists()
+
+
 # --- B6: a source-controlled unit name must not choose where this packager writes ------------
 
 
@@ -3570,6 +3642,16 @@ def test_a_bundle_that_names_no_units_at_all_never_reports_success(tmp_path: Pat
     report = tmp_path / "packaging.json"
     assert _cli(tmp_path, bundle, "--json", str(report)) == pkg.EXIT_CANNOT_ASSESS
     assert json.loads(report.read_text(encoding="utf-8"))["cannot_assess"]
+
+
+def test_cannot_assess_outranks_every_verdict_about_content(tmp_path: Path) -> None:
+    """One unassessable unit beside a good one: the good unit still packages, the run exits cannot-assess."""
+    bundle, _ = _bundle(tmp_path)
+    write_engine_report(bundle, workbooks=[UNIT, "Never_Emitted"])
+    (bundle / "handover" / "Never_Emitted.json").write_text("{ truncated", encoding="utf-8")
+    assert _cli(tmp_path, bundle) == pkg.EXIT_CANNOT_ASSESS, "cannot-assess must outrank content findings"
+    assert (_out(tmp_path) / UNIT / "package-manifest.json").is_file()
+    assert not (_out(tmp_path) / "Never_Emitted").exists()
 
 
 # --- B3: the declared digest is enforced, and a staged path is read in its OWN flavour --------
