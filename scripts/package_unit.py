@@ -61,7 +61,8 @@ estate: **zero** - the name route fired 0 times in 67 units.
 
 Copying a render is NOT a claim that it is byte-faithful. `stamp_tableau_provenance.py` records
 `origin.match: "name_only"` when the local and server bytes DIFFER, and the readiness gate refuses to
-trust a LUID in that case (`check_reference_readiness._provenance_luid`). Such a unit still gets its
+trust a LUID in that case unless `origin.revision_match` is `"same"`
+(`check_reference_readiness._provenance_luid`). Such a unit still gets its
 renders - an agent can look at them - and the gate still reports its pages BLIND. `handover.md`
 carries `ORACLE_ATTRIBUTION ... match=name_only` so the difference is visible rather than inferred.
 
@@ -2088,7 +2089,7 @@ expected set is every dashboard PLUS every worksheet not placed on one.
 | `reference/` | explicitly supplied original Tableau screenshots plus their existing `manifest.json`; only manifest-declared image bytes are copied. The manifest's source/image hashes, provider, kind and capability ceiling are preserved rather than restamped. |
 | `oracle/` | this unit's Tableau reference, split `dashboard/` vs `worksheet/` vs `unknown/` (**singular** - the directory is the object kind, not a plural). `oracle/*/data/*.csv` is the NUMERIC oracle - exact labels and figures, no OCR and no judgement. |
 | `report.json` | **gate input, and readable.** The engine's classification of THIS unit - workbook vs datasource - which is what earns a datasource-only unit `NOT_APPLICABLE` instead of a finding. Scoped to this unit. |
-| `source-provenance.json` | **gate input.** The only trusted route from this package's asset to a Tableau workbook LUID, keyed by the asset's sha256; `origin.match` decides whether a render can be trusted - see UNFIXABLE below. An entry ships only when attribution was NOT refused (`scope.suppressed_reason`). |
+| `source-provenance.json` | **gate input.** The only trusted route from this package's asset to a Tableau workbook LUID, keyed by the asset's sha256; `origin.revision_match` (else `origin.match`) decides whether a render can be trusted - see UNFIXABLE below. An entry ships only when attribution was NOT refused (`scope.suppressed_reason`). |
 | `engine-output-receipt.json` | **read `engine.version` when a result looks wrong** - it establishes which engine built this, so version drift stays checkable months later. Install paths are not shipped. |
 | `package-manifest.json` | what was assembled, and every omission with its reason. Its `contents.files` digest is how a re-run knows this package has been edited and refuses to overwrite it. |
 
@@ -2103,8 +2104,8 @@ content.
 
 ## UNFIXABLE FROM THIS PACKAGE
 
-`source-provenance.json` can report `origin.match: "name_only"` - local and server bytes may DIFFER,
-so an oracle render may depict a different build than `assets/`. Re-stamping needs
+`source-provenance.json` can report `origin.match: "name_only"` with no `origin.revision_match` verdict -
+local and server bytes may DIFFER, so an oracle render may depict a different build than `assets/`. Re-stamping needs
 `stamp_tableau_provenance.py`, Tableau Server credentials AND the fields `scope.dropped_fields`
 strips here: `origin.remote_sha256`, `origin.server`, `origin.site`. Measured consequence: every
 emitted page then reads `UNVERIFIABLE - REVISION NOT ESTABLISHED`, so `check_reference_readiness.py`

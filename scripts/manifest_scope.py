@@ -27,9 +27,10 @@ actually read was measured, not argued:
 | `report.json` | `workbooks` must be a **list**; `workbooks[].name`; `datasources[].name` |
   `check_reference_readiness._engine_report` :461, `._unit_names` :478-483;
   `check_unit._is_engine_report` :379 |
-| `source-provenance.json` | `inputs[].input.sha256`, `inputs[].origin.match`,
+| `source-provenance.json` | `inputs[].input.sha256`, `inputs[].origin.match`, `inputs[].origin.revision_match`,
   `inputs[].origin.workbook_luid`; acquired `origin.published_dependencies` for the #562 S2 consumer |
-  `check_reference_readiness._provenance_luid`; `stamp_tableau_provenance._attach_published_dependencies` |
+  `check_reference_readiness._provenance_luid`; `reference_evidence.revision_status`;
+  `stamp_tableau_provenance._attach_published_dependencies` |
 | `engine-output-receipt.json` | `engine.version` | `check_engine_receipts` :33-35 |
 
 Everything else was engine metadata no gate consumes, so it is no longer shipped. That deletes every
@@ -448,9 +449,10 @@ def _valid_published_dependencies(payload: Any) -> bool:
 PROVENANCE_ALLOW: dict[str, Any] = {
     "inputs": Rows(
         {
-            "input": _fields("file", "sha256"),
+            "input": {**_fields("file", "sha256"), "revision_key": _fields("algo", "value")},
             "origin": {
-                **_fields("workbook_luid", "datasource_luid", "match"),
+                **_fields("workbook_luid", "datasource_luid", "match", "revision_match"),
+                "remote_revision_key": _fields("algo", "value"),
                 "published_dependencies": PUBLISHED_DEPENDENCIES_ALLOW,
             },
         }

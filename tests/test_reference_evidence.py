@@ -19,9 +19,15 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import check_reference_readiness as crr  # noqa: E402  # pylint: disable=wrong-import-position
+import manifest_scope  # noqa: E402  # pylint: disable=wrong-import-position
+import object_identity  # noqa: E402  # pylint: disable=wrong-import-position
+import package_unit as pkg  # noqa: E402  # pylint: disable=wrong-import-position
+from reference_evidence import revision_status  # noqa: E402  # pylint: disable=wrong-import-position
 
 from test_check_reference_readiness import (  # noqa: E402  # pylint: disable=wrong-import-position
     OTHER_LUID,
@@ -36,6 +42,7 @@ from test_check_reference_readiness import (  # noqa: E402  # pylint: disable=wr
     write_report,
     write_workbook,
 )
+from test_package_unit_gates import UNIT, _brief, _bundle  # noqa: E402  # pylint: disable=wrong-import-position
 
 __all__ = ["bundle_fixture"]
 
@@ -1055,3 +1062,100 @@ def test_untyped_evidence_is_reported_with_the_route_to_make_it_usable(bundle: P
     rendered = crr.render(report)
     assert "UNTYPED EVIDENCE" in rendered
     assert "view_type" in rendered
+
+
+# --------------------------------------------------------------------------------------------
+# Issue #841: packaging must not erase an established revision confirmation
+# --------------------------------------------------------------------------------------------
+
+REVISION_KEY = {"algo": "twbx-content-v3", "value": "1" * 64}
+
+
+def _stamped(match: str, origin: dict[str, object], revision_key: dict[str, str] | None) -> dict:
+    """One `source-provenance.json` row in the shape `stamp_tableau_provenance.find_origin` writes."""
+    entry_input: dict[str, object] = {"file": "fictional_alpha.twbx", "sha256": "a" * 64}
+    if revision_key is not None:
+        entry_input["revision_key"] = revision_key
+    origin = {"workbook_luid": "00000000-0000-4000-8000-000000000001", "match": match, **origin}
+    return {"inputs": [{"input": entry_input, "origin": origin}]}
+
+
+def _packaged(source: dict) -> dict:
+    """The packaged projection of `source`, through the calls `package_unit` makes (the issue's repro)."""
+    _, entries = pkg.scope_provenance(source, source["inputs"][0]["input"]["sha256"])
+    return manifest_scope.shippable_provenance(entries, pkg.workbook_identity(entries, None), "fictional_unit")
+
+
+def test_packaging_keeps_the_revision_verdict_and_both_keys() -> None:
+    """#841: the three revision fields ship, and none is listed in `scope.dropped_fields`."""
+    origin = {"revision_match": "same", "remote_revision_key": REVISION_KEY}
+    packaged = _packaged(_stamped("name_only", origin, REVISION_KEY))
+    shipped = packaged["inputs"][0]
+
+    assert shipped["input"]["revision_key"] == REVISION_KEY
+    assert shipped["origin"]["revision_match"] == "same"
+    assert shipped["origin"]["remote_revision_key"] == REVISION_KEY
+    assert not {
+        "inputs[].input.revision_key",
+        "inputs[].origin.revision_match",
+        "inputs[].origin.remote_revision_key",
+    } & set(packaged["scope"]["dropped_fields"])
+
+
+@pytest.mark.parametrize(
+    ("match", "origin", "revision_key", "expected"),
+    [
+        ("name_only", {"revision_match": "same", "remote_revision_key": REVISION_KEY}, REVISION_KEY, "confirmed"),
+        ("sha256", {"revision_match": "same", "remote_revision_key": REVISION_KEY}, REVISION_KEY, "confirmed"),
+        (
+            "name_only",
+            {"revision_match": "differs", "remote_revision_key": {"algo": "twbx-content-v3", "value": "2" * 64}},
+            REVISION_KEY,
+            "mismatch",
+        ),
+        ("name_only", {}, None, "unconfirmed"),
+        ("name_only", {"revision_match": None, "remote_revision_key": None}, REVISION_KEY, "unconfirmed"),
+        ("name_only", {"revision_match": "SAME", "remote_revision_key": REVISION_KEY}, REVISION_KEY, "unconfirmed"),
+    ],
+    ids=["name_only-same", "sha256-same", "differs", "absent", "null-verdict", "invalid-literal"],
+)
+def test_packaging_preserves_the_revision_verdict(
+    match: str, origin: dict[str, object], revision_key: dict[str, str] | None, expected: str
+) -> None:
+    """The issue's library repro, plus its controls: the packaged verdict equals the bundle's.
+
+    `name_only` + `same` read `unconfirmed` once packaged before #841; `sha256` was already right.
+    `null-verdict` is what `find_origin` writes when the keys cannot be compared.
+    """
+    source = _stamped(match, origin, revision_key)
+    packaged = _packaged(source)
+
+    assert revision_status(source["inputs"][0]["origin"], source["inputs"]) == expected
+    assert revision_status(packaged["inputs"][0]["origin"], packaged["inputs"]) == expected
+
+
+def test_a_repacked_but_confirmed_workbook_package_passes_the_entry_gate(tmp_path: Path) -> None:
+    """#841 end to end: a `name_only` + `same` unit packages, and readiness on the package exits 0.
+
+    Both keys are computed from the asset that ships, so the verdict is the one `find_origin` writes
+    for a repacked archive. Before #841 this package exited 1.
+    """
+    bundle, oracle, _objects = _bundle(tmp_path, covered=None)
+    path = bundle / "source-provenance.json"
+    provenance = json.loads(path.read_text(encoding="utf-8"))
+    entry = provenance["inputs"][0]
+    key = object_identity.revision_key_of(bundle.parent / "assets" / entry["input"]["file"])
+    assert key is not None, "the fixture asset must yield a revision key or nothing is measured"
+    entry["input"]["revision_key"] = key.as_json()
+    entry["origin"].update(match="name_only", revision_match="same", remote_revision_key=key.as_json())
+    path.write_text(json.dumps(provenance), encoding="utf-8")
+    brief = _brief(tmp_path, UNIT, numeric_obligation="required")
+    pkg.package_unit(
+        bundle, UNIT, tmp_path / "out", oracle_dir=oracle, assets_dir=bundle.parent / "assets", brief=brief
+    )
+    root = tmp_path / "out" / UNIT
+
+    assert crr.main([str(root), "--quiet"]) == crr.EXIT_OK
+    report = crr.scan(root)
+    assert report["status"] == "START_READY"
+    assert report["pages_ready"] == report["pages_expected"] > 0
