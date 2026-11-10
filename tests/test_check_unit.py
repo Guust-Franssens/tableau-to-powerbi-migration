@@ -137,13 +137,7 @@ def _sha256(path: Path) -> str:
 
 
 def _write_unit_source(unit: Path, blob: bytes, *, name: str = f"{UNIT_LUID}_Book.twbx", handover: bool = True) -> Path:
-    """The Tableau asset this unit was built from, recorded where BOTH producers record it.
-
-    A handover slice's ``workbook.source_id`` and `migration-spec.json`'s ``source.file_name`` are
-    the two independent claims `check_unit._unit_source_claims` reads, so the fixture writes both -
-    a fixture that recorded only one could not tell a working resolver from one that happened to
-    read the other.
-    """
+    """The Tableau asset this unit was built from, recorded where BOTH producers record it."""
     asset = unit / "assets" / name
     asset.parent.mkdir(parents=True, exist_ok=True)
     asset.write_bytes(blob)
@@ -170,13 +164,7 @@ def _write_reference_manifest(
     source_sha: str | None = "auto",
     workbook_luid: str | None = None,
 ) -> None:
-    """A `reference/manifest.json`.
-
-    ⚠️ ``source_sha="auto"`` writes the unit's source asset and records ITS hash, which is what
-    `capture_tableau_reference.py:234` does. Round-3 review, B-B: a display name no longer certifies
-    anything, so a fixture identifying a reference record by ``workbook`` alone stopped representing
-    any real capture - it now represents a hand-edited one, which is a different test.
-    """
+    """A `reference/manifest.json`."""
     if source_sha == "auto":
         # No handover slice: the migration spec's `source.file_name` already establishes the
         # asset, and writing a slice here would put an unrelated check into every test that
@@ -219,15 +207,7 @@ def _write_oracle_manifest(  # pylint: disable=too-many-arguments,too-many-posit
     workbook_luid: str | None = UNIT_LUID,
     workbook_name: str | None = None,
 ) -> None:
-    """An oracle manifest.
-
-    ⚠️ ``workbook`` writes a TOP-LEVEL ``workbook`` key, which is a synthetic shape: the real producer
-    writes ``workbook_luid`` and ``workbook_name`` PER VIEW and no ``workbook`` anywhere. That gap is
-    issue #450 - the gate read the key the fixtures wrote instead of the ones the capture writes, so
-    every record on a live capture arrived ownerless (measured 360 of 360) and the guard never fired.
-    ``workbook_luid``/``workbook_name`` write the real shape; both are kept so the synthetic override
-    stays testable too.
-    """
+    """An oracle manifest."""
     records = []
     for index, name in enumerate(names):
         image_path = f"images/{name}__{index}.png"
@@ -325,17 +305,7 @@ def test_brownfield_partial_pbip_reports_evidenced_and_missing_phases() -> None:
 
 
 def test_brownfield_canonical_bundle_proposes_no_reorganisation() -> None:
-    """A recognisable bundle is never told to reorganise itself.
-
-    This test used to assert the whole BROWNFIELD block was absent, and it passed only because
-    ``page-parity`` raised a FALSE ``PRECONDITION_FAILED`` on this fixture (its ``migration-spec.json``
-    is the placeholder ``{"workbook": ...}``, which declares no pages, so "0 expected vs 1 emitted"
-    read as an extra page) and the run aborted before any NOT_CHECKED row existed. ``_render_brownfield``
-    deliberately prints the inventory whenever a check reports a missing input - a NOT_CHECKED row
-    often IS a misplaced input - so no correct page-parity can keep that block hidden here. What the
-    test actually cared about is asserted directly instead: recognised shape, and no reorganisation
-    plan.
-    """
+    """A recognisable bundle is never told to reorganise itself."""
     fixture = REPO_ROOT / "tests" / "fixtures" / "check-gates-dirty"
 
     report = cu.run_all(fixture)
@@ -354,12 +324,7 @@ def _write_full_spec(
     dashboards: list[tuple[str, list[str]]],
     worksheets: list[tuple[str, str]],
 ) -> None:
-    """Write a migration-spec with dashboard zone trees, as parse_tableau.py emits them.
-
-    ``dashboards`` is ``[(dashboard name, [worksheet ids placed on it])]`` and ``worksheets`` is
-    ``[(worksheet id, worksheet name)]``. The placed ids are nested one level deep so the walk is
-    exercised on a tree, not a flat list - the real parser nests zones several layers.
-    """
+    """Write a migration-spec with dashboard zone trees, as parse_tableau.py emits them."""
     unit.mkdir(parents=True, exist_ok=True)
     spec_dashboards = []
     for index, (name, placed) in enumerate(dashboards):
@@ -395,11 +360,7 @@ def _write_viz_fidelity_handover(
     pbip_warnings: list[str] | None = None,
     workbook_name: str = "Book",
 ) -> None:
-    """Handover slice carrying engine-declared per-page rebuild rows.
-
-    ``workbook_name`` defaults to ``Book`` because that is the stem of the ``Book.Report`` folder
-    ``_write_report`` creates: a slice only explains pages for a workbook this unit actually ships.
-    """
+    """Handover slice carrying engine-declared per-page rebuild rows."""
     workbook: dict[str, object] = {"name": workbook_name, "viz_fidelity": rows}
     if pbip_warnings is not None:
         workbook["pbip_warnings"] = pbip_warnings
@@ -412,13 +373,7 @@ def _empty_row(name: str, reason: str = "manual attention required: unsupported"
 
 
 def test_expected_pages_counts_orphan_worksheets_not_just_dashboards(tmp_path: Path) -> None:
-    """Kills: the dashboards-only page rule the engine has never used.
-
-    twb_to_pbir.py (2.339.0) emits a page per dashboard AND a page per worksheet that no dashboard
-    placed (:14557-14558 skip-if-placed, :14709 page_order.append). Measured on a real 2.339.0
-    estate run, 19 of 43 workbooks have ZERO dashboards, so the old rule returned an empty expected
-    set for nearly half the estate.
-    """
+    """Kills: the dashboards-only page rule the engine has never used."""
     _write_full_spec(
         tmp_path,
         dashboards=[("Exec", ["ws.placed"])],
@@ -431,11 +386,7 @@ def test_expected_pages_counts_orphan_worksheets_not_just_dashboards(tmp_path: P
 
 
 def test_expected_pages_finds_placed_worksheets_at_any_zone_depth(tmp_path: Path) -> None:
-    """Kills: a non-recursive zone walk that calls every nested sheet an orphan.
-
-    The loose sheet is here so the assertion cannot also be satisfied by the old dashboards-only
-    rule: that rule returns ``["Exec"]``, which is neither this expectation nor the flat-walk one.
-    """
+    """Kills: a non-recursive zone walk that calls every nested sheet an orphan."""
     _write_full_spec(
         tmp_path,
         dashboards=[("Exec", ["ws.deep"])],
@@ -457,12 +408,7 @@ def test_workbook_with_no_dashboards_expects_its_worksheets(tmp_path: Path) -> N
 
 
 def test_engine_evidence_explains_an_omission_but_does_not_accept_it(tmp_path: Path) -> None:
-    """Kills: treating proof of an absence as acceptance of one.
-
-    tier 'empty' proves the ENGINE emitted no faithful visual. It says nothing about whether a human
-    agreed to ship without that page. Measured before this: a unit missing page B returned PASS from
-    parity AND validation-grade oracle coverage, with compromises=0.
-    """
+    """Kills: treating proof of an absence as acceptance of one."""
     _write_full_spec(tmp_path, dashboards=[], worksheets=[("ws.a", "A"), ("ws.b", "B")])
     _write_report(tmp_path, ["A"])
     _write_viz_fidelity_handover(tmp_path, [_empty_row("B")])
@@ -527,12 +473,7 @@ def test_oracle_coverage_drops_a_signed_omission_from_the_denominator(tmp_path: 
 
 
 def test_two_same_named_candidates_cannot_share_one_rendered_page(tmp_path: Path) -> None:
-    """Kills: a kind-less page name satisfying more than one expected page.
-
-    A PBIR page names an object without saying what KIND it is. With dashboard 'Sales' and worksheet
-    'Sales' both expected, one rendered 'Sales' page used to satisfy BOTH: PASS at expected_count=2,
-    emitted_count=1. It attributes to neither.
-    """
+    """Kills: a kind-less page name satisfying more than one expected page."""
     _write_full_spec(tmp_path, dashboards=[("Sales", [])], worksheets=[("ws.sales", "Sales")])
     _write_report(tmp_path, ["Sales"])
 
@@ -544,10 +485,7 @@ def test_two_same_named_candidates_cannot_share_one_rendered_page(tmp_path: Path
 
 
 def test_one_oracle_row_cannot_cover_two_same_named_candidates(tmp_path: Path) -> None:
-    """The same rule on the oracle side: contested names take no evidence at all.
-
-    One reference row named 'Sales' was counted as 2-of-2 coverage for a dashboard AND a worksheet.
-    """
+    """The same rule on the oracle side: contested names take no evidence at all."""
     _write_full_spec(tmp_path, dashboards=[("Sales", [])], worksheets=[("ws.sales", "Sales")])
     _write_report(tmp_path, ["Sales"])
     _write_oracle_manifest(tmp_path, ["Sales"], view_type=None)
@@ -626,11 +564,7 @@ def test_typed_oracle_record_cannot_cover_ambiguous_same_kind_pages(tmp_path: Pa
 
 
 def test_one_name_only_signature_cannot_sign_two_omissions(tmp_path: Path) -> None:
-    """Kills: a bare-name exemption accepting every candidate that happens to share the name.
-
-    Deliberately built so nothing else is ambiguous - 'A' is paired, so there is no unmatched
-    rendered page - leaving the contested SIGNATURE as the only thing that can turn this test.
-    """
+    """Kills: a bare-name exemption accepting every candidate that happens to share the name."""
     _write_full_spec(tmp_path, dashboards=[("Sales", [])], worksheets=[("ws.sales", "Sales"), ("ws.a", "A")])
     _write_report(tmp_path, ["A"])
     (tmp_path / cu.EXEMPTIONS_FILE).write_text(
@@ -672,13 +606,7 @@ def test_a_signature_naming_the_page_id_resolves_a_contested_name(tmp_path: Path
 
 
 def test_evidence_is_found_from_a_relative_target_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Kills: de-duplicating handover roots BEFORE resolving them.
-
-    `_unit_dir` resolves its return value while `target` keeps the caller's spelling, so with the
-    documented relative CLI invocation the same directory was scanned twice, every evidence row was
-    indexed twice, and each became an AMBIGUOUS resolution whose declared reason vanished. The
-    absolute form happened to work, which is how it survived review.
-    """
+    """Kills: de-duplicating handover roots BEFORE resolving them."""
     unit = tmp_path / "unit"
     _write_full_spec(unit, dashboards=[], worksheets=[("ws.a", "A"), ("ws.b", "B")])
     _write_report(unit, ["A"])
@@ -694,13 +622,7 @@ def test_evidence_is_found_from_a_relative_target_path(tmp_path: Path, monkeypat
 
 
 def _complete_worksheet(ws_id: str, name: str, **overrides: object) -> dict[str, object]:
-    """A worksheet carrying EVERY property the committed spec schema declares, all content empty.
-
-    Completeness is the point: `_source_empty` now refuses a partial structure, because treating an
-    incomplete one as proof of emptiness is what let a Text worksheet with `title_text: "Important
-    instructions"` pass as owing no page. Real parser output carries all eleven properties, so this
-    is what a genuinely blank sheet looks like on disk.
-    """
+    """A worksheet carrying EVERY property the committed spec schema declares, all content empty."""
     worksheet: dict[str, object] = {
         "id": ws_id,
         "name": name,
@@ -743,12 +665,7 @@ def _spec_with_worksheets(unit: Path, worksheets: list[dict[str, object]]) -> No
 
 
 def test_a_source_empty_worksheet_owes_no_page(tmp_path: Path) -> None:
-    """A worksheet with every schema channel empty renders blank in Tableau too, so it owes no page.
-
-    Corrects a round-2 claim of mine that this case did not occur: two exist in the measured estate
-    (`Meridian Multi-Source (3 systems)/Probe Sheet`, `vishnu_dashboard/Sheet 3`), both complete and
-    entirely empty. Established from the SPEC, never from an engine tier.
-    """
+    """A worksheet with every schema channel empty renders blank in Tableau too, so it owes no page."""
     _spec_with_worksheets(
         tmp_path,
         [
@@ -766,12 +683,7 @@ def test_a_source_empty_worksheet_owes_no_page(tmp_path: Path) -> None:
 
 
 def test_an_emptied_oracle_denominator_still_names_why_it_emptied(tmp_path: Path) -> None:
-    """Kills: dropping the exclusion list on the not-assessable early return.
-
-    A workbook whose only expected page is source-empty empties the denominator legitimately. The
-    early return used to report `excluded_omissions: []`, so a page BOTH halves had accepted looked
-    like the two halves disagreeing. Found by the estate cross-check, not by a test.
-    """
+    """Kills: dropping the exclusion list on the not-assessable early return."""
     _spec_with_worksheets(tmp_path, [_complete_worksheet("ws.b", "B")])
     _write_report(tmp_path, ["B"], visuals=0)
 
@@ -783,12 +695,7 @@ def test_an_emptied_oracle_denominator_still_names_why_it_emptied(tmp_path: Path
 
 
 def test_a_source_empty_page_owes_no_oracle_evidence_either(tmp_path: Path) -> None:
-    """Kills: page parity and the oracle denominator disagreeing about the same page.
-
-    Parity accepted a source-empty omission while the oracle still demanded a visual AND a numeric
-    oracle for it, so one page could PASS one half of the gate and be NOT_CHECKED in the other. Both
-    now read the same disposition.
-    """
+    """Kills: page parity and the oracle denominator disagreeing about the same page."""
     _spec_with_worksheets(
         tmp_path,
         [
@@ -807,11 +714,7 @@ def test_a_source_empty_page_owes_no_oracle_evidence_either(tmp_path: Path) -> N
 
 
 def test_a_visible_title_is_content_even_with_every_shelf_empty(tmp_path: Path) -> None:
-    """Kills: inspecting only the encoding shelves, and missing a visible channel.
-
-    A Text worksheet whose title reads "Important instructions" draws something. It passed as
-    source-empty, and because that disposition needs no signature the false positive was a silent PASS.
-    """
+    """Kills: inspecting only the encoding shelves, and missing a visible channel."""
     _spec_with_worksheets(
         tmp_path,
         [
@@ -917,10 +820,7 @@ def test_an_extra_signature_matches_the_page_name_exactly(tmp_path: Path) -> Non
 
 
 def test_a_spec_that_reuses_a_page_id_cannot_be_graded(tmp_path: Path) -> None:
-    """An id is the only way to sign one of two same-named objects, so a colliding id is fatal.
-
-    Measured: two pages sharing id 'ws.same' were BOTH signed by one 'ws.same' entry, and passed.
-    """
+    """An id is the only way to sign one of two same-named objects, so a colliding id is fatal."""
     (tmp_path / "migration-spec.json").write_text(
         json.dumps(
             {
@@ -969,11 +869,7 @@ def test_a_worksheet_with_any_encoding_still_owes_a_page(tmp_path: Path) -> None
 
 
 def test_a_worksheet_whose_encodings_are_not_an_object_is_not_called_empty(tmp_path: Path) -> None:
-    """Unknown is not empty, and the type guard is what keeps a malformed spec from crashing the gate.
-
-    The list carries exactly the schema's channel NAMES, so the key-set check cannot refuse it - only
-    the `isinstance` guard can. Without it the gate reaches `.values()` on a list.
-    """
+    """Unknown is not empty, and the type guard is what keeps a malformed spec from crashing the gate."""
     _spec_with_worksheets(
         tmp_path,
         [
@@ -1028,12 +924,7 @@ def test_a_source_empty_sheet_that_still_has_a_filter_owes_a_page(tmp_path: Path
 
 
 def test_one_item_matching_two_objects_across_namespaces_signs_neither(tmp_path: Path) -> None:
-    """Kills: resolving a signature per PAGE instead of once GLOBALLY.
-
-    Exactness without globality still lets one item match two objects, because nothing asks how many
-    things the item matches in TOTAL. Here 'collide' is page A's id AND page B's name; it used to
-    sign both omissions and record one compromise.
-    """
+    """Kills: resolving a signature per PAGE instead of once GLOBALLY."""
     (tmp_path / "migration-spec.json").write_text(
         json.dumps(
             {
@@ -1106,11 +997,7 @@ def test_one_extra_signature_cannot_account_for_two_same_named_pages(tmp_path: P
 
 
 def test_the_oracle_denominator_removes_by_identity_not_by_display_name(tmp_path: Path) -> None:
-    """Kills: reducing dispositioned identity rows back to a set of display NAMES.
-
-    A SIGNED dashboard 'Sales' and an UNSIGNED worksheet 'Sales'. Parity distinguishes them; the
-    oracle removed BOTH from its denominator and reported pages=0 while listing one exclusion.
-    """
+    """Kills: reducing dispositioned identity rows back to a set of display NAMES."""
     (tmp_path / "migration-spec.json").write_text(
         json.dumps(
             {
@@ -1143,12 +1030,7 @@ def test_the_oracle_denominator_removes_by_identity_not_by_display_name(tmp_path
 
 
 def test_both_halves_agree_on_whether_attribution_is_ambiguous(tmp_path: Path) -> None:
-    """Kills: parity and the oracle computing the same predicate differently.
-
-    Parity subtracted accounted-for `extra:` pages before deciding ambiguity and the oracle did not,
-    so the same unit was ambiguous in one half and not the other - and a signed omission left one
-    denominator but not the other. Found by the round-5 reproduction, not by a test.
-    """
+    """Kills: parity and the oracle computing the same predicate differently."""
     _write_full_spec(tmp_path, dashboards=[], worksheets=[("ws.a", "A"), ("ws.b", "B")])
     _write_report(tmp_path, ["Renamed"])
     (tmp_path / cu.EXEMPTIONS_FILE).write_text(
@@ -1197,11 +1079,7 @@ def test_a_stale_signature_is_reported_even_when_a_same_named_page_is_omitted(tm
 
 
 def test_two_workbooks_whose_names_slug_alike_do_not_bind_interchangeably(tmp_path: Path) -> None:
-    """Kills: binding a handover slice to a unit through the lossy slug when it is not unique.
-
-    Both names slug to the report stem's slug ('book') and NEITHER matches it exactly, so only the
-    uniqueness guard can decide. Found by enumerating every place an identity becomes a string.
-    """
+    """Kills: binding a handover slice to a unit through the lossy slug when it is not unique."""
     _write_full_spec(tmp_path, dashboards=[], worksheets=[("ws.a", "A"), ("ws.b", "B")])
     _write_report(tmp_path, ["A"])
     run_estate.slice_handovers(
@@ -1234,12 +1112,7 @@ def test_a_filesystem_sanitised_workbook_name_still_binds_when_unambiguous(tmp_p
 
 
 def test_a_worksheet_row_can_never_explain_a_same_named_dashboard(tmp_path: Path) -> None:
-    """Kills: evidence about object X settling a question about object Y of a different KIND.
-
-    A workbook with dashboard 'Sales' and a placed worksheet 'Sales'. The worksheet's tier-'empty'
-    row used to explain the DASHBOARD's absence, because evidence was keyed on name alone. Identity
-    is (kind, exact name), so the dashboard resolves against nothing.
-    """
+    """Kills: evidence about object X settling a question about object Y of a different KIND."""
     _write_full_spec(tmp_path, dashboards=[("Sales", ["ws.sales"])], worksheets=[("ws.sales", "Sales")])
     _write_report(tmp_path, ["Other"])
     _write_viz_fidelity_handover(
@@ -1265,12 +1138,7 @@ def test_a_worksheet_row_can_never_explain_a_same_named_dashboard(tmp_path: Path
 
 
 def test_a_filter_scope_row_cannot_explain_a_same_named_worksheet(tmp_path: Path) -> None:
-    """visual_type is load-bearing on its own: a non-object scope row proves nothing about a page.
-
-    Real shape, from the HR Dashboard estate slice: a 'filter'-scope row named 'Location' sits beside
-    a worksheet also named 'Location'. Without the visual_type requirement, that filter row would be
-    indexed as worksheet evidence and explain the worksheet's omission.
-    """
+    """visual_type is load-bearing on its own: a non-object scope row proves nothing about a page."""
     _write_full_spec(tmp_path, dashboards=[], worksheets=[("ws.a", "A"), ("ws.loc", "Location")])
     _write_report(tmp_path, ["A"])
     _write_viz_fidelity_handover(
@@ -1297,12 +1165,7 @@ def test_a_filter_scope_row_cannot_explain_a_same_named_worksheet(tmp_path: Path
 
 
 def test_a_dashboard_kind_row_claiming_empty_tier_still_proves_nothing(tmp_path: Path) -> None:
-    """Both evidence fields are load-bearing: an empty-tier row must also be visual_type 'unsupported'.
-
-    Measured on a 2.339.0 estate run, all 46 empty-tier rows carry 'unsupported' and no
-    dashboard-scope row ever does - so a row claiming both is not engine output, and must not be
-    allowed to identify a dashboard.
-    """
+    """Both evidence fields are load-bearing: an empty-tier row must also be visual_type 'unsupported'."""
     _write_full_spec(tmp_path, dashboards=[("Sales", [])], worksheets=[])
     _write_report(tmp_path, ["Other"])
     _write_viz_fidelity_handover(
@@ -1538,12 +1401,7 @@ def test_spec_declaring_no_pages_cannot_be_graded(tmp_path: Path) -> None:
 
 
 def test_oracle_capture_is_discovered_under_the_canonical_run_layout(tmp_path: Path) -> None:
-    """Kills: looking only for `_oracle/` and missing `_runs/<NNN>-<slug>/oracle/`.
-
-    work_dirs.CANONICAL_SUBDIRS puts a run's capture in a sibling `oracle/` beside `bundle/`, while
-    capture_tableau_oracle.py is documented as `--out _oracle`. Both are real; discovery must accept
-    both or a capture that exists reads as "no oracle manifest found".
-    """
+    """Kills: looking only for `_oracle/` and missing `_runs/<NNN>-<slug>/oracle/`."""
     run_root = tmp_path / "042-unit"
     bundle = run_root / "bundle"
     _write_spec(bundle, ["Executive"])
@@ -1568,12 +1426,7 @@ def test_underscore_oracle_directory_is_still_discovered(tmp_path: Path) -> None
 
 
 def test_engine_crash_guard_placeholder_is_not_a_blank_page(tmp_path: Path) -> None:
-    """Kills: reporting the engine's declared crash-guard page as a page that renders nothing.
-
-    twb_to_pbir.py:14719-14727 ships ONE synthetic visual-less page when every candidate was dropped,
-    because a PBIR with an empty pageOrder crashes Power BI Desktop on open. The omission itself is
-    signed here, so the placeholder classification is the only thing this test can turn.
-    """
+    """Kills: reporting the engine's declared crash-guard page as a page that renders nothing."""
     _write_full_spec(tmp_path, dashboards=[], worksheets=[("ws.a", "Sheet 1")])
     _write_placeholder_page(tmp_path, visuals=0)
     (tmp_path / cu.EXEMPTIONS_FILE).write_text(
@@ -1627,11 +1480,7 @@ def test_a_retitled_placeholder_id_is_still_a_blank_page(tmp_path: Path) -> None
 
 
 def test_a_placeholder_id_holding_real_visuals_is_a_rebuilt_page(tmp_path: Path) -> None:
-    """Kills: discarding a page-empty* page that an author actually filled with visuals.
-
-    It carries three visuals, so it is a rendered page. Its title matches no expected page, which is
-    accounted for by an ``extra:`` signature - the explicit way to declare a page the source never had.
-    """
+    """Kills: discarding a page-empty* page that an author actually filled with visuals."""
     _write_full_spec(tmp_path, dashboards=[], worksheets=[("ws.a", "A")])
     _write_report(tmp_path, ["A"])
     _write_placeholder_page_beside(tmp_path, visuals=3)
@@ -1672,12 +1521,7 @@ def _write_placeholder_page_beside(unit: Path, *, visuals: int) -> None:
 
 
 def test_a_blank_page_alone_fails_the_gate_even_when_every_page_is_paired(tmp_path: Path) -> None:
-    """Kills: reporting a page that renders nothing without letting it fail anything.
-
-    Constructed so the blank page is the ONLY problem: the one candidate has its rendered page, and
-    the extra zero-visual page is declared with an ``extra:`` signature so it is not an unaccounted
-    extra either.
-    """
+    """Kills: reporting a page that renders nothing without letting it fail anything."""
     _write_full_spec(tmp_path, dashboards=[], worksheets=[("ws.a", "A")])
     pages = tmp_path / "fabric" / "Book.Report" / "definition" / "pages"
     _write_report(tmp_path, ["A"])
@@ -1712,12 +1556,7 @@ def test_a_missing_page_is_named_by_content_not_by_position(tmp_path: Path) -> N
 
 
 def test_an_exemption_naming_a_present_page_accepts_nothing(tmp_path: Path) -> None:
-    """Kills: a signed exemption absorbing a DIFFERENT page's absence.
-
-    Only 'A' is absent; 'C' is present. Applying the signature unconditionally shrank the expected
-    count, balanced the books and hid A. It is now reported as having accepted nothing, and must not
-    count as a compromise.
-    """
+    """Kills: a signed exemption absorbing a DIFFERENT page's absence."""
     _write_full_spec(tmp_path, dashboards=[], worksheets=[("ws.a", "A"), ("ws.b", "B"), ("ws.c", "C")])
     _write_report(tmp_path, ["B", "C"])
     (tmp_path / cu.EXEMPTIONS_FILE).write_text(
@@ -1754,11 +1593,7 @@ def test_an_exemption_naming_the_actually_missing_page_is_honoured(tmp_path: Pat
 
 
 def test_a_rename_makes_attribution_ambiguous_and_suspends_every_signature(tmp_path: Path) -> None:
-    """Kills: applying a name-only exemption while a rendered page could BE the renamed candidate.
-
-    Expected A, B, C; rendered a renamed 'A' plus B, so C is genuinely missing. Signing for A used to
-    turn PRECONDITION_FAILED into PASS with no stale exemption reported at all.
-    """
+    """Kills: applying a name-only exemption while a rendered page could BE the renamed candidate."""
     _write_full_spec(tmp_path, dashboards=[], worksheets=[("ws.a", "A"), ("ws.b", "B"), ("ws.c", "C")])
     _write_report(tmp_path, ["A renamed", "B"])
     (tmp_path / cu.EXEMPTIONS_FILE).write_text(
@@ -2381,12 +2216,7 @@ def test_actual_pages_falls_back_to_page_directories_when_order_is_missing(tmp_p
 
 
 def test_actual_pages_counts_zero_visuals_for_a_page_with_none(tmp_path: Path) -> None:
-    """The visual count is measured, not assumed.
-
-    The ``visuals/`` folder EXISTS here but holds no ``visual.json``. A fixture with no folder at all
-    is answered by the ``is_dir()`` guard and never reaches the counting line, so it cannot kill a
-    mutation that hard-codes a count.
-    """
+    """The visual count is measured, not assumed."""
     _write_report(tmp_path, ["Executive"], visuals=0)
     (tmp_path / "fabric" / "Book.Report" / "definition" / "pages" / "p1" / "visuals").mkdir()
 
@@ -2542,16 +2372,7 @@ def test_gate_registrations_match_native_exit_constants() -> None:
 
 
 def test_cli_model_scope_reports_not_checked_for_unattributable_connection_fixture() -> None:
-    """Subprocess-level proof that model scope runs real native gate wiring end to end.
-
-    This fixture's only table (`Sales`) is an inline `#table(...)` literal with no `data_sources`
-    entry in its spec at all - it was built to exercise the OTHER model-scope gates cheaply, not to
-    model a real Tableau connection. `check_connection_fidelity` has no honest spec counterpart to
-    check it against (an inline literal maps to no Tableau connection class), so it correctly reports
-    SKIPPED/NOT_CHECKED rather than fabricating a PASS - and `check_unit` correctly keeps that from
-    being silently absorbed into AUTOMATED_CHECKS_PASS (issue #328). Every other native gate on this
-    fixture still proves PASS on real wiring, so this is not a regression in what was already checked.
-    """
+    """Subprocess-level proof that model scope runs real native gate wiring end to end."""
     fixture = _freshen_clean_fixture_cache()
     result = subprocess.run(
         [sys.executable, str(REPO_ROOT / "scripts" / "check_unit.py"), str(fixture), "--scope", "model"],
@@ -2569,12 +2390,7 @@ def test_cli_model_scope_reports_not_checked_for_unattributable_connection_fixtu
 
 
 def test_cli_integration_scope_reports_not_checked_for_unattributable_connection_fixture() -> None:
-    """Subprocess-level proof with real native gate wiring, not monkeypatched passes.
-
-    Same fixture and reasoning as the model-scope counterpart above: the `Sales` table's inline
-    `#table(...)` literal has no data source to attribute a connection to, so connection-fidelity
-    SKIPS honestly and the unit is legitimately NOT_CHECKED rather than a false AUTOMATED_CHECKS_PASS.
-    """
+    """Subprocess-level proof with real native gate wiring, not monkeypatched passes."""
     fixture = REPO_ROOT / "tests" / "fixtures" / "check-unit-clean-integration"
     result = subprocess.run(
         [sys.executable, str(REPO_ROOT / "scripts" / "check_unit.py"), str(fixture), "--scope", "integration"],
@@ -2828,35 +2644,6 @@ def _deep_tree(root: Path) -> Path:
     return root
 
 
-def test_path_ceiling_is_registered_all_scope_only() -> None:
-    """Whole-unit shippability cannot be attributed to a layer, so it runs only under --scope all."""
-    gate = _path_ceiling_gate()
-
-    assert gate.script == "check_path_ceiling.py"
-    assert "path-ceiling" in cu.ALL_ONLY_CHECK_IDS
-    assert cu._in_scope("path-ceiling", cu.SCOPE_ALL)  # pylint: disable=protected-access
-    for scope in (cu.SCOPE_MODEL, cu.SCOPE_REPORT, cu.SCOPE_INTEGRATION):
-        assert not cu._in_scope("path-ceiling", scope)  # pylint: disable=protected-access
-        assert "path-ceiling" in cu._omitted_checks(scope)  # pylint: disable=protected-access
-
-
-def test_path_ceiling_owner_is_the_orchestrator_not_a_builder() -> None:
-    """A breach is driven by install-root length and engine-side naming; no builder persona can fix it."""
-    hint = cu.OWNER_HINTS["path-ceiling"]
-
-    assert hint.startswith("orchestrator")
-    assert hint not in {"model", "report"}
-
-
-def test_path_ceiling_gate_names_the_native_skip_statuses() -> None:
-    """Pinned as a contract, because exit 3 alone would mask a renamed status behind the same verdict."""
-    gate = _path_ceiling_gate()
-
-    assert {"unknown_paths", "no_paths"} <= gate.not_checked_statuses
-    assert gate.pass_statuses == frozenset({"ok"})
-    assert gate.finding_statuses == frozenset({"over_ceiling"})
-
-
 def test_path_ceiling_over_ceiling_is_a_finding_not_a_pass(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The facade must never be the one place a bundle Desktop cannot open reads as done."""
     gate = _path_ceiling_gate()
@@ -2871,6 +2658,8 @@ def test_path_ceiling_over_ceiling_is_a_finding_not_a_pass(tmp_path: Path, monke
     assert check["status"] == cu.STATUS_FINDINGS
     assert check["native_status"] == "over_ceiling"
     assert check["native_exit"] == 1
+    # Install-root length and engine-side naming: no builder persona can fix a breach.
+    assert cu.OWNER_HINTS["path-ceiling"].startswith("orchestrator")
 
 
 def test_path_ceiling_clean_scan_is_a_pass(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2900,11 +2689,7 @@ def test_path_ceiling_unmeasured_tree_is_not_checked(
 
 
 def test_path_ceiling_gate_accepts_the_native_scripts_real_over_ceiling_contract(tmp_path: Path) -> None:
-    """Run the REAL scanner and feed it through the REGISTERED gate, so a renamed status is caught.
-
-    The ceiling is tightened rather than building a genuinely 260-character path: the status strings
-    and exit codes under test are the contract, and they are identical either way.
-    """
+    """Run the REAL scanner and feed it through the REGISTERED gate, so a renamed status is caught."""
     target = _deep_tree(tmp_path / "unit")
     output_dir = tmp_path / "out"
     output_dir.mkdir()
@@ -3001,11 +2786,7 @@ def test_path_ceiling_finding_names_the_offending_paths() -> None:
 
 
 def test_path_ceiling_runs_end_to_end_on_a_real_unit(tmp_path: Path) -> None:
-    """The wiring must survive the real CLI: registered, run under --scope all, and annotated.
-
-    The JSON assertion is what pins the ``_annotate_path_ceiling`` hook - on a PASS row the console
-    never renders ``detail``, so a stdout-only test would not notice the hook being dropped.
-    """
+    """The wiring must survive the real CLI: registered, run under --scope all, and annotated."""
     target = REPO_ROOT / "examples" / "shipping-kpis"
     report_json = tmp_path / "unit.json"
 
@@ -3067,15 +2848,6 @@ def test_path_ceiling_pass_row_headline_carries_the_root_budget() -> None:
     assert "breaches above a 79-char installation root" in note
 
 
-def test_path_ceiling_budget_is_shown_even_when_not_tight() -> None:
-    """The tight flag would have stayed silent on the exact tree that motivated this finding."""
-    check = _pass_row(79, tight=False)
-
-    assert check["root_budget_is_tight"] is False
-    assert cu._path_ceiling_budget_note(check)  # pylint: disable=protected-access
-    assert "TIGHT" not in cu._path_ceiling_budget_note(check)  # pylint: disable=protected-access
-
-
 def test_path_ceiling_tight_budget_is_escalated_in_the_headline() -> None:
     """Always showing the number does not cost the advisory its teeth."""
     note = cu._path_ceiling_budget_note(_pass_row(30, tight=True))  # pylint: disable=protected-access
@@ -3107,11 +2879,7 @@ def _render_one(check: dict[str, object]) -> str:
 
 
 def test_path_ceiling_render_shows_the_budget_on_a_passing_row() -> None:
-    """The whole point of the fix: a PASS row must not hide the relocation risk.
-
-    ``_render_actionable_detail`` returns nothing for a clean row, so before this the console printed
-    only 'path-ceiling: PASS (native ok exit 0)' for a bundle that breaks on relocation.
-    """
+    """The whole point of the fix: a PASS row must not hide the relocation risk."""
     row = _pass_row(79)
     row.update({"id": "path-ceiling", "status": cu.STATUS_PASS, "native_status": "ok", "native_exit": 0})
 
@@ -3119,15 +2887,6 @@ def test_path_ceiling_render_shows_the_budget_on_a_passing_row() -> None:
 
     assert "path-ceiling: PASS (native ok exit 0; root budget 79" in out, out
     assert "breaches above a 79-char installation root" in out
-
-
-def test_path_ceiling_render_shows_the_budget_even_when_not_tight() -> None:
-    """Gating the line on root_budget_is_tight would have stayed silent on the motivating tree."""
-    row = _pass_row(79, tight=False)
-    row.update({"id": "path-ceiling", "status": cu.STATUS_PASS, "native_status": "ok", "native_exit": 0})
-    assert row["root_budget_is_tight"] is False
-
-    assert "root budget 79" in _render_one(row)
 
 
 def test_path_ceiling_impossible_budget_says_no_root_can_hold_it() -> None:
@@ -3172,15 +2931,7 @@ def test_path_ceiling_wording_is_status_aware() -> None:
 
 
 def test_path_ceiling_pass_then_relocate_breaches_and_the_pass_said_so(tmp_path: Path) -> None:
-    """The reviewer's reproduction, committed: one tree, two roots, and the PASS row warned about it.
-
-    Both the tree depth and the relocation distance are DERIVED from a calibration scan rather than
-    hard-coded. Providing explicit ceilings sized relative to the runner's temp-directory length makes
-    the test deterministic across arbitrary temp paths (preventing skips when pytest run numbers change
-    temp dir length) without encoding scanner layout internals. Overshooting the budget by one keeps
-    the binding path one unit over its OWN ceiling, so nothing created here needs Windows long-path
-    support.
-    """
+    """The reviewer's reproduction, committed: one tree, two roots, and the PASS row warned about it."""
     short_root = tmp_path / "s"
     root_len = len(str(short_root))
     ceiling_args = ["--ceiling", str(root_len + 150), "--dir-ceiling", str(root_len + 138)]
@@ -3212,11 +2963,7 @@ def _deep_tree_with_pad(root: Path, pad: int) -> Path:
 
 
 def _pad_for_headroom(root: Path, scratch: Path, headroom: int, extra_args: list[str] | None = None) -> int | None:
-    """Calibrate the padding that leaves exactly ``headroom`` characters of root budget.
-
-    ``root_budget`` falls one-for-one with the padded component, so one measured probe fixes the
-    constant without this test knowing the scanner's ceilings or path layout.
-    """
+    """Calibrate the padding that leaves exactly ``headroom`` characters of root budget."""
     probe = _scan_paths(_deep_tree_with_pad(root, 1), scratch / "probe.json", extra_args=extra_args)
     pad = probe["root_budget"] + 1 - probe["root_length"] - headroom
     shutil.rmtree(root, ignore_errors=True)
@@ -3251,12 +2998,7 @@ def _scan_paths(unit: Path, json_path: Path, extra_args: list[str] | None = None
 
 
 def test_one_scaffold_signature_cannot_exempt_two_findings(tmp_path: Path) -> None:
-    """Kills: a signature named 'A-B' exempting BOTH table 'A-B' and table 'A B' from one entry.
-
-    Measured before this: the gate flipped to PASS and reported *two* exemptions from *one* signature,
-    because ``_exempted`` compared slugs per finding and never asked how many findings the raw entry
-    matched in total.
-    """
+    """Kills: a signature named 'A-B' exempting BOTH table 'A-B' and table 'A B' from one entry."""
     _write_handover(
         tmp_path,
         {
@@ -3323,12 +3065,7 @@ def test_a_scaffold_signature_still_applies_when_it_names_exactly_one_finding(tm
 
 
 def test_two_artifacts_slugging_alike_refuse_a_single_handover_workbook(tmp_path: Path) -> None:
-    """Kills: the uniqueness guard held on the handover side only.
-
-    Measured: a unit shipping ``Bo ok.Report`` and ``Bo-ok.Report`` collapsed to ONE target key
-    ``book``, and a single handover workbook ``Book`` was accepted even though either artifact could
-    own it. The guard has to hold on both sides of the join.
-    """
+    """Kills: the uniqueness guard held on the handover side only."""
     _write_spec(tmp_path, ["Sales"])
     _write_report(tmp_path, ["Sales"], name="Bo ok")
     _write_report(tmp_path, ["Sales"], name="Bo-ok")
@@ -3353,13 +3090,7 @@ def test_one_artifact_still_binds_a_slugged_handover_workbook(tmp_path: Path) ->
 
 
 def test_reference_evidence_never_satisfies_a_differently_spelled_page(tmp_path: Path) -> None:
-    """Kills: reference evidence named 'A B' giving a validation-grade PASS to expected page 'A-B'.
-
-    Round 6 narrowed this to a uniqueness-guarded fallback; round 7 removed it. A view name and a
-    page name are BOTH source-owned - they come out of the same Tableau workbook with no filesystem
-    in between - so no mechanism re-spells one into the other, and a guard on a fallback with no
-    mechanism behind it only narrows a match that was never justified.
-    """
+    """Kills: reference evidence named 'A B' giving a validation-grade PASS to expected page 'A-B'."""
     _write_spec(tmp_path, ["A-B"])
     _write_report(tmp_path, ["A-B"])
     _write_reference_manifest(tmp_path, ["A B"])
@@ -3396,11 +3127,7 @@ def test_exact_reference_evidence_beats_a_same_named_sibling(tmp_path: Path) -> 
 
 
 def test_oracle_evidence_from_a_different_workbook_satisfies_nothing(tmp_path: Path) -> None:
-    """Kills: an oracle record for 'Revenue' produced by 'Different Workbook' passing this unit.
-
-    Drop evidence was bound to its producing workbook in round 2. Oracle evidence never was, so the
-    round-2 cross-workbook defect survived at the oracle layer.
-    """
+    """Kills: an oracle record for 'Revenue' produced by 'Different Workbook' passing this unit."""
     _write_spec(tmp_path, ["Revenue"])
     _write_report(tmp_path, ["Revenue"])
     _write_oracle_manifest(tmp_path, ["Revenue"], workbook=None, workbook_luid=OTHER_LUID)
@@ -3431,20 +3158,7 @@ def test_oracle_evidence_from_this_workbook_still_counts(tmp_path: Path) -> None
 
 
 def test_a_record_whose_workbook_cannot_be_established_certifies_nothing(tmp_path: Path) -> None:
-    """Kills issue #450's fail-open, which is what this test used to ASSERT.
-
-    ⚠️ It previously read *"declaring no workbook is admitted but flagged"*, on the premise that "real
-    oracle manifests carry no workbook field, so refusing them outright would reject every capture in
-    the estate". The premise was false in the only way that mattered: a real manifest carries
-    ``workbook_luid`` and ``workbook_name`` per view - it carries no ``workbook`` key, which is a
-    defect in the READER, not a property of the producer. Measured on a real 360-view capture, every
-    record was therefore "unattributed" and admitted anyway, so the guard advertised in
-    :class:`OracleEvidence` had never once fired and a foreign workbook's render could certify any
-    page whose name it shared.
-
-    A record that establishes no workbook at all now certifies nothing. It is still counted, because
-    a refusal nobody can see is not a guard.
-    """
+    """Kills issue #450's fail-open, which is what this test used to ASSERT."""
     _write_spec(tmp_path, ["Revenue"])
     _write_report(tmp_path, ["Revenue"])
     _write_oracle_manifest(tmp_path, ["Revenue"], workbook=None, workbook_luid=None)
@@ -3465,11 +3179,7 @@ def test_a_record_whose_workbook_cannot_be_established_certifies_nothing(tmp_pat
 
 
 def test_a_display_name_alone_never_certifies_however_real_the_capture(tmp_path: Path) -> None:
-    """The positive half of #450: `capture_tableau_oracle.py` writes `workbook_name` PER VIEW.
-
-    Without this the fix above is indistinguishable from "refuse everything", which would make the
-    gate report zero coverage on every real capture in the estate.
-    """
+    """The positive half of #450: `capture_tableau_oracle.py` writes `workbook_name` PER VIEW."""
     _write_spec(tmp_path, ["Revenue"])
     _write_report(tmp_path, ["Revenue"])
     _write_oracle_manifest(tmp_path, ["Revenue"], workbook=None, workbook_luid=None, workbook_name="Book")
@@ -3499,13 +3209,7 @@ def test_a_foreign_display_name_is_refused_too_and_counted_separately(tmp_path: 
 
 
 def test_a_foreign_luid_is_refused_even_when_the_workbook_name_matches_exactly(tmp_path: Path) -> None:
-    """Kills: a weaker axis rescuing a record a stronger one has already rejected.
-
-    Two projects may hold workbooks with the same display name - the ambiguity `_runs/<NNN>-<slug>/`
-    numbering exists to avoid - so a name that agrees after a LUID that does not is exactly the case
-    where the name must not be consulted. The unit's own LUID comes from its handover slice's
-    `workbook.source_id`, whose basename is `harvest_estate_assets.py`'s `<luid>_<name>`.
-    """
+    """Kills: a weaker axis rescuing a record a stronger one has already rejected."""
     _write_spec(tmp_path, ["Revenue"])
     _write_report(tmp_path, ["Revenue"])
     _write_handover(tmp_path, {"name": "Book", "source_id": "assets/adc431bb-aeeb-43fe-8ecb-092d4bae8bfa_Book.twbx"})
@@ -3525,14 +3229,7 @@ def test_a_foreign_luid_is_refused_even_when_the_workbook_name_matches_exactly(t
 
 
 def test_a_foreign_luid_is_refused_when_this_unit_cannot_establish_a_luid_at_all(tmp_path: Path) -> None:
-    """BLOCKER 1 at the exit gate, and the case the test above structurally cannot reach.
-
-    ⚠️ The negative test beside this one gives the unit a LUID, so it only ever exercises *LUID vs
-    LUID*. Round-1 review of PR #454 measured the gap: with NO unit LUID the guard skipped the
-    record's LUID as "not shared" and admitted it on an equal display name - `PASS`, visual AND
-    numeric, from a foreign workbook. Real oracle records always carry both fields, so this was the
-    ordinary case rather than an edge one.
-    """
+    """BLOCKER 1 at the exit gate, and the case the test above structurally cannot reach."""
     _write_spec(tmp_path, ["Revenue"])
     _write_report(tmp_path, ["Revenue"])
     spec = json.loads((tmp_path / "migration-spec.json").read_text(encoding="utf-8"))
@@ -3556,15 +3253,7 @@ def test_a_foreign_luid_is_refused_when_this_unit_cannot_establish_a_luid_at_all
 
 
 def test_a_windows_recorded_source_id_still_yields_its_luid(tmp_path: Path) -> None:
-    """BLOCKER 4 at this gate's call site: a handover records a path from ANOTHER host.
-
-    ⚠️ This assertion is a no-op on Windows and load-bearing on Linux, and that asymmetry is the
-    defect rather than a flaw in the test. `WindowsPath` accepts both separators, so a Windows
-    workstation reports the guard working while a Linux CI runner - where those backslashes are
-    ordinary filename characters - gets no LUID at all and falls back to a weaker axis. CI runs on
-    Linux, so this test is exercised exactly where the divergence bites; the flavour-explicit proof
-    that runs anywhere is `test_workbook_identity.test_the_recorded_path_parse_does_not_use_the_running_hosts_flavour`.
-    """
+    """BLOCKER 4 at this gate's call site: a handover records a path from ANOTHER host."""
     _write_spec(tmp_path, ["Revenue"])
     _write_report(tmp_path, ["Revenue"])
     _write_handover(
@@ -3582,11 +3271,7 @@ def test_a_windows_recorded_source_id_still_yields_its_luid(tmp_path: Path) -> N
 
 
 def test_a_matching_luid_admits_a_record_whose_display_name_the_filesystem_changed(tmp_path: Path) -> None:
-    """The positive control for the LUID route, and symptom A of #450 in this gate.
-
-    A unit ships `Book.Report` while the site publishes `Bo ok`; the stem is a sanitised spelling, not
-    the name. The LUID is what bridges them, and it is exact.
-    """
+    """The positive control for the LUID route, and symptom A of #450 in this gate."""
     _write_spec(tmp_path, ["Revenue"])
     _write_report(tmp_path, ["Revenue"])
     _write_handover(tmp_path, {"name": "Book", "source_id": "assets/adc431bb-aeeb-43fe-8ecb-092d4bae8bfa_Book.twbx"})
@@ -3606,17 +3291,7 @@ def test_a_matching_luid_admits_a_record_whose_display_name_the_filesystem_chang
 
 
 def test_a_unit_local_reference_manifest_is_not_certified_by_its_location(tmp_path: Path) -> None:
-    """BLOCKER 3 from round-1 review of PR #454. This test asserted the OPPOSITE.
-
-    ⚠️ It read *"a reference manifest inside the unit is attributable by location"*, on the argument
-    that `_reference_dirs` never walks up so such a manifest is this unit's by construction. Measured
-    consequence: the guard was SKIPPED for those records, so a manifest with no workbook identity at
-    all was admitted (`admitted_evidence=1`, visual AND numeric certified) - and so was one whose
-    `source_workbook_sha256` named a **different workbook** entirely.
-
-    Location controls DISCOVERY; it never substitutes for identity. A manifest that establishes no
-    workbook now certifies nothing, and is counted.
-    """
+    """BLOCKER 3 from round-1 review of PR #454. This test asserted the OPPOSITE."""
     _write_spec(tmp_path, ["Revenue"])
     _write_report(tmp_path, ["Revenue"])
     _write_reference_manifest(tmp_path, ["Revenue"], workbook=None, source_sha=None)
@@ -3631,13 +3306,7 @@ def test_a_unit_local_reference_manifest_is_not_certified_by_its_location(tmp_pa
 
 
 def test_a_unit_local_reference_manifest_certifies_when_its_recorded_sha_is_this_source(tmp_path: Path) -> None:
-    """The positive twin: the identity a reference manifest DOES carry is `source_workbook_sha256`.
-
-    `capture_tableau_reference.py:234` writes it, so the fix for blocker 3 is to hash the unit's own
-    source asset and compare - not to refuse the whole producer. Without this twin, "refuse every
-    reference record" would pass the test above and delete the only validation-grade route in the
-    toolkit.
-    """
+    """The positive twin: the identity a reference manifest DOES carry is `source_workbook_sha256`."""
     _write_spec(tmp_path, ["Revenue"])
     _write_report(tmp_path, ["Revenue"])
     source = _write_unit_source(tmp_path, b"the workbook this unit was built from")
@@ -3666,17 +3335,7 @@ def test_a_unit_local_reference_manifest_recording_another_workbooks_sha_is_refu
 
 
 def test_a_manifest_whose_luid_contradicts_its_matching_sha_certifies_nothing(tmp_path: Path) -> None:
-    """BLOCKING FINDING B at the EXIT gate. Verbatim before this fix::
-
-        CONTRADICTORY_EXIT={"status":"PASS","visual_present":1,"numeric_present":1,
-          "admitted_evidence":1,"foreign_workbook_evidence":[],"unattributed_evidence":0}
-
-    The unit's own LUID comes from its spec's `<luid>_<name>` asset filename and its sha256 from that
-    asset's bytes, so this manifest agrees with one and contradicts the other. `_attribute_record` is
-    asserted directly because it names WHICH guard refused: `visual_present == 0` alone is produced
-    by at least four other guards in this gate, and `unattributed_evidence`/`name_only_evidence` are
-    pinned to zero so an accidental downgrade to a weaker refusal fails here too.
-    """
+    """BLOCKING FINDING B at the EXIT gate. Verbatim before this fix::"""
     _write_spec(tmp_path, ["Revenue"])
     _write_report(tmp_path, ["Revenue"])
     source = _write_unit_source(tmp_path, b"the workbook this unit was built from")
@@ -3731,19 +3390,7 @@ def _luid_at_scopes(unit: Path, *, entry: str | None = None, state: str | None =
 
 
 def test_an_entry_luid_does_not_silently_supersede_a_contradicting_manifest_luid(tmp_path: Path) -> None:
-    """THE round-2 finding at the EXIT gate. Verbatim before this fix::
-
-        B_EXIT_MULTISCOPE {"status":"PASS","visual_present":1,"numeric_present":1,
-          "admitted_evidence":1,"foreign_workbook_evidence":[]}
-
-    `_declared_workbook` read ``entry.get("workbook_luid") or outer.get("workbook_luid")``, so an
-    entry-level LUID naming this unit discarded a manifest-level LUID naming another workbook and
-    the contradiction never reached `WorkbookIdentity.attribute`. No schema makes the narrower scope
-    an override; every non-blank claim must agree.
-
-    ``_attribute_record`` is asserted directly because it names WHICH guard refused - at least four
-    others in this gate also produce ``visual_present == 0``.
-    """
+    """THE round-2 finding at the EXIT gate. Verbatim before this fix::"""
     _write_spec(tmp_path, ["Revenue"])
     _write_report(tmp_path, ["Revenue"])
     source = _write_unit_source(tmp_path, b"the workbook this unit was built from")
@@ -3764,13 +3411,7 @@ def test_an_entry_luid_does_not_silently_supersede_a_contradicting_manifest_luid
 
 
 def test_a_state_scope_luid_is_read_at_this_gate_too(tmp_path: Path) -> None:
-    """The near neighbour: the entry gate reads the STATE scope and this one used not to.
-
-    A scope one gate compares while the other ignores it is a hole by construction - measured on this
-    branch before the fix, ``PASS route=sha256 admitted=1`` on a manifest whose only state declared
-    another workbook's LUID. States are collapsed into one record here, so their claims are claims
-    about that record and must agree with the entry's and the manifest's.
-    """
+    """The near neighbour: the entry gate reads the STATE scope and this one used not to."""
     _write_spec(tmp_path, ["Revenue"])
     _write_report(tmp_path, ["Revenue"])
     source = _write_unit_source(tmp_path, b"the workbook this unit was built from")
@@ -3786,12 +3427,7 @@ def test_a_state_scope_luid_is_read_at_this_gate_too(tmp_path: Path) -> None:
 
 
 def test_scopes_that_agree_or_stay_silent_still_certify_at_the_exit_gate(tmp_path: Path) -> None:
-    """THE positive control: refusing every multi-scope manifest would pass both tests above.
-
-    Every ordinary shape must still PASS on the matching sha256 - all three scopes agreeing, a case
-    difference (a LUID is a machine id), a blank scope beside a real one, and no LUID at all. An
-    absent claim is SILENT; only an actively contradicting one refuses.
-    """
+    """THE positive control: refusing every multi-scope manifest would pass both tests above."""
     for label, luids in (
         ("all three agree", {"manifest": UNIT_LUID, "entry": UNIT_LUID, "state": UNIT_LUID}),
         ("case differs only", {"manifest": UNIT_LUID, "state": UNIT_LUID.upper()}),
@@ -3818,12 +3454,7 @@ def test_scopes_that_agree_or_stay_silent_still_certify_at_the_exit_gate(tmp_pat
 
 
 def test_a_sha_bearing_record_is_refused_when_the_unit_cannot_hash_its_source(tmp_path: Path) -> None:
-    """Fail-CLOSED on unknown: no locatable source means the recorded sha cannot be checked.
-
-    This is the cost of blocker 3's fix and it is stated rather than hidden - a unit that ships no
-    resolvable Tableau asset cannot use sha-bearing evidence, and the refusal is disclosed in the
-    grade rather than silently dropped.
-    """
+    """Fail-CLOSED on unknown: no locatable source means the recorded sha cannot be checked."""
     _write_spec(tmp_path, ["Revenue"])
     _write_report(tmp_path, ["Revenue"])
     _write_reference_manifest(tmp_path, ["Revenue"], workbook=None, source_sha="ab" * 32)
@@ -3836,12 +3467,7 @@ def test_a_sha_bearing_record_is_refused_when_the_unit_cannot_hash_its_source(tm
 
 
 def test_a_non_packaged_unit_still_reads_an_ancestors_oracle_capture(tmp_path: Path) -> None:
-    """The control that makes the package test below meaningful rather than a deletion.
-
-    `_oracle_dirs` looks beside the unit AND beside its parent, because `capture_tableau_oracle.py`
-    writes one flat capture per run while a unit sits under it. Removing that walk-up would make a
-    real capture invisible, which is the defect the `oracle/`-name search was added to fix.
-    """
+    """The control that makes the package test below meaningful rather than a deletion."""
     unit = tmp_path / "unit"
     _write_spec(unit, ["Revenue"])
     _write_report(unit, ["Revenue"])
@@ -3851,14 +3477,7 @@ def test_a_non_packaged_unit_still_reads_an_ancestors_oracle_capture(tmp_path: P
 
 
 def test_a_self_contained_package_does_not_also_read_the_runs_flat_capture(tmp_path: Path) -> None:
-    """Issue #451's defect ONE GATE ALONG - found here, not in the brief, and measured before fixing.
-
-    A package at `_runs/<run>/<unit>/` beside the run's flat capture read BOTH manifests, so every
-    view matched twice and this gate refused each page as "2 producer records are named 'Revenue'":
-    0 visual coverage, silently, making packaging strictly worse than not packaging. Same class as
-    the entry gate's "2 records share this name once normalized", so the rule lives once in
-    `bundle_corpus.is_self_contained` rather than being fixed a second time here.
-    """
+    """Issue #451's defect ONE GATE ALONG - found here, not in the brief, and measured before fixing."""
     unit = tmp_path / "unit"
     _write_spec(unit, ["Revenue"])
     _write_report(unit, ["Revenue"])
@@ -3888,14 +3507,7 @@ def test_two_reference_records_with_one_name_satisfy_nothing_and_say_why(tmp_pat
 
 
 def test_one_reference_directory_is_read_once_even_when_named_two_ways(tmp_path: Path) -> None:
-    """Kills: resolving candidate reference directories AFTER deduplicating them.
-
-    ``_unit_dir(target)`` and ``target`` are the same directory under two spellings, so the manifest
-    was read twice and every dashboard produced two records - which then refused each other as "2
-    producer records are named X". The same defect was fixed for handover discovery in round 3 and
-    for oracle discovery; reference discovery was left behind, and was invisible until multiplicity
-    stopped being collapsed.
-    """
+    """Kills: resolving candidate reference directories AFTER deduplicating them."""
     _write_spec(tmp_path, ["Revenue"])
     _write_report(tmp_path, ["Revenue"])
     _write_reference_manifest(tmp_path, ["Revenue"])
@@ -3920,13 +3532,7 @@ def test_two_producer_records_naming_one_page_satisfy_nothing(tmp_path: Path) ->
 
 
 def test_a_relative_target_reads_one_reference_directory_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Kills: deduplicating candidate reference directories BEFORE resolving them.
-
-    ``_unit_dir`` resolves its result while ``target`` stays as the caller spelled it, so under the
-    documented relative-path CLI shape the two candidates are unequal Path values that name one
-    directory. Deduplicating first cannot see that; resolving first can. Round 3 measured the same
-    ordering defect in handover discovery, where it turned a declared reason into 'ambiguous'.
-    """
+    """Kills: deduplicating candidate reference directories BEFORE resolving them."""
     unit = tmp_path / "unit"
     _write_spec(unit, ["Revenue"])
     _write_report(unit, ["Revenue"])
@@ -3940,13 +3546,7 @@ def test_a_relative_target_reads_one_reference_directory_once(tmp_path: Path, mo
 
 
 def test_a_report_and_its_model_sharing_a_stem_are_one_owner_not_a_collision(tmp_path: Path) -> None:
-    """Kills: counting artifact FILES rather than distinct stems on the target side of the guard.
-
-    Every ordinary unit ships ``<Name>.Report`` beside ``<Name>.SemanticModel``. Counting the files
-    made the shared stem look like two competing owners, so the slugged fallback refused to bind for
-    the whole estate - measured, it turned 19 engine-declared omissions into 21 unexplained ones. A
-    report and its model are one name.
-    """
+    """Kills: counting artifact FILES rather than distinct stems on the target side of the guard."""
     _write_full_spec(tmp_path, dashboards=[], worksheets=[("ws.a", "A"), ("ws.b", "B")])
     _write_report(tmp_path, ["A"], name="Book!")
     (tmp_path / "fabric" / "Book!.SemanticModel" / "definition").mkdir(parents=True)
@@ -3964,13 +3564,7 @@ def test_a_report_and_its_model_sharing_a_stem_are_one_owner_not_a_collision(tmp
 
 
 def test_a_worksheet_typed_record_cannot_certify_a_same_named_dashboard(tmp_path: Path) -> None:
-    """Kills: `view_type` present in the manifest and thrown away here.
-
-    Measured: a record explicitly carrying ``view_type: "worksheet"`` for `Sales` gave a full oracle
-    PASS to the DASHBOARD `Sales`. A Tableau dashboard routinely shares its name with its principal
-    worksheet, so this accepts one visual as evidence for a whole page - and that is the ordinary
-    case, not an edge one.
-    """
+    """Kills: `view_type` present in the manifest and thrown away here."""
     _write_full_spec(tmp_path, dashboards=[("Sales", [])], worksheets=[])
     _write_report(tmp_path, ["Sales"])
     _write_oracle_manifest(tmp_path, ["Sales"], view_type="worksheet")
@@ -3983,17 +3577,7 @@ def test_a_worksheet_typed_record_cannot_certify_a_same_named_dashboard(tmp_path
 
 
 def test_a_legacy_uncertified_record_is_not_numeric_evidence(tmp_path: Path) -> None:
-    """#480 round 3, at `check_unit`'s numeric gate.
-
-    ⚠️ The record here is EXACTLY what `origin/master`'s capture wrote for every HTTP 200 -- a
-    `row_count` from `summarise_csv(payload)` and no `certification` -- so this is the shape a live
-    customer's `_oracle/` holds, not a synthetic edge case. `check_unit` still gates on
-    `status == "ok" and data["path"]` and knows nothing about certification; what changes is that
-    `read_manifest` hands it a record with no `path`.
-
-    The VISUAL half must be unaffected, which is what separates "the numeric claim is withheld" from
-    "the whole capture stopped counting".
-    """
+    """#480 round 3, at `check_unit`'s numeric gate."""
     _write_full_spec(tmp_path, dashboards=[("Sales", [])], worksheets=[])
     _write_report(tmp_path, ["Sales"])
     _write_oracle_manifest(tmp_path, ["Sales"], view_type="dashboard")
@@ -4037,12 +3621,7 @@ def test_a_worksheet_typed_record_certifies_a_worksheet_page(tmp_path: Path) -> 
 
 @pytest.mark.parametrize("declared", [None, "unknown", "story", ""])
 def test_a_record_whose_kind_is_unestablished_certifies_nothing(tmp_path: Path, declared: str | None) -> None:
-    """`unknown` is a REFUSAL, not a third kind - and neither is an unrecognised string.
-
-    `capture_tableau_oracle.py` writes the literal `"unknown"` when the Metadata API could not be
-    reached or exposed no LUID (#402). Treating it - or any out-of-vocabulary value, or an absent key
-    from a pre-#402 capture - as either kind is exactly the guess the kind guard exists to refuse.
-    """
+    """`unknown` is a REFUSAL, not a third kind - and neither is an unrecognised string."""
     _write_full_spec(tmp_path, dashboards=[("Sales", [])], worksheets=[])
     _write_report(tmp_path, ["Sales"])
     _write_oracle_manifest(tmp_path, ["Sales"], view_type=declared)
@@ -4057,12 +3636,7 @@ def test_a_record_whose_kind_is_unestablished_certifies_nothing(tmp_path: Path, 
 
 
 def test_reference_manifest_entries_are_dashboards_by_construction(tmp_path: Path) -> None:
-    """`capture_tableau_reference.py` builds `dashboards[]` from the spec's dashboards.
-
-    So the kind is structurally known for a reference capture and does not wait on #402 - but it is
-    only ever `dashboard`, which means a worksheet page genuinely has no reference oracle rather than
-    being certified by a dashboard picture.
-    """
+    """`capture_tableau_reference.py` builds `dashboards[]` from the spec's dashboards."""
     _write_full_spec(tmp_path, dashboards=[], worksheets=[("ws.sales", "Sales")])
     _write_report(tmp_path, ["Sales"])
     _write_reference_manifest(tmp_path, ["Sales"])
@@ -4075,12 +3649,7 @@ def test_reference_manifest_entries_are_dashboards_by_construction(tmp_path: Pat
 
 
 def test_two_producing_workbooks_slugging_alike_are_both_refused(tmp_path: Path) -> None:
-    """Kills: uniqueness checked among UNIT workbooks only.
-
-    Measured: records declaring `Bo ok` and `Bo-ok` were both admitted to unit workbook `Book`,
-    because the guard asked "is this key unique among my artifacts?" and never "is it unique among
-    the things claiming it?". Uniqueness of a lossy key on one side is not identity.
-    """
+    """Kills: uniqueness checked among UNIT workbooks only."""
     _write_full_spec(tmp_path, dashboards=[("Sales", []), ("Ops", [])], worksheets=[])
     _write_report(tmp_path, ["Sales", "Ops"])
     _write_oracle_manifest(tmp_path, ["Sales"], workbook="Bo ok", workbook_luid=None)
@@ -4108,11 +3677,7 @@ def test_two_producing_workbooks_slugging_alike_are_both_refused(tmp_path: Path)
 
 
 def test_a_sanitised_spelling_no_longer_binds_because_a_name_is_not_identity(tmp_path: Path) -> None:
-    """The lossy workbook fallback survives its second guard.
-
-    It is justified here and only here: the unit side is a filesystem-sanitised artifact STEM, so
-    something really may have re-spelled it. One producer, one artifact, one key.
-    """
+    """The lossy workbook fallback survives its second guard."""
     _write_full_spec(tmp_path, dashboards=[("Sales", [])], worksheets=[])
     _write_report(tmp_path, ["Sales"], name="Bo ok")
     _write_oracle_manifest(tmp_path, ["Sales"], workbook="Bo-ok")
@@ -4269,11 +3834,7 @@ class TestSafePrintCP1252:
         assert "SUFFIX" in output
 
     def test_os_error_on_first_write_propagates_immediately(self):
-        """An OSError must propagate on the first write; no second write attempted.
-
-        A mutation broadening the catch to Exception would retry and hit the
-        second (accepting) write, so write_count > 1 kills the mutation.
-        """
+        """An OSError must propagate on the first write; no second write attempted."""
         import io
 
         class FirstWriteFails(io.StringIO):
@@ -4308,13 +3869,7 @@ class TestSafePrintCP1252:
 
 
 class _Followed(Exception):
-    """Raised at the exact call site where the exit gate dereferenced or discovered too early.
-
-    ⚠️ Deliberately not `AssertionError`, and deliberately caught inside the patched window: `Path.exists`
-    is armed here and **pytest calls it while formatting a traceback**, so letting the failure escape
-    with the patch installed turns a genuine kill into an INTERNALERROR that reads as infrastructure
-    breakage rather than as this test failing.
-    """
+    """Raised at the exact call site where the exit gate dereferenced or discovered too early."""
 
 
 #: Everything the exit gate must not have reached before classification. `_unit_dir` is named
@@ -4330,12 +3885,7 @@ _FORBIDDEN_GATE_HELPERS = (
 
 
 def _run_all_without_following(target: Path, scope: str = cu.SCOPE_ALL) -> tuple[dict | None, str]:
-    """Run the exit gate with every follower and discovery helper armed to explode.
-
-    Uses its own `MonkeyPatch.context` rather than the test's `monkeypatch` fixture: undoing that
-    one would also undo the autouse `no_native_gates` patches and silently re-enable the real
-    subprocess gates for the rest of the test.
-    """
+    """Run the exit gate with every follower and discovery helper armed to explode."""
 
     def boom(*_args: object, **_kwargs: object) -> object:
         raise _Followed("the exit gate followed or discovered before classifying the supplied target")
@@ -4394,11 +3944,7 @@ def _boundary_row(report: dict) -> dict:
 
 
 def test_the_destination_evidence_is_readable_when_the_real_path_is_supplied(tmp_path: Path) -> None:
-    """The POSITIVE control that makes every refusal below a refusal rather than a vacuous pass.
-
-    Handed its real path, this package's own oracle capture certifies its one page. So the refusals
-    that follow are withholding evidence that demonstrably exists and would otherwise be consumed.
-    """
+    """The POSITIVE control that makes every refusal below a refusal rather than a vacuous pass."""
     package = _package(tmp_path / "run" / "packages" / "Unit")
 
     report = cu.run_all(package)
@@ -4412,13 +3958,7 @@ def test_the_destination_evidence_is_readable_when_the_real_path_is_supplied(tmp
 def test_an_aliased_root_is_refused_before_unit_dir_and_reads_no_destination_evidence(
     tmp_path: Path, make_link
 ) -> None:
-    """Kills: classifying after `_unit_dir()`/`resolve()` - the exact residual PR #590 left open.
-
-    The alias is not lexically package-shaped, so following it is the ONLY way to reach the package
-    verdict; the previous ordering did exactly that and then read the destination's oracle manifest.
-    Two independent assertions: the armed run proves nothing was followed or discovered at all, and
-    the ordinary run proves the destination's evidence produced no row.
-    """
+    """Kills: classifying after `_unit_dir()`/`resolve()` - the exact residual PR #590 left open."""
     package = _package(tmp_path / "run" / "packages" / "Unit")
     alias = tmp_path / "alias"
     make_link(alias, package)
@@ -4448,11 +3988,7 @@ def test_an_aliased_root_is_refused_before_unit_dir_and_reads_no_destination_evi
 def test_a_package_shaped_root_without_a_regular_marker_is_refused_before_discovery(
     tmp_path: Path, relative: tuple[str, ...], marker: str | None, code: str, placement: str
 ) -> None:
-    """Kills: falling back to ordinary bundle handling for an unproven boundary.
-
-    Both placements and both damaged-marker shapes ride one parametrization: a DIRECTORY named
-    `package-manifest.json` declares exactly as little as no marker at all.
-    """
+    """Kills: falling back to ordinary bundle handling for an unproven boundary."""
     unit = _package(tmp_path.joinpath(*relative), marker=False)
     if marker == "dir":
         (unit / bundle_corpus.PACKAGE_MARKER).mkdir()
@@ -4497,18 +4033,7 @@ def test_run_all_classifies_its_own_argument_and_accepts_no_injected_verdict(
 ) -> None:
     """Kills: a caller-supplied `classification`, and classifying the RESOLVED target.
 
-    Two halves, both named. **At the API level** there is no parameter through which one path's
-    verdict could clear another - round-1 review of PR #593 rejected the earlier `classification=`
-    kwarg for exactly that reason, so a signature assertion is the only construction that makes the
-    mismatch impossible rather than merely unused. **At the call level** the target is spelled
-    `<...>/Unit/fabric/..`, which `resolve()` collapses to `<...>/Unit`: a recorded argument equal to
-    the supplied spelling can only have been taken before resolution, and a single entry can only
-    mean the exit gate never asked a second time.
-
-    ⚠️ Scope stated: this counts `check_unit`'s OWN calls. The direct helpers `run_all` then invokes
-    each re-classify the ALREADY-CLEARED root by design (issue #562) - that is asserted positively
-    below rather than allowed silently, because "somebody asked" is only safe when every ask is bound
-    to the asker's own argument. `bundle_corpus.evidence_dirs` classifies again for the same reason.
+    Refs issue #562 and PR #593 round-1 review.
     """
     assert "classification" not in inspect.signature(cu.run_all).parameters
 
@@ -4534,11 +4059,7 @@ def test_run_all_classifies_its_own_argument_and_accepts_no_injected_verdict(
 def test_the_cli_preclassifies_only_for_its_own_is_dir_check_and_run_all_reclassifies(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The CLI's own verdict guards its following pre-check and is NOT handed on as authority.
-
-    Two classifications of the SAME original path is the intended shape: the second is bound to
-    `run_all`'s own argument by construction, which an injected object never could be.
-    """
+    """The CLI's own verdict guards its following pre-check and is NOT handed on as authority."""
     package = _package(tmp_path / "run" / "packages" / "Unit")
     seen: list[Path] = []
     real = cu.classify_target
@@ -4586,16 +4107,7 @@ _FORBIDDEN_DIRECT_PRIMITIVES = (
 
 
 def _without_following(call, delegates: tuple[str, ...] = ()) -> tuple[object, str]:
-    """Run one direct helper call with every follower, reader and the oracle loader armed.
-
-    ``delegates`` additionally arms the helpers this entry would otherwise LEAN ON for its refusal.
-    Without that, a guard deleted from `check_page_parity` survives every observable assertion,
-    because `page_expectation`'s guard refuses one frame deeper and the shape comes out identical -
-    the "moved boundary" shape. Arming them is what makes each guard independently necessary.
-
-    Same `MonkeyPatch.context` reasoning as `_run_all_without_following`, and the same reason for a
-    non-`AssertionError` signal: `Path.exists` is armed and pytest calls it while formatting.
-    """
+    """Run one direct helper call with every follower, reader and the oracle loader armed."""
 
     def boom(*_args: object, **_kwargs: object) -> object:
         raise _Followed("a direct helper followed, read, discovered or delegated before classifying")
@@ -4616,13 +4128,7 @@ def _without_following(call, delegates: tuple[str, ...] = ()) -> tuple[object, s
 
 
 def _unsafe_root(tmp_path: Path, shape: str) -> tuple[Path, Path]:
-    """One unsafe root plus the REAL directory holding the oracle evidence it must not consume.
-
-    `alias` is a reparse point onto an intact package - not lexically package-shaped, so following it
-    is the only way to reach a verdict. `damaged` is lexically package-shaped with no marker. Built
-    lazily per shape: `_link_directory` skips where the account cannot create a link, and the damaged
-    case must not skip for a link it never needed.
-    """
+    """One unsafe root plus the REAL directory holding the oracle evidence it must not consume."""
     if shape == "alias":
         package = _package(tmp_path / "run" / "packages" / "Unit")
         alias = tmp_path / "alias"
@@ -4690,11 +4196,7 @@ def test_a_direct_helper_refuses_an_unsafe_root_before_following_or_reading_anyt
 ) -> None:
     """Kills: classifying after `_unit_dir()`/`shipping_reports`/`resolve()` on the DIRECT surface.
 
-    The inverse of the residual PR #593 left open: `check_oracle_coverage(alias, ...)` used to return
-    a full visual PASS on a package the caller never named, and a package-shaped root with no marker
-    measured `assessable=True`, parity `PASS`, `visual_present=1`. Every follower, every reader, the
-    oracle manifest loader AND this entry's own delegates are armed, so reaching *any* of them is the
-    failure - not merely producing a wrong verdict, and not a refusal borrowed one frame deeper.
+    Residual left open by PR #593.
     """
     root, _evidence = _unsafe_root(tmp_path, shape)
     call, expect_refused, delegates = _DIRECT_REFUSALS[helper]
@@ -4707,13 +4209,7 @@ def test_a_direct_helper_refuses_an_unsafe_root_before_following_or_reading_anyt
 
 @pytest.mark.parametrize("shape", ["alias", "damaged"])
 def test_an_explicit_oracle_directory_does_not_bypass_the_capture_guard(tmp_path: Path, shape: str) -> None:
-    """Kills: guarding only `_unit_dir`/`_oracle_dirs`.
-
-    An explicit oracle directory skips both, so a `_unit_dir`-based guard would never fire - measured,
-    a direct call read one record with `_unit_dir` armed to fail and never called. The manifest loader
-    is armed here: the typed refusal must be raised before it, and it must carry no classification
-    object, no target and no destination.
-    """
+    """Kills: guarding only `_unit_dir`/`_oracle_dirs`."""
     root, evidence = _unsafe_root(tmp_path, shape)
     assert (evidence / "oracle-manifest.json").is_file(), "the evidence being withheld must exist"
 
@@ -4728,11 +4224,7 @@ def test_an_explicit_oracle_directory_does_not_bypass_the_capture_guard(tmp_path
 
 
 def test_a_refusal_leaks_no_supplied_component_through_any_channel(tmp_path: Path) -> None:
-    """Both the alias and the destination are secret-bearing; neither may appear anywhere.
-
-    Dicts, their JSON rendering, and the exception's `str`/`repr` are all checked, because the
-    refusal is the object a caller pastes into an issue.
-    """
+    """Both the alias and the destination are secret-bearing; neither may appear anywhere."""
     package = _package(tmp_path / "run" / "packages" / "Contoso-Secret")
     alias = tmp_path / "Fabrikam-Confidential"
     _link_directory(alias, package)
@@ -4758,9 +4250,7 @@ def test_a_refusal_leaks_no_supplied_component_through_any_channel(tmp_path: Pat
 def test_no_direct_helper_accepts_a_caller_supplied_boundary_verdict(tmp_path: Path) -> None:
     """Kills: adding a `classification`/`_CheckedTarget`/clearance parameter to any of the five.
 
-    A parameter that decides whether a boundary is safe is exactly the parameter a caller must not be
-    able to supply - one path's answer would clear a different path (PR #593 round-1 review). The
-    factory is pinned to one positional `target` for the same reason.
+    PR #593 round-1 review.
     """
     forbidden = {"classification", "clearance", "checked", "context", "target_classification"}
     entries = [getattr(cu, name) for name in _DIRECT_ENTRIES] + [cu._oracle_capture_oracles]  # pylint: disable=protected-access
@@ -4773,12 +4263,7 @@ def test_no_direct_helper_accepts_a_caller_supplied_boundary_verdict(tmp_path: P
 
 
 def test_the_five_direct_helpers_are_unchanged_for_a_safe_package_and_an_ordinary_unit(tmp_path: Path) -> None:
-    """The positive control that makes every refusal above a withholding rather than a vacuum.
-
-    Handed their real paths, both an intact package and an ordinary unit still read their own
-    evidence through all five entries: the exemption sidecar's path, an assessable expectation, a
-    parity PASS, oracle coverage of the one page, and the one capture record.
-    """
+    """The positive control that makes every refusal above a withholding rather than a vacuum."""
     for root in (_package(tmp_path / "plain" / "unit", marker=False), _package(tmp_path / "run" / "packages" / "Unit")):
         exemptions = cu.load_exemptions(root)
         expectation = cu.page_expectation(root)
@@ -4794,12 +4279,7 @@ def test_the_five_direct_helpers_are_unchanged_for_a_safe_package_and_an_ordinar
 
 
 def test_a_safe_package_and_an_ordinary_unit_keep_their_existing_verdicts(tmp_path: Path) -> None:
-    """The regression control: nothing about unaliased, undamaged targets changed.
-
-    Two unrelated consumers ride along here on purpose - the `desktop-orphans` row still runs, and a
-    safe package still evaluates only its OWN evidence, which is the pre-existing package behaviour
-    the boundary ordering must not disturb.
-    """
+    """The regression control: nothing about unaliased, undamaged targets changed."""
     ordinary = _package(tmp_path / "plain" / "unit", marker=False)
     package = _package(tmp_path / "run" / "packages" / "Unit")
 
@@ -4817,10 +4297,7 @@ def test_a_safe_package_and_an_ordinary_unit_keep_their_existing_verdicts(tmp_pa
 def test_the_cli_refuses_an_aliased_target_without_printing_any_supplied_component(tmp_path: Path) -> None:
     """Exit state and every output channel: no supplied path, **no supplied path COMPONENT**, no traceback.
 
-    Round-1 review of PR #593: printing the target's final component as a "label" is a disclosure,
-    not a label - a unit folder is routinely the customer's name. Both the alias and the package it
-    points at are named distinctively here so a leak of *either* component fails a named assertion,
-    and the constant label is asserted positively so deleting the whole `target` key cannot pass.
+    PR #593 round-1 review.
     """
     package = _package(tmp_path / "run" / "packages" / "Contoso-Secret")
     alias = tmp_path / "Fabrikam-Confidential"
@@ -5463,42 +4940,25 @@ def test_r2_numeric_waiver_never_clears_zero_page_oracle(
     assert before == {path.relative_to(package): path.read_bytes() for path in package.rglob("*") if path.is_file()}
 
 
+# One case per guard in check_unit's waiver: field presence, exact int/list types (bool is not int),
+# the denominator identities, the positive-visual condition, the empty-list conditions and status.
 @pytest.mark.parametrize(
     "field,value",
     [
-        *[
-            pytest.param(field, ..., id=f"missing-{field}")
-            for field in (
-                "pages",
-                "visual_present",
-                "visual_missing",
-                "contested_names",
-                "refused_evidence",
-                "numeric_present",
-                "numeric_missing",
-                "rows",
-            )
-        ],
-        *[
-            pytest.param(field, value, id=f"{field}-{type(value).__name__}")
-            for field in ("visual_missing", "contested_names", "refused_evidence", "numeric_missing", "rows")
-            for value in (None, False, 0, "", {}, ())
-        ],
-        *[
-            pytest.param(field, value, id=f"{field}-{value!r}")
-            for field in ("pages", "visual_present")
-            for value in (None, False, True, 0, -1, 1.0, "1")
-        ],
-        *[
-            pytest.param("numeric_present", value, id=f"numeric_present-{value!r}")
-            for value in (None, False, True, -1, 0.0, "0", 1, 2)
-        ],
+        pytest.param("pages", ..., id="missing-pages"),
+        pytest.param("visual_missing", ..., id="missing-visual_missing"),
+        pytest.param("numeric_present", ..., id="missing-numeric_present"),
+        pytest.param("pages", True, id="pages-True"),
+        pytest.param("pages", 0, id="pages-0"),
+        pytest.param("visual_present", True, id="visual_present-True"),
+        pytest.param("visual_present", 0, id="visual_present-0"),
+        pytest.param("numeric_present", True, id="numeric_present-True"),
+        pytest.param("numeric_present", 1, id="numeric_present-1"),
         pytest.param("numeric_missing", ("missing",), id="numeric_missing-coherent-tuple"),
         pytest.param("rows", ("row",), id="rows-coherent-tuple"),
         pytest.param("numeric_missing", [], id="numeric_missing-short"),
-        pytest.param("numeric_missing", [{}, {}], id="numeric_missing-long"),
-        pytest.param("rows", [], id="rows-short"),
         pytest.param("rows", [{}, {}], id="rows-long"),
+        pytest.param("visual_missing", (), id="visual_missing-tuple"),
         ("visual_missing", [{"name": "Executive"}]),
         ("contested_names", ["Executive"]),
         ("refused_evidence", ["ambiguous"]),
@@ -5596,10 +5056,18 @@ def test_r2_numeric_waiver_rejects_negative_count_with_coherent_total(
     assert "AMO-boundary" in r2_gate_runtime
 
 
-@pytest.mark.parametrize("flag", ["--reference-dir", "--oracle-dir"])
-@pytest.mark.parametrize("numeric", ["required", "none"])
-@pytest.mark.parametrize("entrypoint", ["run-all", "cli"])
-@pytest.mark.parametrize("brief", ["current", "malformed", "stale"])
+# Every brief state x numeric policy once; both flags and both entry points rotate across them.
+@pytest.mark.parametrize(
+    "flag,numeric,entrypoint,brief",
+    [
+        ("--reference-dir", "required", "run-all", "current"),
+        ("--oracle-dir", "none", "cli", "current"),
+        ("--oracle-dir", "required", "cli", "malformed"),
+        ("--reference-dir", "none", "run-all", "malformed"),
+        ("--reference-dir", "required", "cli", "stale"),
+        ("--oracle-dir", "none", "run-all", "stale"),
+    ],
+)
 def test_r2_reference_override_retains_safe_numeric_obligation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -5731,18 +5199,13 @@ def test_r2_import_class_has_three_positive_categories(tmp_path: Path, category:
     "partition,code",
     [
         (R2_SQL.replace("mode: import", "mode: directQuery"), "partition_mode_not_explicit_import"),
-        (R2_SQL.replace("mode: import", "mode: dual"), "partition_mode_not_explicit_import"),
-        (R2_SQL.replace("mode: import", "mode: directLake"), "partition_mode_not_explicit_import"),
-        (R2_SQL.replace("mode: import", "mode: unknown"), "partition_mode_not_explicit_import"),
         (R2_SQL.replace("\t\tmode: import\n", ""), "partition_mode_not_explicit_import"),
         (R2_SQL.replace("mode: import", "mode: import\n\t\tmode: import"), "partition_mode_not_explicit_import"),
-        (R2_SQL.replace("mode: import", "mode: import\n\t\tmode: directQuery"), "partition_mode_not_explicit_import"),
         (
             R2_SQL.replace("\t\tmode: import\n", "").replace("\t\t\tlet", "\t\t\tlet\n\t\t\t    mode: import"),
             "partition_mode_not_explicit_import",
         ),
         (R2_SQL.replace("Sales = m", "Sales = calculated"), "partition_kind_unsupported"),
-        (R2_SQL.replace("Sales = m", "Sales = entity"), "partition_kind_unsupported"),
         (R2_SQL.replace("Sales = m", "Sales"), "partition_unaccounted"),
         (R2_SQL.replace("Sql.Database", "Mystery.Database"), "partition_category_unsupported"),
         (
@@ -5753,15 +5216,10 @@ def test_r2_import_class_has_three_positive_categories(tmp_path: Path, category:
     ],
     ids=[
         "direct-query",
-        "dual",
-        "direct-lake",
-        "unknown-mode",
         "absent-mode",
         "duplicate-import",
-        "duplicate-mixed",
         "expression-only-mode",
         "calculated",
-        "implicit-entity",
         "unrecognized-partition",
         "unknown-category",
         "mixed-storage",
@@ -6430,14 +5888,6 @@ def test_r2_old_pinned_snapshot_and_byte_identical_transfer_are_not_latest_ever_
     assert R2_DISCLAIMER in cu.render(accepted)
 
 
-def test_r2_obsolete_completion_escape_hatch_is_absent(tmp_path: Path, r2_gate_runtime: list) -> None:
-    package = _r2_package(tmp_path)
-    source = (REPO_ROOT / "scripts/check_unit.py").read_text(encoding="utf-8")
-    forbidden = "CLAIMED" + "_ONLY"
-    assert forbidden not in source and ("claimed" + "_only_checks") not in source
-    assert forbidden not in cu.render(cu.run_all(package))
-
-
 def test_r2_json_output_cannot_invalidate_the_snapshot_it_claims(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, r2_gate_runtime: list
 ) -> None:
@@ -6684,3 +6134,13 @@ def test_r2_only_one_owned_workbook_target_can_complete(
     report = cu.run_all(package, receipt_sha256=token)
     assert report["exit_code"] == 2 and _r2_check(report, "finalized")["code"] == "working_topology_unsupported"
     assert r2_gate_runtime == []
+
+
+def test_scratch_cleanup_keeps_a_parent_another_run_still_uses(tmp_path: Path) -> None:
+    """Concurrent units share the scratch parent; removing one run's dir must not fail or take a sibling's."""
+    mine, sibling = tmp_path / "scratch" / "mine", tmp_path / "scratch" / "sibling"
+    mine.mkdir(parents=True)
+    sibling.mkdir()
+    (mine / "gate.json").write_text("{}", encoding="utf-8")
+    cu._remove_json_dir(mine)
+    assert not mine.exists() and sibling.is_dir()

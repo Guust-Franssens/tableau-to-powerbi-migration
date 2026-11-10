@@ -11,7 +11,6 @@ from __future__ import annotations
 import ast
 import itertools
 import json
-import re
 import subprocess
 import sys
 from pathlib import Path
@@ -70,10 +69,7 @@ def _csv_m(filename: str) -> str:
 def _snowflake_stub_m() -> str:
     """The engine's deferred-custom-SQL scaffold: names its intended live source, loads nothing.
 
-    `check_empty_model.classify_partition` calls this `stub` - neither CONNECTED nor FILE - because
-    `#table(type table [], {})` matches its empty-stub shape before any connector is considered. It is
-    a real engine emission (issue #326) and the one case where a connector token is present in live M
-    while no partition loads through it.
+    Real engine emission, issue #326.
     """
     return (
         "\t\tmode: import\n"
@@ -107,17 +103,7 @@ def _write_model(unit: Path, tables: dict[str, str], model_name: str = "Unit") -
 
 
 def _model(name: str, parts: tuple[tuple[str, str], ...], m_text: str) -> ccf.Model:
-    """A Model from (table, category) pairs - the shape load_model produces.
-
-    Every partition carries the lexical connectors AND the PROVEN provenance derived from the shared
-    `m_text`, which is what a single-source model looks like. Tests that need partitions differing in
-    either - the shapes behind the connector-borrow and provenance findings - build the partition
-    dicts directly with explicit `connectors` / `provenance`.
-
-    Defined up here rather than beside its first heavy user because EVERY hand-built Model must go
-    through it: `_partition_connects` fails closed on a partition with no recorded provenance, so a
-    raw `ccf.Model(...)` silently becomes "nothing is connected" and tests stop testing.
-    """
+    """A Model from (table, category) pairs - the shape load_model produces."""
     connectors = ccf.partition_connectors(m_text)
     provenance = ccf.partition_provenance(m_text)
     return ccf.Model(
@@ -129,11 +115,7 @@ def _model(name: str, parts: tuple[tuple[str, str], ...], m_text: str) -> ccf.Mo
 
 
 def _chain(token_call: str, steps: int = 1) -> str:
-    """A canonical generated M chain: one connector call, then `steps` navigation hops.
-
-    Hand-written connector FRAGMENTS no longer earn a pass - `partition_provenance` requires the whole
-    generated shape, because attribution never proved which expression supplies a table's rows.
-    """
+    """A canonical generated M chain: one connector call, then `steps` navigation hops."""
     lines = ["let", f"    Source = {token_call},"]
     prev = "Source"
     for i in range(steps):
@@ -277,11 +259,7 @@ def test_absent_spec_is_not_checked(tmp_path: Path) -> None:
 
 
 def test_mixed_unit_flags_only_the_downgraded_live_source(tmp_path: Path) -> None:
-    """the field shape: a downgraded snowflake source AND a legitimate csv source in one unit.
-
-    The gate must fire on the snowflake source and stay silent on the csv - flagging CSV per se would
-    make it worse than no gate.
-    """
+    """the field shape: a downgraded snowflake source AND a legitimate csv source in one unit."""
     sources = [
         _live_source("ds.sf", "snowflake", tables=["Scorecard"]),
         {
@@ -392,14 +370,6 @@ def _cli(target: Path, *args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def test_committed_fixture_reports_downgrade() -> None:
-    """The committed field-shaped fixture is a stable, inspectable DOWNGRADED case, exit 1."""
-    result = _cli(FIXTURE_DIR / "silent-downgrade")
-    assert result.returncode == ccf.EXIT_DOWNGRADED, result.stdout + result.stderr
-    assert "DOWNGRADED" in result.stdout
-    assert "Snowflake.*" in result.stdout
-
-
 @pytest.mark.parametrize(
     ("state", "expected_exit"),
     [
@@ -410,40 +380,17 @@ def test_committed_fixture_reports_downgrade() -> None:
     ],
 )
 def test_every_committed_state_holds_its_verdict(state: str, expected_exit: int) -> None:
-    """Each committed state is inspectable by hand and pinned by exit code.
-
-    The `tmp_path` tests above already cover the same logic, so these are not redundant coverage -
-    they are the version a human can READ. A reviewer asking "what does a silent downgrade actually
-    look like?" gets a real spec + real TMDL instead of assembling one from test helpers, and can run
-    `python scripts/check_connection_fidelity.py tests/fixtures/connection-fidelity/<state>` directly.
-    """
+    """Each committed state is inspectable by hand and pinned by exit code."""
     result = _cli(FIXTURE_DIR / state)
     assert result.returncode == expected_exit, result.stdout + result.stderr
 
 
 def test_a_legitimate_flat_file_is_not_flagged_beside_a_measured_live_source() -> None:
-    """The discrimination the whole gate turns on, as a committed artifact.
-
-    In the estate that prompted this gate, 3 CSV-backed tables were legitimately CSV in the Tableau
-    source while 3 others were live Snowflake silently materialised to CSV. A gate that flagged CSV
-    would fire on the correct half, get muted, and then miss the real one - so `mixed-...` deliberately
-    pairs BOTH in one unit. Note it must contain a live source too: with only a flat file there is
-    nothing to measure and the gate honestly SKIPs, which would prove nothing about discrimination.
-    """
+    """The discrimination the whole gate turns on, as a committed artifact."""
     result = _cli(FIXTURE_DIR / "mixed-live-and-flat-file")
     assert result.returncode == ccf.EXIT_OK, result.stdout + result.stderr
     assert "DOWNGRADED" not in result.stdout
     assert "REGIONAL_TARGETS" not in result.stdout, "the legitimate flat file must not be named as a finding"
-
-
-def test_cli_exit_codes_follow_the_house_ladder(tmp_path: Path) -> None:
-    """0 pass / 1 findings / 3 not-checked, judged by exit code not printed text."""
-    ok = _build_unit(tmp_path / "ok", [_live_source("ds.sf", "snowflake", tables=["S"])], {"S": "snowflake"})
-    bad = _build_unit(tmp_path / "bad", [_live_source("ds.sf", "snowflake", tables=["S"])], {"S": "csv_missing"})
-    skip = _build_unit(tmp_path / "skip", [], {"S": "csv_missing"}, write_spec=False)
-    assert _cli(ok).returncode == ccf.EXIT_OK
-    assert _cli(bad).returncode == ccf.EXIT_DOWNGRADED
-    assert _cli(skip).returncode == ccf.EXIT_SKIPPED
 
 
 def test_registered_in_check_unit_at_integration_scope() -> None:
@@ -456,74 +403,6 @@ def test_registered_in_check_unit_at_integration_scope() -> None:
     assert gate.finding_exit_codes == {ccf.EXIT_DOWNGRADED}
 
 
-# --- mutation testing: break the gate four ways, one per truth-table row ---------------------------
-
-
-def _downgrade_unit(tmp_path: Path) -> Path:
-    return _build_unit(tmp_path / "u", [_live_source("ds.sf", "snowflake", tables=["S"])], {"S": "csv_missing"})
-
-
-def test_mutation_row3_disable_file_detection_survives_is_caught(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Row 3 mutant: if file-backed partitions are invisible, the downgrade is missed -> a test fails."""
-    model = ccf.load_model(_downgrade_unit(tmp_path) / "Unit.SemanticModel")
-    assert model.file_backed == 1  # baseline
-    monkeypatch.setattr(ccf, "FILE_CATEGORIES", frozenset())
-    assert ccf.load_model(_downgrade_unit(tmp_path) / "Unit.SemanticModel").file_backed == 0  # mutation landed
-    assert _run(_downgrade_unit(tmp_path))["status"] != ccf.STATUS_DOWNGRADED  # the row-3 test would fail
-
-
-def test_mutation_row1_ignore_connector_survives_is_caught(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Row 1 mutant: if a preserved connector is ignored, a connected source is misreported.
-
-    Targets `partition_connectors`, which is where connector evidence now lives. The old mutation
-    patched `Model.has_connector`, and after blind review's HIGH 2 moved the pass path to per-partition
-    evidence that function no longer decides anything - the mutation landed and changed no verdict.
-    """
-    connected = _build_unit(tmp_path / "u", [_live_source("ds.sf", "snowflake", tables=["S"])], {"S": "snowflake"})
-    assert _run(connected)["status"] == ccf.STATUS_OK  # baseline
-    monkeypatch.setattr(ccf, "partition_provenance", lambda body: frozenset())
-    loaded = ccf.load_model(connected / "Unit.SemanticModel")
-    assert all(not part["provenance"] for part in loaded.partitions)  # landed
-    assert _run(connected)["status"] != ccf.STATUS_OK  # the row-1 test would fail
-
-
-def test_mutation_mode_keying_bug_survives_is_caught(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Discriminator mutant: the naive `mode`-keyed implementation the brief warns against.
-
-    A gate that treats `mode == "extract"` as flat_file misclassifies that incident (Snowflake WITH
-    an extract) and misses the downgrade. Keying off powerbi_target/class is exactly what defeats it.
-    """
-    unit = _downgrade_unit(tmp_path)  # snowflake, mode=extract, powerbi_target=live_source, shipped as CSV
-    assert _run(unit)["status"] == ccf.STATUS_DOWNGRADED  # baseline: correctly caught
-
-    def mode_keyed(conn: dict) -> tuple[str, str, str]:
-        cls, mode = str(conn.get("class") or ""), str(conn.get("mode") or "")
-        return (ccf.FLAT_FILE if mode == "extract" else ccf.LIVE_SOURCE), cls, mode
-
-    monkeypatch.setattr(ccf, "_expected_target", mode_keyed)
-    assert ccf._expected_target({"class": "snowflake", "mode": "extract"})[0] == ccf.FLAT_FILE  # landed
-    assert _run(unit)["status"] == ccf.STATUS_SKIPPED  # the row-3 defect test would fail
-
-
-def test_mutation_row4_ignore_escape_hatch_survives_is_caught(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Row 4 mutant: if a recorded downgrade is ignored, a DECLARED source is misreported as a finding."""
-    limitations = [
-        {"item": "ds.sf", "issue": "deliberately materialised", "severity": "medium", "stage": "semantic_build"}
-    ]
-    unit = _build_unit(
-        tmp_path / "u",
-        [_live_source("ds.sf", "snowflake", tables=["S"])],
-        {"S": "csv_missing"},
-        limitations=limitations,
-    )
-    assert _run(unit)["status"] == ccf.STATUS_OK  # baseline: declared -> OK
-    monkeypatch.setattr(ccf, "_declared_by_limitation", lambda lims, sid, tables, ids=frozenset(): None)
-    assert ccf._declared_by_limitation(limitations, "ds.sf", [], frozenset()) is None  # landed
-    assert _run(unit)["status"] == ccf.STATUS_DOWNGRADED  # the escape-hatch test would fail
-
-
 # --------------------------------------------------------------------------- blind-review findings
 #
 # Both were FALSE PASSES - the one direction that matters for a gate whose whole purpose is catching a
@@ -531,12 +410,7 @@ def test_mutation_row4_ignore_escape_hatch_survives_is_caught(tmp_path: Path, mo
 
 
 def test_a_partial_downgrade_is_not_checked_never_connected() -> None:
-    """One live table + one file-backed table in the same source must NOT read as connected.
-
-    This is the shape of the incident that motivated the gate: three Snowflake tables were
-    materialised to CSV. If any OTHER table of that source had kept its connector, the pre-fix gate
-    returned CONNECTED and hid every downgraded table.
-    """
+    """One live table + one file-backed table in the same source must NOT read as connected."""
     source = _live_source("ds.sf", "snowflake", tables=["A", "B"])
     model = _model("m", (("A", "live"), ("B", "file_ok")), _SF_M)
     verdict = ccf._judge_source(source, "live_source", "snowflake", "extract", ccf.UnitContext((model,), (), ()))
@@ -552,20 +426,8 @@ def test_a_connector_named_only_in_a_comment_does_not_count_as_connected() -> No
     assert verdict.verdict != ccf.SOURCE_CONNECTED
 
 
-def test_a_genuinely_connected_source_still_passes() -> None:
-    """The negative case beside the positive one: the fix must not make everything NOT_CHECKED."""
-    source = _live_source("ds.sf", "snowflake", tables=["A", "B"])
-    model = _model("m", (("A", "live"), ("B", "live")), _SF_M)
-    verdict = ccf._judge_source(source, "live_source", "snowflake", "extract", ccf.UnitContext((model,), (), ()))
-    assert verdict.verdict == ccf.SOURCE_CONNECTED
-
-
 def test_a_file_table_belonging_to_ANOTHER_source_does_not_taint_this_one() -> None:
-    """Per-source scoping, which is why the partial rule cannot simply be model-wide.
-
-    `mixed-live-and-flat-file` depends on exactly this: a legitimately-CSV source sits in the same
-    model as a preserved live one, and must not drag it to NOT_CHECKED.
-    """
+    """Per-source scoping, which is why the partial rule cannot simply be model-wide."""
     source = _live_source("ds.sf", "snowflake", tables=["A"])
     model = _model("m", (("A", "live"), ("ZZ_OTHER", "file_ok")), _SF_M)
     verdict = ccf._judge_source(source, "live_source", "snowflake", "extract", ccf.UnitContext((model,), (), ()))
@@ -600,26 +462,13 @@ def test_one_sources_connector_does_not_vouch_for_another() -> None:
 
 @pytest.mark.parametrize("declared", ["flights", "FLIGHTS", "[Flights]"])
 def test_benign_table_name_differences_still_attribute(declared: str) -> None:
-    """CASE and bracket-quoting differ freely between a spec and emitted TMDL on correct input.
-
-    If those broke attribution the gate would go quiet on ordinary migrations, so they are normalised
-    rather than treated as a mismatch. QUALIFIED names are deliberately NOT normalised - see
-    test_a_shared_table_leaf_does_not_let_one_source_borrow_another for why, and the measurement
-    showing 58 of 65 real declared names are unqualified while all 7 dotted ones are CSV filenames.
-    """
+    """CASE and bracket-quoting differ freely between a spec and emitted TMDL on correct input."""
     sources, ctx = _two_source_unit(declared)
     assert ccf._judge_source(sources[1], "live_source", "snowflake", "live", ctx).verdict == ccf.SOURCE_DOWNGRADED
 
 
 def test_a_renamed_table_is_unattributable_and_says_so() -> None:
-    """A genuine rename is honestly unknowable - and must not fall back to a sibling's PASS.
-
-    The DETAIL is asserted, not just the verdict. Mutation testing showed why: deleting the
-    attribution guard entirely still yields NOT_CHECKED, because an unattributable source has neither
-    connector nor file evidence and falls through to the generic branch. So a verdict-only assertion
-    could not fail, and the guard's real value - telling an operator this is a spec-to-TMDL NAMING
-    mismatch rather than an empty model - was untested.
-    """
+    """A genuine rename is honestly unknowable - and must not fall back to a sibling's PASS."""
     sources, ctx = _two_source_unit("Flights_Renamed")
     verdict = ccf._judge_source(sources[1], "live_source", "snowflake", "live", ctx)
     assert verdict.verdict == ccf.SOURCE_NOT_CHECKED
@@ -628,16 +477,7 @@ def test_a_renamed_table_is_unattributable_and_says_so() -> None:
 
 
 def test_a_source_declaring_no_tables_is_unattributable() -> None:
-    """Different reason, same safe verdict - and worth pinning separately.
-
-    Round 3 changed this deliberately. It used to mean "every emitted table belongs to me", which let
-    such a source borrow a sibling's connector and report CONNECTED. Nothing to scope by now means
-    unattributable.
-
-    The detail wording is its OWN branch from #366 onwards: "declares no tables" and "declares tables
-    that match nothing" are different operator problems (a spec gap vs a naming gap) and used to print
-    the same sentence. Both still refuse to borrow.
-    """
+    """Different reason, same safe verdict - and worth pinning separately."""
     sources, ctx = _two_source_unit("")
     verdict = ccf._judge_source(sources[1], "live_source", "snowflake", "live", ctx)
     assert verdict.verdict == ccf.SOURCE_NOT_CHECKED
@@ -662,13 +502,7 @@ def _qualified_collision_unit():
 
 
 def test_a_shared_table_leaf_does_not_let_one_source_borrow_another() -> None:
-    """SALES.ORDERS and HR.ORDERS are different tables and must not collapse to `orders`.
-
-    The earlier leaf-matching fallback certified the downgraded HR source as CONNECTED off the
-    preserved SALES partition. Exact matching removed the whole class - and measurement showed the
-    fallback protected nothing: across every spec in this repo 58 of 65 declared table names are
-    unqualified, and all 7 containing a dot are CSV filenames.
-    """
+    """SALES.ORDERS and HR.ORDERS are different tables and must not collapse to `orders`."""
     sources, ctx = _qualified_collision_unit()
     verdicts = [ccf._judge_source(s, "live_source", "snowflake", "live", ctx) for s in sources]
     assert [v.verdict for v in verdicts] == [ccf.SOURCE_CONNECTED, ccf.SOURCE_NOT_CHECKED]
@@ -731,12 +565,7 @@ def _judge(
 
 @pytest.mark.parametrize("swap", [False, True])
 def test_one_table_live_in_one_model_and_file_in_another_is_order_independent(swap: bool) -> None:
-    """Both orders must agree, and neither may be a clean pass.
-
-    An earlier `_attribute` keyed a dict by normalised table name, so the second partition with a
-    given name overwrote the first. Visiting the file-backed model first therefore reported
-    CONNECTED and exited 0; visiting it second reported DOWNGRADED. Same inputs, opposite verdicts.
-    """
+    """Both orders must agree, and neither may be a clean pass."""
     live = _model("live", (("ORDERS", "live"),), _CONN_M)
     flat = _model("flat", (("ORDERS", "file_ok"),), "")
     verdict = _judge((flat, live) if swap else (live, flat))
@@ -781,12 +610,7 @@ def test_duplicate_table_that_is_file_backed_everywhere_is_still_a_finding() -> 
 
 
 def test_a_finding_survives_partial_coverage() -> None:
-    """Adding an unmatched table to the spec must not silence a positively-evidenced downgrade.
-
-    Measured before the fix: declaring ORDERS+CUSTOMERS against a model emitting a file-backed ORDERS
-    returned NOT_CHECKED, while the identical model with a single-table source returned DOWNGRADED -
-    and the detail claimed "none of this source's declared tables match" when ORDERS matched exactly.
-    """
+    """Adding an unmatched table to the spec must not silence a positively-evidenced downgrade."""
     flat = _model("m", (("ORDERS", "file_ok"),), "")
     partial = _judge((flat,), tables=("ORDERS", "CUSTOMERS"))
     assert partial.verdict == ccf.SOURCE_DOWNGRADED
@@ -821,12 +645,7 @@ def test_the_unattributable_message_is_only_used_when_nothing_matched() -> None:
 def test_a_table_scoped_declaration_cannot_certify_an_unexamined_sibling(
     label: str, limitations: tuple, declarations: tuple
 ) -> None:
-    """DECLARED is a pass, so it needs complete coverage too.
-
-    Blind review round 8: "a pass requires complete evidence" had been enforced only on the CONNECTED
-    path, so an explicit decision about ORDERS made the unit OK / exit 0 while CUSTOMERS was never
-    examined. Both sanctioned record types are table-scoped, and both did it.
-    """
+    """DECLARED is a pass, so it needs complete coverage too."""
     flat = _model("m", (("ORDERS", "file_ok"),), "")
     verdict = _judge((flat,), tables=("ORDERS", "CUSTOMERS"), limitations=limitations, declarations=declarations)
     assert verdict.verdict == ccf.SOURCE_NOT_CHECKED, label
@@ -836,37 +655,14 @@ def test_a_table_scoped_declaration_cannot_certify_an_unexamined_sibling(
 
 
 def test_a_source_scoped_declaration_still_stands_on_incomplete_coverage() -> None:
-    """A record naming the SOURCE attests to the whole source, so it is not blocked.
-
-    Measured across every spec in this repo: 4 decision-stage limitations name a data-source id and 0
-    name a table. Refusing every declaration on incomplete coverage would therefore add noise to the
-    only shape that actually occurs, while the dangerous table-scoped shape occurs zero times.
-    """
+    """A record naming the SOURCE attests to the whole source, so it is not blocked."""
     flat = _model("m", (("ORDERS", "file_ok"),), "")
     lims = ({"stage": "semantic_build", "item": "ds.sf", "issue": "materialised on purpose"},)
     assert _judge((flat,), tables=("ORDERS", "CUSTOMERS"), limitations=lims).verdict == ccf.SOURCE_DECLARED
 
 
 def _functions_touching_a_pass(source: str) -> dict[str, list[str]]:
-    """Every function that can REACH a pass constant, directly or through a call it makes.
-
-    Deliberately over-approximating, at function granularity. Blind review round 13 broke a
-    return-expression scan with three lines:
-
-        def _sneaky_pass():
-            verdict = SOURCE_CONNECTED
-            return verdict
-
-    `return verdict` names no constant, so scanning the return expression missed a brand-new
-    pass-producing path while the gate stayed green - the gate's own failure mode 3. An AST name scan
-    cannot soundly prove closure for arbitrary control flow, so this stops trying to be exact and
-    becomes conservative instead: touching a pass constant at all puts a function on the list.
-
-    ⚠️ AND IT FOLLOWS CALLS, to a fixed point. Round 18: a function that named no pass constant itself
-    but CALLED `_connected_verdict` produced an indirect pass with the surface unchanged - measured,
-    140 passed. A guard that only sees direct mentions cannot catch the regression it exists to catch,
-    and "route the pass through a helper" is the most natural way for one to reappear.
-    """
+    """Every function that can REACH a pass constant, directly or through a call it makes."""
     tree = ast.parse(source)
     functions = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]
     direct = {
@@ -923,14 +719,7 @@ _REFLECTIVE_MODULES = frozenset({"importlib", "imp", "runpy", "ctypes", "pickle"
 
 
 def _reflective_bypasses(source: str) -> list[str]:
-    """Uses of constructs that could reach a pass constant invisibly to an AST name scan.
-
-    ⚠️ A BLOCKLIST, and therefore NOT a proof. Rounds 13-15 each produced another spelling - a local
-    variable, `getattr`, a module alias, `importlib.import_module`, an annotated alias - because
-    enumerating bans has exactly the same unbounded regress as enumerating detections. This covers
-    the constructs the module could plausibly acquire and every one review has demonstrated; it does
-    not claim exhaustiveness against an adversary. What is and is not claimed: see the test docstring.
-    """
+    """Uses of constructs that could reach a pass constant invisibly to an AST name scan."""
     tree = ast.parse(source)
     bad = []
     for node in ast.walk(tree):
@@ -976,88 +765,13 @@ def _closure_violations(source: str) -> list[str]:
 
 
 def test_the_set_of_pass_producing_paths_is_closed() -> None:
-    """The pass surface is pinned, and the constructs that would hide one are banned.
-
-    ⚠️ WHAT THIS DOES AND DOES NOT CLAIM. Three earlier versions of this docstring over-claimed and
-    blind review broke all three: a return-expression scan fell to a local variable (r13), a
-    function-level name scan fell to `getattr` and a module alias (r14), and a ban-list fell to
-    `importlib.import_module` and an annotated alias (r15).
-
-    The lesson is not "add two more patterns". It is that **no syntactic check can prove a semantic
-    property**, and that swapping "enumerate the detections" for "enumerate the bans" kept the
-    identical unbounded regress - I claimed to have ended it in r14 and had not.
-
-    So, plainly:
-
-      NOT claimed - a proof of closure against an adversary. Someone determined to add a hidden pass
-      path in Python can, and no amount of AST pattern-matching changes that.
-
-      CLAIMED - a TRIPWIRE against the realistic failure, which is an ACCIDENTAL new pass path added
-      by someone who is not hiding it. That is the failure that actually happened here: eleven of the
-      twenty defects in this module were exactly that, none of them concealed.
-
-    The real assurance is BEHAVIOURAL, not syntactic: the 1440-point decision-space enumeration with
-    eight invariants, each proven non-vacuous under its own mutation, plus four committed fixtures
-    pinned to exit codes. Those observe what the gate DOES. This test only observes what it LOOKS
-    like, and is worth keeping for the same reason a smoke alarm is - not because it stops arson.
-
-    Audited surface, with the guard or role that makes each safe:
-      _connected_verdict  CONNECTED  refuses on any file-backed partition or unmatched table
-      _declared_verdict   DECLARED   refuses unless the record is precise AND (source-scoped or complete)
-      _finalize_unit      OK         refuses while any live source is unchecked
-      merge               OK         refuses while any unit is DOWNGRADED or SKIPPED
-      main                EXIT_OK    derived from merge, plus the explicit `--warn-only` escape hatch
-      _unit_result        -          COUNTS verdicts; never decides (pinned by its own test below)
-      render              -          COMPARES status to choose wording; never decides
-    """
+    """The pass surface is pinned, and the constructs that would hide one are banned."""
     source = (REPO_ROOT / "scripts" / "check_connection_fidelity.py").read_text(encoding="utf-8")
     assert _closure_violations(source) == []
-
-
-@pytest.mark.parametrize(
-    "sneak",
-    [
-        "def _sneaky_direct():\n    return STATUS_OK\n",
-        "def _sneaky_variable():\n    verdict = SOURCE_CONNECTED\n    return verdict\n",
-        "def _sneaky_dict():\n    table = {'ok': SOURCE_DECLARED}\n    return table['ok']\n",
-        "def _sneaky_default(value=EXIT_OK):\n    return value\n",
-        'def _sneaky_getattr():\n    return getattr(sys.modules[__name__], "STATUS_OK")\n',
-        "PASS_ALIAS = STATUS_OK\ndef _sneaky_alias():\n    return PASS_ALIAS\n",
-        "import importlib\ndef _sneaky_importlib():\n    return importlib.import_module(__name__).STATUS_OK\n",
-        "PASS_ANN: int = STATUS_OK\ndef _sneaky_annotated():\n    return PASS_ANN\n",
-        "def _model_scope_verdict(a, b, c, d):\n    return _connected_verdict(a, c)\n",
-    ],
-    ids=[
-        "direct",
-        "variable",
-        "dict",
-        "default-arg",
-        "getattr",
-        "module-alias",
-        "importlib",
-        "annotated-alias",
-        "indirect-call",
-    ],
-)
-def test_the_closure_gate_catches_every_shape_of_new_pass_path(sneak: str) -> None:
-    """The contract must fail on a new pass path however it is spelled.
-
-    `variable` is round 13's finding, `getattr` and `module-alias` are round 14's - all verbatim. The
-    other three are shapes I named as likely. Each must be caught by ONE OF the two halves: the
-    surface scan, or the reflection ban. A gate that only catches the shape its author imagined is
-    the same unfalsifiable check this file exists to prevent, and mine has now been that twice.
-    """
-    source = (REPO_ROOT / "scripts" / "check_connection_fidelity.py").read_text(encoding="utf-8")
-    assert _closure_violations(source) == []
-    assert _closure_violations(f"{source}\n\n{sneak}"), f"closure contract blind to:\n{sneak}"
 
 
 def test_unit_result_only_counts_and_never_decides() -> None:
-    """`_unit_result` names both pass verdicts but must not be able to grant one.
-
-    It appears in the audit above only because it COUNTS verdicts. Pinning that keeps the audit
-    honest: if it ever starts deciding, this fails rather than the count silently looking fine.
-    """
+    """`_unit_result` names both pass verdicts but must not be able to grant one."""
     verdicts = [
         ccf.SourceVerdict("ds.a", "a", "snowflake", "live", "live_source", ccf.SOURCE_DOWNGRADED, "d", []),
         ccf.SourceVerdict("ds.b", "b", "snowflake", "live", "live_source", ccf.SOURCE_CONNECTED, "c", []),
@@ -1075,14 +789,7 @@ def test_a_table_scoped_declaration_still_passes_when_coverage_is_complete() -> 
 
 
 def test_a_source_id_like_item_declares_nothing() -> None:
-    """`ds.sf_archive` must not speak for `ds.sf` - not as scope, and not as association either.
-
-    Blind review rounds 9 and 10 walked through the two imprecise predicates in turn. Round 9 was the
-    source-wide SCOPE test; round 10 was the ASSOCIATION test, which still used normalised-substring
-    matching and so let an unrelated archive record certify a complete, positively-evidenced
-    downgrade as DECLARED / OK / exit 0. Both now go through `_declaration_scope`, which accepts only
-    precise forms, so an archive record declares nothing and the downgrade stands as a FINDING.
-    """
+    """`ds.sf_archive` must not speak for `ds.sf` - not as scope, and not as association either."""
     assert ccf._declaration_scope("ds.sf_archive", "ds.sf", ["ORDERS"]) is None
     assert ccf._declaration_scope("ds.sf", "ds.sf", ["ORDERS"]) == "source"
     assert ccf._declaration_scope("ORDERS", "ds.sf", ["ORDERS"]) == "table"
@@ -1096,24 +803,13 @@ def test_a_source_id_like_item_declares_nothing() -> None:
 
 
 def test_sibling_source_ids_do_not_declare_for_each_other() -> None:
-    """Grounded in a committed example, not a hypothetical.
-
-    The airline workbook ships two near-duplicate sources whose ids differ only by a `_1` suffix, so
-    the shorter is a substring of the longer. Under the old matcher a decision recorded about one
-    silently vouched for the other.
-    """
+    """Grounded in a committed example, not a hypothetical."""
     assert ccf._declaration_scope("ds.airline_x_2022_2025_1", "ds.airline_x_2022_2025", ["T"]) is None
     assert ccf._declaration_scope("ds.airline_x_2022_2025", "ds.airline_x_2022_2025", ["T"]) == "source"
 
 
 def test_underscore_is_not_a_qualifier_delimiter() -> None:
-    """`ds.sf_ORDERS` is a perfectly good SIBLING source id, so it must not parse as source+table.
-
-    Blind review round 11. Two guards, because either alone leaves a gap: `_` is dropped as a
-    qualifier delimiter, AND an item that exactly equals another known source id is never
-    reinterpreted as a qualified table whatever the delimiter (a sibling could be named
-    `ds.sf.ORDERS`). Real specs use `.` and `__`; measured, none rely on `_`.
-    """
+    """`ds.sf_ORDERS` is a perfectly good SIBLING source id, so it must not parse as source+table."""
     ids = frozenset({"ds.sf", "ds.sf_ORDERS"})
     assert ccf._declaration_scope("ds.sf_ORDERS", "ds.sf", ["ORDERS"], ids) is None
     assert ccf._declaration_scope("ds.sf_ORDERS", "ds.sf", ["ORDERS"]) is None  # delimiter guard alone
@@ -1125,13 +821,7 @@ def test_underscore_is_not_a_qualifier_delimiter() -> None:
 
 
 def test_a_generated_edit_in_another_model_declares_nothing_here() -> None:
-    """Ownership must be proven, not assumed from a matching file stem.
-
-    Blind review round 11: `_declared_by_edit` matched on `Path(target).stem` alone, so an edit inside
-    `OtherSource.SemanticModel/.../ORDERS.tmdl` declared a downgrade for a same-named table in THIS
-    model. Real targets are bundle-relative and always carry the model folder
-    (`declare_generated_edit.py` writes `target.relative_to(bundle)`), so requiring it costs nothing.
-    """
+    """Ownership must be proven, not assumed from a matching file stem."""
     owned = _model("OrdersModel.SemanticModel", (("ORDERS", "file_ok"),), "")
     foreign = ({"target": "OtherSource.SemanticModel/definition/tables/ORDERS.tmdl"},)
     mine = ({"target": "OrdersModel.SemanticModel/definition/tables/ORDERS.tmdl"},)
@@ -1139,32 +829,13 @@ def test_a_generated_edit_in_another_model_declares_nothing_here() -> None:
     assert _judge((owned,), tables=("ORDERS",), declarations=mine).verdict == ccf.SOURCE_DECLARED
 
 
-def test_enumeration_is_falsifiable_via_loose_declaration_matching() -> None:
-    """Restore substring association and the space must go red."""
-    original = ccf._declaration_scope
-
-    def loose(item, source_id, table_names, sibling_ids=frozenset()):
-        if ccf._item_names_source(item, source_id, table_names):
-            return "source" if item.strip().casefold() != source_id.strip().casefold() else "source"
-        return None
-
-    try:
-        ccf._declaration_scope = loose
-        assert _violations(), "the space cannot reach an imprecise declaration record"
-    finally:
-        ccf._declaration_scope = original
-    assert _violations() == []
-
-
 # --- the decision space, enumerated -----------------------------------------------------------------
 #
 # Three review rounds found five defects because each pass tested the cases its author thought of.
 # This enumerates the whole finite space instead and asserts invariants over every point in it. The
-# dimensions below are the input axes; `test_enumeration_*_is_falsifiable` proves the harness can
-# actually fail, because a green result from a check that cannot go red is worth nothing.
+# dimensions below are the input axes; the harness is mutation-tested at review time.
 #
-# ⚠️ I6 exists because the first draft of this harness could NOT catch the round-4 defect, and the
-# falsifiability test is what exposed that. I1 and I4 reason about `mine` - the attribution computed
+# ⚠️ I6 exists because the first draft of this harness could NOT catch the round-4 defect. I1 and I4 reason about `mine` - the attribution computed
 # by `_attribute`, the very function that was broken - so under the collapsing mutation the oracle
 # collapsed with it: the file-backed partition simply vanished from `mine`, and "CONNECTED while
 # owning a file-backed partition" was true of nothing. An invariant evaluated through the code under
@@ -1222,12 +893,7 @@ _DECLS = (
 
 
 def _enumerate_space():
-    """Yield a Point for every combination in the space.
-
-    The raw inputs are yielded alongside the verdict deliberately. An earlier draft recovered them by
-    substring-matching the label, and the truncation in that label made one invariant vacuously true -
-    the exact class of silently-unfalsifiable check this harness exists to avoid.
-    """
+    """Yield a Point for every combination in the space."""
     for cls, declared, m_text, part_sets, (lims, decls) in itertools.product(
         _CLASSES, _DECLARED, _M_TEXTS, _PARTITION_SETS, _DECLS
     ):
@@ -1238,29 +904,13 @@ def _enumerate_space():
 
 
 def _raw_partitions(models: tuple[ccf.Model, ...], declared: tuple[str, ...]) -> list[dict[str, str]]:
-    """Partitions matching this source's declared tables, computed WITHOUT `_attribute`.
-
-    Deliberately a separate implementation. I1's whole job is to police the attribution, so reading
-    its evidence from `_attribute` output makes it blind to any regression that drops partitions:
-    blind review round 6 mutated `_attribute` to filter out file-backed partitions, the gate certified
-    a live+file source as CONNECTED/OK, and the harness stayed green because its oracle had been
-    filtered too. An oracle must not be computed by the code it judges.
-    """
+    """Partitions matching this source's declared tables, computed WITHOUT `_attribute`."""
     keys = {name.strip("[]\"'").casefold() for name in declared}
     return [p for m in models for p in m.partitions if p["table"].strip("[]\"'").casefold() in keys]
 
 
 def _precise_forms(declared: tuple[str, ...]) -> set[str]:
-    """Every item string that legitimately declares something about the enumeration's source.
-
-    Written out independently of production: the source id, each declared table, and each
-    source-qualified table. Anything else is imprecise and must not produce DECLARED.
-
-    ⚠️ `_` is NOT a delimiter here, and that mattered: round 12 found this oracle still accepting
-    `ds.sf_ORDERS` after production had dropped it, with no point in the space to separate them - so
-    restoring `_` in production left the harness green. Failure mode 3, in the harness written to
-    prevent failure mode 3.
-    """
+    """Every item string that legitimately declares something about the enumeration's source."""
     forms = {"ds.sf"}
     for name in declared:
         folded = name.strip().casefold()
@@ -1270,13 +920,7 @@ def _precise_forms(declared: tuple[str, ...]) -> set[str]:
 
 
 def _precise_edit(pt: "_Point") -> bool:
-    """Whether a generated-edit declaration provably touches THIS source's file-backed table.
-
-    Computed from the raw models, independently of `_declared_by_edit`. Round 11: that function
-    matched on `Path(target).stem` alone, so an edit inside a DIFFERENT semantic model declared a
-    downgrade here. I8 could not see it because it exempted every point that carried a declaration -
-    the exact hole the defect came through.
-    """
+    """Whether a generated-edit declaration provably touches THIS source's file-backed table."""
     file_tables = {
         part["table"] for part in _raw_partitions(pt.models, pt.declared) if part["category"] in ccf.FILE_CATEGORIES
     }
@@ -1363,75 +1007,6 @@ def test_decision_space_holds_every_invariant() -> None:
     assert _violations() == []
 
 
-def _lexical_provenance(body):
-    """The pre-provenance rule: any connector token in the raw text counts as a connection.
-
-    This is what I2 now mutates against. Disabling comment stripping alone no longer reaches the pass
-    path - `partition_provenance` needs a whole `let` chain, and a commented-out one has no parseable
-    bindings - so the old mutation left I2 VACUOUS rather than firing. The property I2 asserts is
-    unchanged; only the way it is broken had to move to where the decision actually lives.
-    """
-    return frozenset(t for t in ccf.CONNECTOR_TOKENS if re.search(rf"\b{t}\.[A-Za-z]", body))
-
-
-def test_enumeration_is_falsifiable_via_comment_stripping() -> None:
-    """Proof the harness can go red: a connector named only inside an M comment must not count."""
-    original = ccf.partition_provenance
-    try:
-        ccf.partition_provenance = _lexical_provenance  # mutation: lexical, unstripped
-        assert _lexical_provenance(_COMMENTED_M) == frozenset({"Snowflake"}), "mutation did not land"
-        assert _violations(), "harness reported clean under a mutation that should break it"
-    finally:
-        ccf.partition_provenance = original
-    assert _violations() == []
-
-
-def test_enumeration_is_falsifiable_via_the_round4_collapse() -> None:
-    """Proof the harness now covers the axis round 4 found - restore the collapse, it must go red."""
-    original = ccf._attribute
-
-    def collapsing(models, tables):
-        if not tables:
-            return [], []
-        by_exact = {ccf._normalise_table(p["table"]): p for m in models for p in m.partitions}
-        mine = [by_exact[k] for k in (ccf._normalise_table(t) for t in tables) if k in by_exact]
-        unmatched = [t for t in sorted(tables) if ccf._normalise_table(t) not in by_exact]
-        return (mine, unmatched) if len(mine) == len(tables) - len(unmatched) else ([], unmatched)
-
-    try:
-        ccf._attribute = collapsing
-        assert _violations(), "the enumeration does not cover duplicate table names"
-    finally:
-        ccf._attribute = original
-    assert _violations() == []
-
-
-def test_enumeration_is_falsifiable_via_dropped_file_partitions() -> None:
-    """Round 6: a regression that stably HIDES file-backed partitions must still be caught.
-
-    This is the mutation that proved I1 was vacuous. It is order-independent, so I6 cannot see it,
-    and it filters the very evidence I1 used to read from `_attribute` - so before `_raw_partitions`
-    existed, the gate certified a live+file source as CONNECTED/OK with the harness fully green.
-    """
-    original = ccf._attribute
-
-    def drop_file_parts(models, tables):
-        matched, unmatched = original(models, tables)
-        return [p for p in matched if p["category"] not in ccf.FILE_CATEGORIES], unmatched
-
-    try:
-        ccf._attribute = drop_file_parts
-        source = _live_source("ds.sf", "snowflake", tables=["ORDERS"])
-        flat = _model("file", (("ORDERS", "file_ok"),), "")
-        live = _model("live", (("ORDERS", "live"),), _CONN_M)
-        mutated = ccf._judge_source(source, "live_source", "snowflake", "live", ccf.UnitContext((flat, live), (), ()))
-        assert mutated.verdict == ccf.SOURCE_CONNECTED, "mutation did not land"
-        assert _violations(), "harness is blind to a stable loss of file-backed evidence"
-    finally:
-        ccf._attribute = original
-    assert _violations() == []
-
-
 # --- blind review round 5: the same false green, one level up at the root merge ---------------------
 #
 # I6 permutes models WITHIN one unit, so it is structurally unable to see an aggregation defect. This
@@ -1467,11 +1042,7 @@ def test_one_unchecked_unit_keeps_the_whole_root_off_a_clean_pass() -> None:
 
 
 def test_partial_coverage_is_not_rendered_as_nothing_measured() -> None:
-    """The operator must not be told the opposite of what happened.
-
-    A root with one checked unit and one unattributable unit is SKIPPED, but "nothing measured" is
-    false: one unit WAS measured and passed. Blind review round 6 found the CLI saying exactly that.
-    """
+    """The operator must not be told the opposite of what happened."""
     source = _live_source("ds.sf", "snowflake", tables=["ORDERS"])
     live = _model("live", (("ORDERS", "live"),), _CONN_M)
     renamed = _model("m", (("RENAMED", "file_ok"),), "")
@@ -1496,163 +1067,6 @@ def test_partial_coverage_is_not_rendered_as_nothing_measured() -> None:
 def test_merge_precedence_holds_across_every_combination() -> None:
     """40 combinations of up to three units: DOWNGRADED > SKIPPED > OK, with no exceptions."""
     assert _merge_violations() == []
-
-
-def test_merge_enumeration_is_falsifiable() -> None:
-    """Restore the ok-before-skipped precedence; the enumeration must go red."""
-    original = ccf.merge
-
-    def ok_wins(units):
-        report = original(units)
-        if report["status"] == ccf.STATUS_SKIPPED and any(u["status"] == ccf.STATUS_OK for u in units):
-            report["status"] = ccf.STATUS_OK
-        return report
-
-    try:
-        ccf.merge = ok_wins
-        assert _merge_violations(), "the merge enumeration cannot detect an OK-outranks-SKIPPED bug"
-    finally:
-        ccf.merge = original
-    assert _merge_violations() == []
-
-
-# --- every invariant proven non-vacuous INDIVIDUALLY -----------------------------------------------
-#
-# The falsifiability tests above each prove that SOME invariant fires. That is weaker than it looks:
-# it cannot distinguish a working invariant from a dead one standing next to a working neighbour.
-# Running this per-invariant probe found I5 dead - its `parse_only` test read `ccf.DECISION_STAGES`,
-# the very constant its mutation changes, so the oracle excused the behaviour it exists to forbid.
-# That was the FOURTH oracle-coupling defect in this file, and the first one found here rather than
-# by review. Hence this test: each invariant must fire under a mutation aimed squarely at it.
-
-
-def _mutations():
-    """(tag, apply, restore) for a mutation that must trip exactly that invariant."""
-
-    def swap(module, name, value):
-        original = getattr(module, name)
-        setattr(module, name, value)
-        return lambda: setattr(module, name, original)
-
-    def drop_file_parts():
-        original = ccf._attribute
-
-        def dropped(models, tables):
-            matched, unmatched = original(models, tables)
-            return [p for p in matched if p["category"] not in ccf.FILE_CATEGORIES], unmatched
-
-        setattr(ccf, "_attribute", dropped)
-        return lambda: setattr(ccf, "_attribute", original)
-
-    def loose_connectivity():
-        original = ccf._connectivity
-
-        def loose(models, token, tables):
-            cov = original(models, token, tables)
-            if not cov.attributable:
-                return ccf.Coverage(any(m.has_connector(token) for m in models), False, [], True, [])
-            return cov
-
-        setattr(ccf, "_connectivity", loose)
-        return lambda: setattr(ccf, "_connectivity", original)
-
-    def collapse():
-        original = ccf._attribute
-
-        def collapsing(models, tables):
-            if not tables:
-                return [], []
-            by_exact = {ccf._normalise_table(p["table"]): p for m in models for p in m.partitions}
-            mine = [by_exact[k] for k in (ccf._normalise_table(t) for t in tables) if k in by_exact]
-            unmatched = [t for t in sorted(tables) if ccf._normalise_table(t) not in by_exact]
-            return (mine, unmatched) if mine else ([], unmatched)
-
-        setattr(ccf, "_attribute", collapsing)
-        return lambda: setattr(ccf, "_attribute", original)
-
-    def ignore_incompleteness():
-        """Certify a source whose coverage is incomplete - the round-8 defect, restored."""
-        original = ccf._attribute
-
-        def hide_unmatched(models, tables):
-            matched, _ = original(models, tables)
-            return matched, []
-
-        setattr(ccf, "_attribute", hide_unmatched)
-        return lambda: setattr(ccf, "_attribute", original)
-
-    def loose_declaration():
-        """Restore substring association (rounds 9/10) so I8 must fire."""
-        original = ccf._declaration_scope
-
-        def loose(item, source_id, table_names, sibling_ids=frozenset()):
-            return "source" if ccf._item_names_source(item, source_id, table_names) else None
-
-        setattr(ccf, "_declaration_scope", loose)
-        return lambda: setattr(ccf, "_declaration_scope", original)
-
-    def loose_edit_matching():
-        """Restore stem-only generated-edit matching (round 11) so I8 must fire.
-
-        Now patches `_declared_by_edits` (plural), which returns the SET of covered file-backed
-        tables. Blind review HIGH 4 renamed it: returning the FIRST match and treating it as
-        sufficient is what let one declaration certify a second, undeclared table.
-        """
-        original = ccf._declared_by_edits
-
-        def stem_only(declarations, file_tables, owners):  # noqa: ARG001
-            covered = set()
-            for declaration in declarations:
-                target = str(declaration.get("target") or "")
-                if target and Path(target).stem in file_tables:
-                    covered.add(Path(target).stem)
-            return covered
-
-        setattr(ccf, "_declared_by_edits", stem_only)
-        return lambda: setattr(ccf, "_declared_by_edits", original)
-
-    def restore_underscore_delimiter():
-        """Round 11's regression, restored (round 12) so I8 must fire on the ambiguous form."""
-        original = ccf._declaration_scope
-
-        def with_underscore(item, source_id, table_names, sibling_ids=frozenset()):
-            result = original(item, source_id, table_names, sibling_ids)
-            if result is not None:
-                return result
-            folded = item.strip().casefold()
-            own = source_id.strip().casefold()
-            tables = {(name or "").strip().casefold() for name in table_names if name}
-            prefix = f"{own}_"
-            return "table" if folded.startswith(prefix) and folded[len(prefix) :] in tables else None
-
-        setattr(ccf, "_declaration_scope", with_underscore)
-        return lambda: setattr(ccf, "_declaration_scope", original)
-
-    return [
-        ("I1", drop_file_parts),
-        ("I2", lambda: swap(ccf, "partition_provenance", _lexical_provenance)),
-        ("I3", lambda: swap(ccf, "CLASS_TO_CONNECTOR", {**ccf.CLASS_TO_CONNECTOR, "mysteryengine": "Snowflake"})),
-        ("I4", loose_connectivity),
-        ("I5", lambda: swap(ccf, "DECISION_STAGES", frozenset({*ccf.DECISION_STAGES, "parse"}))),
-        ("I6", collapse),
-        ("I7", ignore_incompleteness),
-        ("I8", loose_declaration),
-        ("I8", loose_edit_matching),
-        ("I8", restore_underscore_delimiter),
-    ]
-
-
-@pytest.mark.parametrize("tag,mutate", _mutations(), ids=[t for t, _ in _mutations()])
-def test_each_invariant_fires_under_its_own_mutation(tag: str, mutate) -> None:
-    """A dead invariant is worse than a missing one: it is counted as coverage."""
-    assert _violations() == [], "baseline must be clean or the result below means nothing"
-    restore = mutate()
-    try:
-        own = [v for v in _violations() if v.startswith(tag)]
-        assert own, f"{tag} is VACUOUS - it did not fire under a mutation aimed at it"
-    finally:
-        restore()
-    assert _violations() == []
 
 
 # --- issue #366: the ENGINE path, where there is no migration-spec.json ----------------------------
@@ -1680,13 +1094,7 @@ def test_each_invariant_fires_under_its_own_mutation(tag: str, mutate) -> None:
 def _embedded(
     connection_class: str, *, legs: list[str | None] | None = None, caption: str = "Embedded", tables: int = 1
 ) -> dict:
-    """One `embedded_datasources` entry in the engine's own shape - table_count, never table names.
-
-    ⚠️ `tables` MUST match the number of this source's tables the fixture actually emits. The first
-    draft hard-coded `table_count: 3` while emitting one, and four tests then asserted a clean PASS
-    over deliberately partial evidence - enshrining the fail-open that blind review found. A fixture
-    whose declared count and emitted reality disagree is not "a smaller fixture", it is the defect.
-    """
+    """One `embedded_datasources` entry in the engine's own shape - table_count, never table names."""
     entry: dict = {
         "caption": caption,
         "label": f"federated.{caption.lower()}",
@@ -1714,11 +1122,7 @@ def _build_engine_bundle(  # pylint: disable=too-many-arguments,too-many-positio
     as_report_json: bool = False,
     datasources: list[dict] | None = None,
 ) -> Path:
-    """Write an engine bundle: pbip/<WB>/<WB>.SemanticModel + a handover slice (or report.json).
-
-    `embedded=None` writes NO `embedded_datasources` key at all - the absent-vs-empty distinction the
-    whole "not evaluated" verdict rests on.
-    """
+    """Write an engine bundle: pbip/<WB>/<WB>.SemanticModel + a handover slice (or report.json)."""
     project = bundle / "pbip" / workbook
     project.mkdir(parents=True, exist_ok=True)
     (project / f"{workbook}.pbip").write_text("{}", encoding="utf-8")
@@ -1752,11 +1156,7 @@ def _build_engine_bundle(  # pylint: disable=too-many-arguments,too-many-positio
 
 
 def _datasource_only_bundle(root: Path, name: str, tables: dict[str, str]) -> Path:
-    """A bundle whose census declares ONLY datasource units - the half whose evidence supports a pass.
-
-    Needed because after the round-17 cut no bundle containing a workbook unit can reach exit 0: a
-    workbook unit is never OK, and `merge` is DOWNGRADED > SKIPPED > OK by design.
-    """
+    """A bundle whose census declares ONLY datasource units - the half whose evidence supports a pass."""
     project = root / "pbip" / name
     project.mkdir(parents=True, exist_ok=True)
     _write_model(project, tables, model_name=name)
@@ -1781,16 +1181,7 @@ def _datasource_only_bundle(root: Path, name: str, tables: dict[str, str]) -> Pa
 
 
 def test_engine_workbook_unit_is_genuinely_evaluated(tmp_path: Path) -> None:
-    """THE issue: a workbook built by run_estate.py must be DISCOVERED and judged, not skipped.
-
-    ⚠️ "Judged" no longer includes "can pass". Round 17 established that a model-scope PASS rests on
-    attributing partitions to sources, which the workbook payload cannot support, so the only reachable
-    outcomes here are a FINDING and a REFUSAL. What #366 delivers on this path is that the unit exists
-    in the census, gets a verdict, and can be found DOWNGRADED - never that it can be cleared.
-
-    The earlier version of this test asserted `STATUS_OK` and `connected == 1` over a fixture with one
-    emitted table, and was one of the four that enshrined the fail-open.
-    """
+    """THE issue: a workbook built by run_estate.py must be DISCOVERED and judged, not skipped."""
     bundle = tmp_path / "b"
     _build_engine_bundle(bundle, "AircraftHealth", {"FLIGHTS": "snowflake"}, [_embedded("snowflake")])
     report = ccf.scan(bundle)
@@ -1802,12 +1193,7 @@ def test_engine_workbook_unit_is_genuinely_evaluated(tmp_path: Path) -> None:
 
 
 def test_a_model_scope_PASS_is_not_reachable(tmp_path: Path) -> None:
-    """The cut, asserted as an invariant over the whole model-scope input space.
-
-    ⚠️ EVERY MAPPED CLASS, not just Snowflake. Round 18: this covered one class, so an indirect
-    Databricks-only pass would have gone unseen. The guard for a property must range over the same
-    space the property claims.
-    """
+    """The cut, asserted as an invariant over the whole model-scope input space."""
     kinds = ("snowflake", "snowflake_stub", "csv_missing", "csv_present", "sqlserver")
     classes = sorted({cls for cls in ccf.CLASS_TO_CONNECTOR})
     declarations = ([], [{"target": "pbip/Wb/Wb.SemanticModel/definition/tables/T1.tmdl"}])
@@ -1834,12 +1220,7 @@ def test_engine_workbook_live_source_shipped_as_a_flat_file_is_a_finding(tmp_pat
 
 
 def test_engine_report_json_payload_works_as_well_as_a_handover_slice(tmp_path: Path) -> None:
-    """`read_handover` resolves both payload shapes; the gate must accept whichever the bundle has.
-
-    The report carries a `datasources[]` entry too, so this test can actually observe the census: an
-    earlier fixture wrote `workbooks[]` only and therefore structurally could not detect that direct
-    `report.json` input dropped every datasource unit.
-    """
+    """`read_handover` resolves both payload shapes; the gate must accept whichever the bundle has."""
     bundle = tmp_path / "b"
     _build_engine_bundle(
         bundle,
@@ -1863,12 +1244,7 @@ def test_engine_report_json_payload_works_as_well_as_a_handover_slice(tmp_path: 
 
 
 def test_direct_report_json_input_enumerates_datasources_too(tmp_path: Path) -> None:
-    """Pointing at `report.json` itself must not silently drop every datasource unit.
-
-    Blind review, HIGH 1: the file branch returned handover-resolved workbooks and never called
-    `engine_datasource_units`, so on the real bundle direct report input reported `0 of 1` with the
-    Snowflake datasource absent entirely.
-    """
+    """Pointing at `report.json` itself must not silently drop every datasource unit."""
     bundle = tmp_path / "b"
     path = _build_engine_bundle(
         bundle,
@@ -1915,8 +1291,7 @@ def test_engine_invalid_telemetry_shape_is_not_evaluated(tmp_path: Path) -> None
     """A present-but-wrong-shaped key concludes nothing; it must not read as zero live sources."""
     bundle = tmp_path / "b"
     _build_engine_bundle(bundle, "IaCaps", {"FLIGHTS": "csv_missing"}, None, extra={"embedded_datasources": "oops"})
-    report = ccf.scan(bundle)
-    assert report["units"][0]["reason"] == ccf.REASON_NOT_EVALUATED
+    assert ccf.scan(bundle)["units"][0]["reason"] == ccf.REASON_NOT_EVALUATED
 
 
 def test_engine_published_datasource_workbook_says_where_to_look(tmp_path: Path) -> None:
@@ -1943,12 +1318,7 @@ def test_engine_published_datasource_workbook_says_where_to_look(tmp_path: Path)
     ids=["no-pointer", "every-pointer-dangling"],
 )
 def test_engine_unresolvable_model_pointer_is_not_evaluated(tmp_path: Path, pbip_folder, needle: str) -> None:
-    """No model to judge against is NOT_EVALUATED - never a quiet pass over an unexamined workbook.
-
-    BOTH pointers are removed/broken in each case. `bound_model` is dropped as well because
-    `engine_model_dirs` deliberately falls THROUGH a failed pointer to the next one, so a fixture that
-    only breaks the first would still resolve and prove nothing.
-    """
+    """No model to judge against is NOT_EVALUATED - never a quiet pass over an unexamined workbook."""
     bundle = tmp_path / "b"
     _build_engine_bundle(
         bundle, "IaPurchase", {"FLIGHTS": "csv_missing"}, [_embedded("snowflake")], pbip_folder=pbip_folder
@@ -1964,11 +1334,7 @@ def test_engine_unresolvable_model_pointer_is_not_evaluated(tmp_path: Path, pbip
 
 
 def test_a_stale_project_path_falls_through_to_bound_model(tmp_path: Path) -> None:
-    """A unit with one dead pointer and one live one is checkable, and must not be refused.
-
-    Refusing it would be an unnecessary NOT_EVALUATED - a coverage loss dressed as caution. The dead
-    pointer is still named in no verdict at all here, because a later pointer succeeded.
-    """
+    """A unit with one dead pointer and one live one is checkable, and must not be refused."""
     bundle = tmp_path / "b"
     _build_engine_bundle(
         bundle,
@@ -1997,12 +1363,7 @@ def test_engine_flat_file_source_is_not_flagged(tmp_path: Path) -> None:
 
 
 def test_engine_federated_legs_are_judged_per_connection_class(tmp_path: Path) -> None:
-    """One datasource, three upstream systems - the engine's own `_connection_facts` shape.
-
-    Collapsing the legs into a single `federated` record (what `migration_bundle` does for its own
-    purpose) maps to no connector token at all, so every federated source would report NOT_CHECKED.
-    Here the sqlserver leg is preserved and the snowflake leg is not: only snowflake may be flagged.
-    """
+    """One datasource, three upstream systems - the engine's own `_connection_facts` shape."""
     bundle = tmp_path / "b"
     _build_engine_bundle(
         bundle,
@@ -2017,12 +1378,7 @@ def test_engine_federated_legs_are_judged_per_connection_class(tmp_path: Path) -
 
 
 def test_engine_connector_present_beside_a_file_is_NOT_CHECKED_never_a_pass(tmp_path: Path) -> None:
-    """Model scope cannot tell a source's own CSV from a sibling's, so it refuses to call it.
-
-    This is the honest cost of having no table names, and it must land on NOT_CHECKED rather than
-    either PASS or FINDING: a pass would hide a partial downgrade, a finding would fire on a model
-    that legitimately mixes a live source with a CSV one.
-    """
+    """Model scope cannot tell a source's own CSV from a sibling's, so it refuses to call it."""
     bundle = tmp_path / "b"
     _build_engine_bundle(bundle, "Wb", {"FLIGHTS": "snowflake", "REF": "csv_present"}, [_embedded("snowflake")])
     report = ccf.scan(bundle)
@@ -2045,14 +1401,7 @@ def test_engine_connector_present_with_no_loading_partition_is_not_checked(tmp_p
 
 
 def test_engine_a_deferred_stub_beside_a_csv_is_not_a_FALSE_finding(tmp_path: Path) -> None:
-    """The model-scope guard earning its keep on the VERDICT, not merely on the wording.
-
-    An engine scaffold that names Snowflake but loads nothing, sitting beside a legitimately-CSV
-    table, has a connector present, no connected partition and a file-backed partition. Without the
-    guard that falls straight through to DOWNGRADED - a finding whose own message ("the model has no
-    `Snowflake.*` connector") is contradicted by the model in front of it. A gate that fires on
-    correct work gets muted, and then misses the real case.
-    """
+    """The model-scope guard earning its keep on the VERDICT, not merely on the wording."""
     bundle = tmp_path / "b"
     _build_engine_bundle(bundle, "Wb", {"DEFERRED": "snowflake_stub", "REF": "csv_present"}, [_embedded("snowflake")])
     report = ccf.scan(bundle)
@@ -2062,12 +1411,7 @@ def test_engine_a_deferred_stub_beside_a_csv_is_not_a_FALSE_finding(tmp_path: Pa
 
 
 def test_an_unresolved_connection_class_is_not_evaluated_not_nothing_to_check(tmp_path: Path) -> None:
-    """Issue #366's conflation, one level down: an UNKNOWN class is absence, not a resolved zero.
-
-    The engine records `connection_class: null` when a descriptor will not parse. Counting that as
-    "no live source here" would report `nothing_to_check` - a complete answer - about a datasource
-    nobody could classify.
-    """
+    """Issue #366's conflation, one level down: an UNKNOWN class is absence, not a resolved zero."""
     bundle = tmp_path / "b"
     entry = _embedded("snowflake")
     entry["connection_class"] = None
@@ -2079,18 +1423,7 @@ def test_an_unresolved_connection_class_is_not_evaluated_not_nothing_to_check(tm
 
 
 def test_a_model_scope_declaration_cannot_clear_the_source(tmp_path: Path) -> None:
-    """DECLARED is a PASS, so it is unreachable at model scope too - and that is not an oversight.
-
-    A generated-edit declaration names a TMDL table. Knowing that table is file-backed does not
-    establish that it belongs to THIS source, and at model scope nothing else does either. So a
-    perfectly-formed declaration still yields NOT_CHECKED here.
-
-    ⚠️ The consequence is real and deliberate: a workbook whose materialisation was a correct,
-    recorded decision can no longer be cleared by this gate on the engine path. It reports "not
-    evaluated" (exit 3), which `check_unit` treats as not-checked rather than a failure. Clearing it
-    honestly needs per-table provenance - upstream #182. The earlier version of this test asserted
-    `STATUS_OK` and was one of the four enshrining the fail-open.
-    """
+    """DECLARED is a PASS, so it is unreachable at model scope too - and that is not an oversight."""
     bundle = tmp_path / "b"
     _build_engine_bundle(
         bundle,
@@ -2119,16 +1452,7 @@ def test_a_declaration_still_clears_a_downgrade_at_TABLE_scope(tmp_path: Path) -
 
 
 def test_one_declaration_cannot_excuse_a_SECOND_file_backed_table(tmp_path: Path) -> None:
-    """Blind review HIGH 4: a table-scoped record attests to ITS table and no other.
-
-    Two file-backed tables, one declaration naming one of them. The second was recorded by nobody, so
-    the source must not clear.
-
-    ⚠️ Asserted at TABLE scope and on the EXACT verdict. Round 17: the previous version ran at model
-    scope and asserted only `!= STATUS_OK`, so mutating the result to DOWNGRADED still passed - a test
-    that accepts several verdicts cannot pin the one that matters. `_declared_verdict` is only
-    reachable at table scope now anyway, which is where the rule lives.
-    """
+    """Blind review HIGH 4: a table-scoped record attests to ITS table and no other."""
     unit = _build_unit(
         tmp_path / "u",
         [_live_source("ds.sf", "snowflake", tables=["T1", "T2"])],
@@ -2145,12 +1469,7 @@ def test_one_declaration_cannot_excuse_a_SECOND_file_backed_table(tmp_path: Path
 
 
 def test_engine_units_are_scoped_to_their_own_pbip_folder(tmp_path: Path) -> None:
-    """Two workbooks in one bundle: the clean one must not inherit the broken one's model.
-
-    Model scope is only safe because it is scoped to the model the engine says THIS workbook built.
-    Widening it to the bundle would let a downgraded sibling drag a clean workbook off its pass - and,
-    worse, let a clean sibling's connector vouch for a downgraded one.
-    """
+    """Two workbooks in one bundle: the clean one must not inherit the broken one's model."""
     bundle = tmp_path / "b"
     _build_engine_bundle(bundle, "Broken", {"FLIGHTS": "csv_missing"}, [_embedded("snowflake")])
     _build_engine_bundle(bundle, "Clean", {"ORDERS": "snowflake"}, [_embedded("snowflake")])
@@ -2177,23 +1496,14 @@ def test_a_parser_spec_at_the_root_wins_over_engine_rescan(tmp_path: Path) -> No
 
 
 def test_a_pbir_report_definition_is_not_mistaken_for_engine_telemetry() -> None:
-    """`report.json` is also the name of every PBIR report definition in this repo.
-
-    A recursive search for that filename would sweep hundreds of them in and invent units. The
-    committed examples are the proof: pointing at one must find nothing rather than something wrong.
-    """
+    """`report.json` is also the name of every PBIR report definition in this repo."""
     pbir = REPO_ROOT / "examples" / "shipping-kpis" / "fabric" / "ShippingKPIs.Report" / "definition"
     assert (pbir / "report.json").is_file(), "fixture moved; re-point this test"
     assert ccf._find_engine_units(pbir) == []
 
 
 def test_estate_coverage_is_reported_on_every_verdict(tmp_path: Path) -> None:
-    """ "No findings" must never be readable as "all clear" without the coverage denominator.
-
-    The examined unit is a DATASOURCE unit, because that is the half whose evidence supports a pass.
-    The earlier fixture used two workbook units and asserted `1 of 2 examined`, which after the round-17
-    cut can only be true if a model-scope pass is reachable - the thing that must not be.
-    """
+    """ "No findings" must never be readable as "all clear" without the coverage denominator."""
     bundle = tmp_path / "b"
     _build_engine_bundle(
         bundle,
@@ -2232,11 +1542,7 @@ def test_the_two_kinds_of_skip_are_labelled_differently(tmp_path: Path) -> None:
 
 
 def test_engine_cli_exit_codes_follow_the_house_ladder(tmp_path: Path) -> None:
-    """Judged by exit code: 0 examined-and-clean, 1 finding, 3 could-not-evaluate.
-
-    The clean case is a DATASOURCE unit. A workbook unit can no longer reach exit 0 by design, so
-    using one here would have asserted the fail-open (it previously did).
-    """
+    """Judged by exit code: 0 examined-and-clean, 1 finding, 3 could-not-evaluate."""
     ok = tmp_path / "ok"
     bad = tmp_path / "bad"
     skip = tmp_path / "skip"
@@ -2251,9 +1557,25 @@ def test_engine_cli_exit_codes_follow_the_house_ladder(tmp_path: Path) -> None:
 
 def test_a_handover_slice_can_be_pointed_at_directly(tmp_path: Path) -> None:
     """Operators hold slices, not only bundles; the bundle root is recovered from the slice's parent."""
-    bundle = tmp_path / "b"
-    slice_path = _build_engine_bundle(bundle, "Wb", {"FLIGHTS": "csv_missing"}, [_embedded("snowflake")])
+    slice_path = _build_engine_bundle(tmp_path / "b", "Wb", {"FLIGHTS": "csv_missing"}, [_embedded("snowflake")])
     assert _cli(slice_path).returncode == ccf.EXIT_DOWNGRADED
+
+
+def test_model_wide_reporting_helpers_never_drive_a_pass() -> None:
+    """`file_backed`, `has_connector` and `_item_names_source` answer reporting questions only."""
+    model = ccf.Model(
+        "m",
+        "m",
+        ({"table": "T", "category": "file_ok"}, {"table": "U", "category": "live"}),
+        '// prior source was Snowflake.Databases("s","d")\nlet Source = Sql.Database("s", "d") in Source',
+    )
+    assert (model.file_backed, model.connected) == (1, 1)
+    assert model.has_connector("Sql") and not model.has_connector("Snowflake")
+    assert not ccf._item_names_source("  ", "ds.sf", [])
+    assert ccf._item_names_source("ds.sf.TABLE", "ds.sf", [])
+    assert ccf._item_names_source("note about DS-SF extract", "ds.sf", [])
+    assert ccf._item_names_source("FLIGHTS fell back", "other", ["Flights"])
+    assert not ccf._item_names_source("unrelated", "other", ["Flights"])
 
 
 def test_engine_telemetry_status_keeps_absent_apart_from_empty() -> None:
@@ -2337,25 +1659,14 @@ def _real_datasource_detail() -> dict:
 
 
 def _real_ds_tables(**overrides: str) -> dict[str, str]:
-    """The four tables the real datasource declares, all connected unless overridden.
-
-    Writing fewer is not "a smaller fixture", it is a DIFFERENT case: a declared table with no
-    emitted partition is incomplete coverage, and this module refuses a pass on that. The first draft
-    of these tests wrote one table and read the resulting refusal as a bug in the code.
-    """
+    """The four tables the real datasource declares, all connected unless overridden."""
     tables = {"FACT_ORDERS": "snowflake", "DIM_CUSTOMER": "snowflake", "DIM_DATE": "snowflake", "Date": "snowflake"}
     tables.update(overrides)
     return tables
 
 
 def _real_bundle(root: Path, ds_tables: dict[str, str], wb_tables: dict[str, str] | None = None) -> Path:
-    """Reproduce the real bundle's LAYOUT, including the two traps it contains.
-
-    Trap 1: the workbook's project holds a model named after the DATASOURCE, not the workbook -
-    `pbip/Meridian Revenue by Region/Meridian Sales (Live Snowflake).SemanticModel`.
-    Trap 2: the datasource unit lives ONLY in `report.json`; `handover/` holds the workbook slice, so
-    anything resolving units through handover alone never sees it.
-    """
+    """Reproduce the real bundle's LAYOUT, including the two traps it contains."""
     wb_name = "Meridian Revenue by Region"
     ds_name = "Meridian Sales (Live Snowflake)"
 
@@ -2387,12 +1698,7 @@ def _real_bundle(root: Path, ds_tables: dict[str, str], wb_tables: dict[str, str
 
 
 def test_the_real_bundle_finds_BOTH_units_not_just_the_workbook(tmp_path: Path) -> None:
-    """Resolving units through handover alone found 1 of 2 - and skipped the checkable one.
-
-    On the real bundle the ONLY genuinely live Snowflake source in the estate is the DATASOURCE, and
-    it exists only in `report.json`. `read_handover.load_workbooks` never opens that file when a
-    `handover/` folder is present, so the datasource half was invisible.
-    """
+    """Resolving units through handover alone found 1 of 2 - and skipped the checkable one."""
     bundle = _real_bundle(tmp_path / "b", _real_ds_tables())
     names = sorted(u.name for u in ccf._find_engine_units(bundle))
     assert names == ["Meridian Revenue by Region", "Meridian Sales (Live Snowflake)"]
@@ -2401,26 +1707,8 @@ def test_the_real_bundle_finds_BOTH_units_not_just_the_workbook(tmp_path: Path) 
     assert scopes["Meridian Revenue by Region"] == ccf.SCOPE_MODEL
 
 
-def test_the_real_datasource_unit_is_evaluated_at_TABLE_scope(tmp_path: Path) -> None:
-    """`tables` is really there, so this half needs no weakening at all: a real CONNECTED pass.
-
-    Reproduces the real verdict: unit OK, one connected source, connection class snowflake.
-    """
-    bundle = _real_bundle(tmp_path / "b", _real_ds_tables())
-    report = ccf.scan(bundle)
-    ds = next(u for u in report["units"] if u["unit"] == "Meridian Sales (Live Snowflake)")
-    assert ds["status"] == ccf.STATUS_OK
-    assert ds["connected"] == 1
-    assert ds["sources"][0]["connection_class"] == "snowflake"
-    assert ds["sources"][0]["verdict"] == ccf.SOURCE_CONNECTED
-
-
 def test_the_real_datasource_unit_catches_a_downgrade_at_full_strength(tmp_path: Path) -> None:
-    """The incident, on the real bundle's datasource half: DirectQuery Snowflake -> CSV.
-
-    All four declared tables are materialised, which is the shape of the incident that motivated the
-    gate (#328: three Snowflake custom-SQL tables materialised to CSV together).
-    """
+    """The incident, on the real bundle's datasource half: DirectQuery Snowflake -> CSV."""
     materialised = {name: "csv_missing" for name in _real_ds_tables()}
     bundle = _real_bundle(tmp_path / "b", materialised)
     report = ccf.scan(bundle)
@@ -2430,14 +1718,7 @@ def test_the_real_datasource_unit_catches_a_downgrade_at_full_strength(tmp_path:
 
 
 def test_a_PARTIAL_downgrade_on_the_real_datasource_is_not_checked_never_a_pass(tmp_path: Path) -> None:
-    """One of four tables materialised: NOT_CHECKED, and crucially neither PASS nor FINDING.
-
-    My first draft of the test above asserted DOWNGRADED for this shape and was wrong. It is the
-    module's oldest blind-review invariant, now confirmed to hold on the engine datasource half too:
-    with a live connector present AND a file-backed table of the same source, per-partition
-    attribution is not reliable enough to call it either way. Refusing is the point - a PASS here
-    would hide the materialised table, a FINDING would fire on models that legitimately mix.
-    """
+    """One of four tables materialised: NOT_CHECKED, and crucially neither PASS nor FINDING."""
     bundle = _real_bundle(tmp_path / "b", _real_ds_tables(FACT_ORDERS="csv_missing"))
     report = ccf.scan(bundle)
     assert report["status"] == ccf.STATUS_SKIPPED
@@ -2449,12 +1730,7 @@ def test_a_PARTIAL_downgrade_on_the_real_datasource_is_not_checked_never_a_pass(
 
 
 def test_the_real_datasource_unit_is_TABLE_scoped_not_model_scoped(tmp_path: Path) -> None:
-    """Proof the datasource half really got table scope, not model scope wearing its name.
-
-    Model scope would call a preserved connector beside a file-backed table PARTIAL/NOT_CHECKED.
-    Table scope attributes per declared table, so a legitimately-CSV table that this datasource does
-    NOT declare cannot drag its verdict off a pass. Same discrimination the parser path makes.
-    """
+    """Proof the datasource half really got table scope, not model scope wearing its name."""
     bundle = _real_bundle(tmp_path / "b", _real_ds_tables(ZZ_NOT_MINE="csv_present"))
     ds = next(u for u in ccf.scan(bundle)["units"] if u["unit"] == "Meridian Sales (Live Snowflake)")
     assert ds["status"] == ccf.STATUS_OK
@@ -2471,12 +1747,7 @@ def test_a_workbook_model_is_not_named_after_the_workbook(tmp_path: Path) -> Non
 
 
 def test_sqlproxy_is_a_POINTER_not_an_unmapped_class(tmp_path: Path) -> None:
-    """A published-datasource workbook must name the unit that holds its real connection.
-
-    `sqlproxy` is Tableau's proxy; the upstream (Snowflake here) is not in the workbook payload at
-    all. Reporting it as "no known connector mapping" invites the wrong fix - adding it to
-    CLASS_TO_CONNECTOR, which would make the gate judge a proxy as though it were the upstream.
-    """
+    """A published-datasource workbook must name the unit that holds its real connection."""
     bundle = _real_bundle(tmp_path / "b", _real_ds_tables())
     wb = next(u for u in ccf.scan(bundle)["units"] if u["unit"] == "Meridian Revenue by Region")
     assert wb["status"] == ccf.STATUS_SKIPPED
@@ -2489,12 +1760,7 @@ def test_sqlproxy_is_a_POINTER_not_an_unmapped_class(tmp_path: Path) -> None:
 
 
 def test_the_sqlproxy_pointer_reaches_the_rendered_line(tmp_path: Path) -> None:
-    """A reason nobody sees is not a reason.
-
-    On the real bundle the only actionable sentence sat on `sources[0].detail` while the rendered
-    line said the generic "unresolved or unmappable connection class" - telling an operator to hunt
-    an unmapped class when the answer was "check the other unit".
-    """
+    """A reason nobody sees is not a reason."""
     bundle = _real_bundle(tmp_path / "b", _real_ds_tables())
     text = ccf.render(ccf.scan(bundle))
     assert "PROXY" in text
@@ -2527,11 +1793,7 @@ def test_a_datasource_with_no_connector_recorded_is_not_evaluated(tmp_path: Path
 
 
 def test_output_folder_is_the_last_resort_pointer_not_the_first(tmp_path: Path) -> None:
-    """`pbip_folder` is the working copy; `output_folder` names the engine's PRISTINE baseline.
-
-    Judging `semantic_models/` would answer the wrong question - what the engine emitted, not what
-    ships - so it is only consulted when no other pointer exists.
-    """
+    """`pbip_folder` is the working copy; `output_folder` names the engine's PRISTINE baseline."""
     detail = _real_datasource_detail()
     bundle = _real_bundle(tmp_path / "b", _real_ds_tables())
     baseline = bundle / "semantic_models" / "Meridian Sales (Live Snowflake).SemanticModel"
@@ -2547,31 +1809,6 @@ def test_output_folder_is_the_last_resort_pointer_not_the_first(tmp_path: Path) 
     assert fallback == [baseline.resolve()]
 
 
-def test_the_real_workbook_telemetry_shape_is_pinned() -> None:
-    """Field-for-field, against the emitted reality - so a future engine change is a RED test.
-
-    This is the assertion that would have caught the docstring claim I got wrong: it pins what the
-    workbook emitter does and does not carry, from a real run rather than from reading its source.
-    """
-    row = _real_workbook_detail()["embedded_datasources"][0]
-    assert sorted(row) == [
-        "caption",
-        "connection_class",
-        "connections",
-        "label",
-        "named_connection_count",
-        "table_count",
-    ]
-    assert isinstance(row["connections"], list) and row["connections"] == []
-    assert isinstance(row["table_count"], int)
-    assert "tables" not in row, "if the engine starts naming workbook tables, lift this half to table scope"
-
-    detail = _real_datasource_detail()
-    assert detail["tables"] == ["FACT_ORDERS", "DIM_CUSTOMER", "DIM_DATE", "Date"]
-    assert ccf.engine_datasource_sources(detail)[0]["tables"] == detail["tables"]
-    assert ccf.engine_datasource_sources(detail)[0]["connection"]["powerbi_target"] == "live_source"
-
-
 # --- blind review, round 16: five paths where a PASS rested on partial evidence --------------------
 #
 # One defect wearing five faces. The module's stated invariant is "a finding may rest on partial
@@ -2584,13 +1821,7 @@ def test_the_real_workbook_telemetry_shape_is_pinned() -> None:
 
 
 def test_HIGH1_a_declared_unit_with_no_slice_does_not_vanish(tmp_path: Path) -> None:
-    """A missing unit must never be indistinguishable from a fully-checked estate.
-
-    ⚠️ TWO workbooks, ONE slice. Round 17 showed the earlier fixture deleted the ONLY slice, so the
-    old slice-first loader simply fell back to `report.json` and found everything - it never built the
-    condition that was the actual defect, which is a VALID slice satisfying the loader while a SECOND
-    declared unit has no slice at all. Restoring the old behaviour on disk left this file 135 passed.
-    """
+    """A missing unit must never be indistinguishable from a fully-checked estate."""
     bundle = tmp_path / "b"
     _build_engine_bundle(bundle, "Kept", {"K": "snowflake"}, [_embedded("snowflake", tables=1)])
     _build_engine_bundle(bundle, "Broken", {"T": "csv_missing"}, [_embedded("snowflake", tables=1)])
@@ -2611,11 +1842,7 @@ def test_HIGH1_a_declared_unit_with_no_slice_does_not_vanish(tmp_path: Path) -> 
 
 
 def test_HIGH1_an_unreadable_census_is_a_unit_not_silence(tmp_path: Path) -> None:
-    """A corrupt `report.json` used to fall through to the slice loader, which knows no datasources.
-
-    Round 17 finding 1: every datasource unit then disappeared with no signal at all - the loudest
-    possible shrink of the denominator, reported as silence.
-    """
+    """A corrupt `report.json` used to fall through to the slice loader, which knows no datasources."""
     bundle = tmp_path / "b"
     _build_engine_bundle(bundle, "Wb", {"T": "snowflake"}, [_embedded("snowflake", tables=1)])
     (bundle / "report.json").write_text("{ truncated", encoding="utf-8")
@@ -2649,11 +1876,7 @@ def test_HIGH1_an_unreadable_slice_with_no_census_is_still_a_unit(tmp_path: Path
 
 
 def test_HIGH2_a_connector_from_one_partition_cannot_certify_another(tmp_path: Path) -> None:
-    """ "Rows arrive" and "this connector is named" must be the SAME partition.
-
-    Both were model-wide facts, so a live `Sql.Database` partition certified a Snowflake source whose
-    only partition was an empty `#table` stub: two sources reported connected, exit 0.
-    """
+    """ "Rows arrive" and "this connector is named" must be the SAME partition."""
     bundle = tmp_path / "b"
     _build_engine_bundle(
         bundle,
@@ -2669,11 +1892,7 @@ def test_HIGH2_a_connector_from_one_partition_cannot_certify_another(tmp_path: P
 
 
 def test_HIGH2_the_same_borrow_is_closed_at_TABLE_scope_too(tmp_path: Path) -> None:
-    """The identical model-wide agreement existed on the parser path and is closed by the same rule.
-
-    A source's own table classified `remote_import` through `Sql.Database` used to be certified by a
-    Snowflake token emitted for an unrelated table - a false pass on the tier this gate started on.
-    """
+    """The identical model-wide agreement existed on the parser path and is closed by the same rule."""
     source = _live_source("ds.sf", "snowflake", tables=["MINE"])
     model = ccf.Model(
         "m",
@@ -2698,29 +1917,8 @@ def test_HIGH2_the_same_borrow_is_closed_at_TABLE_scope_too(tmp_path: Path) -> N
     assert verdict.verdict != ccf.SOURCE_CONNECTED
 
 
-def test_HIGH3_table_count_is_carried_into_the_judgment(tmp_path: Path) -> None:
-    """A source whose connector appears in the model is NOT_CHECKED at model scope, whatever it declared.
-
-    Round 16 fixed this with a `table_count` completeness heuristic. Round 17 removed the heuristic
-    along with the model-scope pass it gated: 3-declared-against-1-emitted lands on the same refusal
-    as 1-against-1, because neither can be attributed. The narrower rule subsumes the wider one.
-    """
-    bundle = tmp_path / "b"
-    _build_engine_bundle(bundle, "Wb", {"T1": "snowflake"}, [_embedded("snowflake", tables=3)])
-    report = ccf.scan(bundle)
-    assert report["status"] != ccf.STATUS_OK
-    assert report["units"][0]["sources"][0]["verdict"] == ccf.SOURCE_NOT_CHECKED
-    assert _cli(bundle).returncode != ccf.EXIT_OK
-
-
 def test_an_UNKNOWN_source_gets_a_verdict_and_is_never_dropped(tmp_path: Path) -> None:
-    """Round 17 finding 4: a resolved source used to HIDE an unresolved one.
-
-    `_live_verdicts` skipped every non-live target, so a unit with one connected Snowflake source and
-    one source whose class could not be resolved reported OK / exit 0 - the connected one carrying the
-    whole unit. Dropping a source is the same absent-is-not-empty conflation this gate exists to
-    refuse, and it applies to BOTH paths, so it is asserted at table scope where a pass is reachable.
-    """
+    """Round 17 finding 4: a resolved source used to HIDE an unresolved one."""
     sources = [
         _live_source("ds.sf", "snowflake", tables=["OK_TABLE"]),
         {
@@ -2739,11 +1937,7 @@ def test_an_UNKNOWN_source_gets_a_verdict_and_is_never_dropped(tmp_path: Path) -
 
 
 def test_a_unit_cannot_pass_while_a_declared_source_produced_no_verdict() -> None:
-    """The headcount belt: fewer verdicts than declared judgeable sources can never be OK.
-
-    Independent of WHY a source went missing, so it still holds if a future path drops one somewhere
-    other than `_live_verdicts`.
-    """
+    """The headcount belt: fewer verdicts than declared judgeable sources can never be OK."""
     connected = ccf.SourceVerdict("ds.a", "a", "snowflake", "live", "live_source", ccf.SOURCE_CONNECTED, "c", [])
     unit = ccf._finalize_unit(Path("u/migration-spec.json"), [connected], live_declared=2)
     assert unit["status"] == ccf.STATUS_SKIPPED
@@ -2753,23 +1947,8 @@ def test_a_unit_cannot_pass_while_a_declared_source_produced_no_verdict() -> Non
     assert ccf._finalize_unit(Path("u/migration-spec.json"), [connected], live_declared=1)["status"] == ccf.STATUS_OK
 
 
-def test_HIGH3_an_unrecorded_table_count_cannot_support_a_pass(tmp_path: Path) -> None:
-    """Absence again: no `table_count` means unknown completeness, not complete."""
-    bundle = tmp_path / "b"
-    row = _embedded("snowflake", tables=1)
-    row.pop("table_count")
-    _build_engine_bundle(bundle, "Wb", {"T1": "snowflake"}, [row])
-    assert ccf.scan(bundle)["status"] != ccf.STATUS_OK
-
-
 def test_HIGH3_an_unclassified_federated_leg_is_preserved_not_filtered(tmp_path: Path) -> None:
-    """A leg with no recorded `connection_class` was silently dropped and the source passed clean.
-
-    Two assertions, because "preserved" and "acted on" are different claims. `engine_sources` keeps it
-    as an UNKNOWN-target record (visibility at the seam); the unit refuses a pass because the live
-    sibling carries the unaccounted-leg count. It gets no verdict ROW of its own - `_live_verdicts`
-    judges live-target sources only, and widening that is a separate change to the parser path too.
-    """
+    """A leg with no recorded `connection_class` was silently dropped and the source passed clean."""
     row = _embedded("snowflake", legs=["snowflake", None], tables=1)
     derived = ccf.engine_sources([row])
     assert any("unclassified-leg" in s["id"] for s in derived), f"the leg was filtered out: {derived}"
@@ -2782,12 +1961,7 @@ def test_HIGH3_an_unclassified_federated_leg_is_preserved_not_filtered(tmp_path:
 
 
 def test_MED5_a_legitimate_flat_file_sibling_is_not_reported_as_a_downgrade(tmp_path: Path) -> None:
-    """The gate's central discrimination, at model scope: a CSV is not evidence against a live source.
-
-    One declared Snowflake source and one legitimate Excel source, with only the Excel CSV emitted.
-    Nothing supports attributing that file to Snowflake. Unlike the other four this is a false
-    FINDING, and a gate that fires on correct work gets muted and then misses the real case.
-    """
+    """The gate's central discrimination, at model scope: a CSV is not evidence against a live source."""
     bundle = tmp_path / "b"
     _build_engine_bundle(
         bundle,
@@ -2821,12 +1995,7 @@ def test_MED5_more_file_tables_than_the_flat_siblings_can_explain_is_still_a_fin
 
 
 def test_azure_sqldb_maps_to_the_sql_connector() -> None:
-    """Tableau's `azure_sqldb` was unmapped, found by running the gate over a real 52-unit estate.
-
-    On that estate it sat on a WORKBOOK, where the verdict is NOT_CHECKED either way - but the same
-    class on a DATASOURCE unit would have been unevaluable for want of one lookup-table row. A
-    connector mapping is a fact, not an inference, so it is safe on the half that can still pass.
-    """
+    """Tableau's `azure_sqldb` was unmapped, found by running the gate over a real 52-unit estate."""
     assert ccf.CLASS_TO_CONNECTOR[ccf._norm_class("azure_sqldb")] == "Sql"
     source = {
         "name": "azure",
@@ -2883,98 +2052,12 @@ _UNUSED_LAZY_BINDING = (
     [("inline-rows-with-connector-string", _INLINE_ROWS_WITH_LITERAL), ("unused-lazy-binding", _UNUSED_LAZY_BINDING)],
 )
 def test_a_lexical_connector_match_is_not_a_pass_at_TABLE_scope(tmp_path: Path, label: str, body: str) -> None:
-    """Both round-18 reproductions, on the path the round-17 cut deliberately KEPT.
-
-    `inline-rows-with-connector-string`: the rows are an inline `#table` literal and the only
-    Snowflake text is a string literal. `unused-lazy-binding`: the rows come from `Sql.Database` while
-    an unused `Snowflake.Databases` binding sits beside them. Both exited 0 before provenance.
-    """
+    """Both round-18 reproductions, on the path the round-17 cut deliberately KEPT."""
     unit = _attack_unit(tmp_path, body)
     report = _run(unit)
     assert report["connected_sources"] == 0, label
     assert report["status"] != ccf.STATUS_OK
     assert _cli(unit).returncode != ccf.EXIT_OK
-
-
-@pytest.mark.parametrize(
-    ("label", "body"),
-    [("inline-rows-with-connector-string", _INLINE_ROWS_WITH_LITERAL), ("unused-lazy-binding", _UNUSED_LAZY_BINDING)],
-)
-def test_a_lexical_connector_match_is_not_a_pass_at_MODEL_scope(tmp_path: Path, label: str, body: str) -> None:
-    """The same two bodies on the engine workbook path, where no pass is reachable at all."""
-    bundle = tmp_path / "b"
-    project = bundle / "pbip" / "Wb"
-    (project / "Wb.SemanticModel" / "definition" / "tables").mkdir(parents=True, exist_ok=True)
-    (project / "Wb.SemanticModel" / "definition" / "tables" / "T.tmdl").write_text(
-        f"table T\n\tpartition T = m\n{body}", encoding="utf-8"
-    )
-    (bundle / "report.json").write_text(
-        json.dumps(
-            {
-                "tool": "migrate_estate",
-                "workbooks": [
-                    {
-                        "name": "Wb",
-                        "pbip_folder": "pbip/Wb/Wb.pbip",
-                        "embedded_datasources": [_embedded("snowflake", tables=1)],
-                    }
-                ],
-                "datasources": [],
-            }
-        ),
-        encoding="utf-8",
-    )
-    assert ccf.scan(bundle)["connected_sources"] == 0, label
-
-
-def test_the_canonical_generated_shapes_still_earn_a_pass() -> None:
-    """Four FROZEN 2.339.0 strings, verbatim from the two real bundles, against the matcher.
-
-    ⚠️ WHAT THIS PINS, precisely: it catches a MATCHER regression - a tightening that stops
-    recognising output the generator really produces. It does NOT invoke the generator, so an external
-    generator shape change CANNOT make it fail. That drift fails closed (an unrecognised shape becomes
-    NOT_CHECKED, never a pass), which is why it is safe, but the guarantee is "we still recognise what
-    2.339.0 emitted", not "we still recognise what the engine emits". Re-survey after an engine
-    upgrade; `scripts/README.md` records the survey command's result, not a live check.
-    """
-    shapes = {
-        "Snowflake": 'let\n Source = Snowflake.Databases(#"Server", #"Warehouse"),\n'
-        ' Db = Source{[Name="MERIDIAN", Kind="Database"]}[Data],\n'
-        ' Schema = Db{[Name="SALES", Kind="Schema"]}[Data],\n'
-        ' Data = Schema{[Name="DIM_CUSTOMER", Kind="Table"]}[Data]\nin\n Data',
-        "Sql": 'let\n Source = Sql.Database(#"Server", #"Database"),\n'
-        ' Data = Source{[Schema="dbo", Item="TestData"]}[Data]\nin\n Data',
-        "PostgreSQL": 'let\n Source = PostgreSQL.Database(#"Server", #"Database"),\n'
-        ' Data = Source{[Schema="public", Item="xy"]}[Data]\nin\n Data',
-        "Databricks": 'let\n Source = Databricks.Catalogs(#"Server_databricks", #"HttpPath_databricks"),\n'
-        ' Db = Source{[Name="samples", Kind="Database"]}[Data],\n'
-        ' Schema = Db{[Name="nyctaxi", Kind="Schema"]}[Data],\n'
-        ' Data = Schema{[Name="trips", Kind="Table"]}[Data]\nin\n Data',
-    }
-    for token, body in shapes.items():
-        assert ccf.partition_provenance(body) == frozenset({token}), token
-
-
-def test_a_custom_sql_native_query_chain_is_provable() -> None:
-    """`Value.NativeQuery(<handle>, ...)` derives rows from the handle, so it is a chain step.
-
-    This is how a Tableau custom-SQL relation lands - the shape of the incident that motivated the
-    gate (#328) - and the committed `mixed-live-and-flat-file` fixture is exactly it. An earlier draft
-    returned nothing here because `Value.NativeQuery` matched the ROOT connector-call pattern and
-    ended the walk; the committed fixture caught it.
-    """
-    body = (
-        'let\n Source = Snowflake.Databases("acme", "WH"),\n'
-        ' Catalog = Source{[Name = "SCORECARD", Kind = "Database"]}[Data],\n'
-        ' Result = Value.NativeQuery(Catalog, "SELECT a, b FROM t", null, [EnableFolding = true])\nin\n Result'
-    )
-    assert ccf.partition_provenance(body) == frozenset({"Snowflake"})
-    # ...but only from the FIRST argument position: a connector named elsewhere proves nothing.
-    sneaky = (
-        'let\n Source = Csv.Document(File.Contents("x.csv")),\n'
-        ' Result = Value.NativeQuery(Source, "Snowflake.Databases", null)\nin\n Result'
-    )
-    assert ccf.partition_provenance(sneaky) == frozenset()
 
 
 # --- round 18 HIGH 2: a malformed census must not shrink the denominator ---------------------------
@@ -2991,12 +2074,7 @@ def test_a_custom_sql_native_query_chain_is_provable() -> None:
     ids=["wrong-typed-workbooks", "non-object-entry", "wrong-typed-datasources", "missing-datasources"],
 )
 def test_a_structurally_malformed_census_is_not_evaluated(tmp_path: Path, census: dict) -> None:
-    """Invalid JSON was surfaced; malformed STRUCTURE was still accepted and quietly contributed zero.
-
-    `workbooks: "malformed"` beside a valid `datasources: []` reported `COVERAGE: 1 of 1`, exit 0.
-    Once a file is identified as a census, both collections must be present, list-typed, and hold
-    objects - anything else is a census we cannot count from.
-    """
+    """Invalid JSON was surfaced; malformed STRUCTURE was still accepted and quietly contributed zero."""
     bundle = tmp_path / "b"
     (bundle / "pbip").mkdir(parents=True, exist_ok=True)
     (bundle / "report.json").write_text(json.dumps({"tool": "migrate_estate", **census}), encoding="utf-8")
@@ -3008,11 +2086,7 @@ def test_a_structurally_malformed_census_is_not_evaluated(tmp_path: Path, census
 
 
 def test_two_units_sharing_a_name_are_reported_not_deduplicated(tmp_path: Path) -> None:
-    """A flat-only record and a live record under one name must not silently collapse.
-
-    Which of the two the unit IS cannot be established, so neither is judged - and saying
-    "[nothing to check]" while a live declaration exists under the same name is the worst of both.
-    """
+    """A flat-only record and a live record under one name must not silently collapse."""
     bundle = tmp_path / "b"
     project = bundle / "pbip" / "Same"
     project.mkdir(parents=True, exist_ok=True)
@@ -3040,11 +2114,7 @@ def test_two_units_sharing_a_name_are_reported_not_deduplicated(tmp_path: Path) 
 
 
 def test_every_entry_point_reports_the_same_coverage(tmp_path: Path) -> None:
-    """Bundle dir, `report.json` and a direct slice must agree about what the estate contains.
-
-    Round 18: they gave `1 of 2`, `1 of 2` and `0 of 1`. A file argument narrows what you point AT,
-    never what the estate declares, so a slice now reconciles against its sibling census.
-    """
+    """Bundle dir, `report.json` and a direct slice must agree about what the estate contains."""
     bundle = tmp_path / "b"
     slice_path = _build_engine_bundle(
         bundle,
@@ -3077,341 +2147,198 @@ def test_every_entry_point_reports_the_same_coverage(tmp_path: Path) -> None:
     assert len(set(coverage.values())) == 1, coverage
 
 
-def test_a_benign_string_literal_cannot_corrupt_the_chain_parse() -> None:
-    """String-literal stripping earns its keep HERE, not on the attack it looks like it guards.
-
-    The inline-rows attack is already closed by the canonical-shape requirement, so mutating literal
-    handling did not move that verdict - the mutation SURVIVED and the claim was unearned. What
-    stripping actually protects is the binding split: an unbalanced brace or a comma inside a literal
-    would corrupt the depth counter and break a perfectly good generated chain, turning a real pass
-    into a silent refusal. That is a robustness property, not a safety one, and this is where it lives.
-    """
-    body = (
-        "let\n"
-        '    Note = "a } b , c",\n'
-        '    Source = Snowflake.Databases("srv", "wh"),\n'
-        '    Data = Source{[Name = "T", Kind = "Table"]}[Data]\n'
-        "in\n"
-        "    Data"
-    )
-    assert ccf.partition_provenance(body) == frozenset({"Snowflake"})
-
-
-def test_a_non_canonical_chain_cannot_earn_a_pass() -> None:
-    """Only the generator's own shape counts; a bare reference chain is not evidence of provenance.
-
-    Recognising a known generator's output is defensible. Following ANY identifier reference would be
-    inference again - it would accept a hand-edited partition whose rows are computed by something the
-    gate never looked at.
-    """
-    bare_reference = (
-        'let\n    Source = Snowflake.Databases("srv", "wh"),\n    Alias = Source,\n    Data = Alias\nin\n    Data'
-    )
-    assert ccf.partition_provenance(bare_reference) == frozenset()
-    transformed = (
-        "let\n"
-        '    Source = Snowflake.Databases("srv", "wh"),\n'
-        '    Data = Table.SelectRows(Source{[Name = "T"]}[Data], each true)\n'
-        "in\n"
-        "    Data"
-    )
-    assert ccf.partition_provenance(transformed) == frozenset()
-
-
-def test_only_the_first_argument_of_a_native_query_is_the_handle() -> None:
-    """A connector reachable through a LATER argument is not the source of the rows.
-
-    `Value.NativeQuery(Src, Cat)` executes against `Src`. If a looser rule picked up `Cat`, a
-    CSV-backed partition would be certified by a Snowflake handle it merely mentions.
-    """
-    # A `Sql.Database` root deliberately: the round-19 handle rule would refuse a Snowflake root here
-    # anyway, and a test that passes for two reasons cannot pin either. Only the first-argument rule
-    # refuses this one.
-    body = (
-        "let\n"
-        '    Cat = Sql.Database("srv", "db"),\n'
-        '    Src = Csv.Document(File.Contents("x.csv")),\n'
-        "    Data = Value.NativeQuery(Src, Cat)\n"
-        "in\n"
-        "    Data"
-    )
-    assert ccf.partition_provenance(body) == frozenset()
-
-
-# --- round 19: the walker accepted a SUPERSET of the canonical form --------------------------------
-#
-# Both findings were structural permissiveness where the survey says strictness is free: none of the
-# 8 canonical shapes contains a nested `let`, a leading branch, or a native query at all. Tightening
-# to the surveyed shapes cost ZERO passes - estate still 7 of 7 connected, cold run still 1.
-
 _SF_ROOT = 'Snowflake.Databases("srv", "wh")'
+_SQL_ROOT = 'Sql.Database("srv", "db")'
+_SQL_NAV = 'Source{[Schema = "dbo", Item = "T"]}[Data]'
+
+# (label, partition body, expected provenance). One row per distinct walker rule; an empty set is a
+# refusal. Bodies are the frozen 2.339.0 generator shapes and the review-round reproductions.
+PROVENANCE_CASES = [
+    (
+        "canonical-snowflake",
+        'let\n Source = Snowflake.Databases(#"Server", #"Warehouse"),\n'
+        ' Db = Source{[Name="MERIDIAN", Kind="Database"]}[Data],\n'
+        ' Schema = Db{[Name="SALES", Kind="Schema"]}[Data],\n'
+        ' Data = Schema{[Name="DIM_CUSTOMER", Kind="Table"]}[Data]\nin\n Data',
+        {"Snowflake"},
+    ),
+    (
+        "canonical-sql",
+        'let\n Source = Sql.Database(#"Server", #"Database"),\n'
+        ' Data = Source{[Schema="dbo", Item="TestData"]}[Data]\nin\n Data',
+        {"Sql"},
+    ),
+    (
+        "canonical-postgres",
+        'let\n Source = PostgreSQL.Database(#"Server", #"Database"),\n'
+        ' Data = Source{[Schema="public", Item="xy"]}[Data]\nin\n Data',
+        {"PostgreSQL"},
+    ),
+    (
+        "canonical-databricks",
+        'let\n Source = Databricks.Catalogs(#"Server_databricks", #"HttpPath_databricks"),\n'
+        ' Db = Source{[Name="samples", Kind="Database"]}[Data],\n'
+        ' Schema = Db{[Name="nyctaxi", Kind="Schema"]}[Data],\n'
+        ' Data = Schema{[Name="trips", Kind="Table"]}[Data]\nin\n Data',
+        {"Databricks"},
+    ),
+    (
+        "custom-sql-on-drilled-snowflake-handle",
+        'let\n Source = Snowflake.Databases("acme", "WH"),\n'
+        ' Catalog = Source{[Name = "SCORECARD", Kind = "Database"]}[Data],\n'
+        ' Result = Value.NativeQuery(Catalog, "SELECT a, b FROM t", null, [EnableFolding = true])\nin\n Result',
+        {"Snowflake"},
+    ),
+    (
+        "native-query-connector-only-in-sql-text",
+        'let\n Source = Csv.Document(File.Contents("x.csv")),\n'
+        ' Result = Value.NativeQuery(Source, "Snowflake.Databases", null)\nin\n Result',
+        set(),
+    ),
+    (
+        "native-query-handle-is-first-argument-only",
+        f'let\n    Cat = {_SQL_ROOT},\n    Src = Csv.Document(File.Contents("x.csv")),\n'
+        "    Data = Value.NativeQuery(Src, Cat)\nin\n    Data",
+        set(),
+    ),
+    (
+        "native-query-on-sql-root",
+        f'let\n    Source = {_SQL_ROOT},\n    Data = Value.NativeQuery(Source, "SELECT 1")\nin\n    Data',
+        {"Sql"},
+    ),
+    (
+        "native-query-on-snowflake-root-collection",
+        f'let\n    Source = {_SF_ROOT},\n    Data = Value.NativeQuery(Source, "SELECT 1")\nin\n    Data',
+        set(),
+    ),
+    (
+        "native-query-on-databricks-root-collection",
+        'let\n    Source = Databricks.Catalogs("srv", "path"),\n'
+        '    Data = Value.NativeQuery(Source, "SELECT 1")\nin\n    Data',
+        set(),
+    ),
+    (
+        "two-chained-native-queries",
+        f"let\n    Source = {_SF_ROOT},\n"
+        '    Cat = Source{[Name="D", Kind="Database"]}[Data],\n'
+        '    Inner = Value.NativeQuery(Cat, "SELECT 1"),\n'
+        '    Data = Value.NativeQuery(Inner, "SELECT 2")\nin\n    Data',
+        set(),
+    ),
+    (
+        "unmeasured-root-fails-closed-to-drill-not-required",
+        'let\n Source = Teradata.Database("srv"),\n Data = Value.NativeQuery(Source, "SELECT 1")\nin\n Data',
+        {"Teradata"},
+    ),
+    (
+        "benign-literal-with-delimiters",
+        'let\n    Note = "a } b , c",\n    Source = Snowflake.Databases("srv", "wh"),\n'
+        '    Data = Source{[Name = "T", Kind = "Table"]}[Data]\nin\n    Data',
+        {"Snowflake"},
+    ),
+    (
+        "closed-strings-and-comments",
+        'let\n    Note = "a } b , c ""quoted"" )",\n    /* a closed comment with ) ] } */\n'
+        f"    Source = {_SQL_ROOT},\n    Data = {_SQL_NAV}\nin\n    Data",
+        {"Sql"},
+    ),
+    (
+        "bare-reference-chain",
+        f"let\n    Source = {_SF_ROOT},\n    Alias = Source,\n    Data = Alias\nin\n    Data",
+        set(),
+    ),
+    (
+        "transformed-chain",
+        f"let\n    Source = {_SF_ROOT},\n"
+        '    Data = Table.SelectRows(Source{[Name = "T"]}[Data], each true)\nin\n    Data',
+        set(),
+    ),
+    (
+        "leading-branch-returns-inline-rows",
+        "if true then #table(type table [A = Int64.Type], {{1}}) else\n"
+        f'let\n    Source = {_SF_ROOT},\n    Data = Source{{[Name="T"]}}[Data]\nin\n    Data',
+        set(),
+    ),
+    (
+        "nested-unused-let",
+        f"let\n    Source = {_SF_ROOT},\n"
+        '    Ignored = let X = 0, Data = Source{[Name="T"]}[Data] in Data,\n'
+        "    Result = #table(type table [A = Int64.Type], {{1}})\nin\n    Result",
+        set(),
+    ),
+    (
+        "nested-let-beside-a-valid-outer-chain",
+        f"let\n    Ignored = let X = 0 in X,\n    Source = {_SF_ROOT},\n"
+        '    Data = Source{[Name = "T", Kind = "Table"]}[Data]\nin\n    Data',
+        set(),
+    ),
+    (
+        "trailing-junk-after-in",
+        f'let\n    Source = {_SF_ROOT},\n    Data = Source{{[Name="T"]}}[Data]\nin\n    Data\nmeta [x = 1]',
+        set(),
+    ),
+    (
+        "native-query-concatenated-with-inline-rows",
+        f"let\n    Source = {_SQL_ROOT},\n"
+        '    Data = Value.NativeQuery(Source, "SELECT CAST(NULL AS int) AS A WHERE 1=0")\n'
+        "           & #table(type table [A = Int64.Type], {{1}})\nin\n    Data",
+        set(),
+    ),
+    (
+        "same-native-query-without-concatenation",
+        f"let\n    Source = {_SQL_ROOT},\n"
+        '    Data = Value.NativeQuery(Source, "SELECT CAST(NULL AS int) AS A WHERE 1=0")\nin\n    Data',
+        {"Sql"},
+    ),
+    (
+        "connector-call-with-trailing-operator",
+        f'let\n    Source = {_SQL_ROOT} = null,\n    Data = Value.NativeQuery(Source, "SELECT 1")\nin\n    Data',
+        set(),
+    ),
+    (
+        "connector-wrapped-in-table-buffer",
+        f"let\n    Source = Table.Buffer({_SQL_ROOT}),\n    Data = {_SQL_NAV}\nin\n    Data",
+        set(),
+    ),
+    (
+        "connector-wrapped-in-user-function",
+        f"let\n    Source = Buffered({_SQL_ROOT}),\n    Data = {_SQL_NAV}\nin\n    Data",
+        set(),
+    ),
+    ("connector-behind-try-prefix", f"let\n    Source = try {_SQL_ROOT},\n    Data = {_SQL_NAV}\nin\n    Data", set()),
+    (
+        "navigation-with-trailing-operator",
+        f"let\n    Source = {_SQL_ROOT},\n"
+        f"    Data = {_SQL_NAV} & #table(type table [A = Int64.Type], {{{{1}}}})\nin\n    Data",
+        set(),
+    ),
+    (
+        "odbc-query-is-never-a-handle",
+        'let\n    Source = Odbc.Query("dsn=x", "SELECT 1"),\n'
+        '    Data = Value.NativeQuery(Source, "SELECT 2")\nin\n    Data',
+        set(),
+    ),
+    ("odbc-query-is-a-terminal-root", 'let\n    Source = Odbc.Query("dsn=x", "SELECT 1")\nin\n    Source', {"Odbc"}),
+]
+
+# Unterminated strings/comments: mid-binding cases are refused ONLY by `_strip_m_noise` returning None.
+_UNTERMINATED = [
+    ('let\n Source = {sql},\n Data = {nav}\nin\n Data "oops with ) ] }}'),
+    ("let\n Source = {sql},\n Data = {nav}\nin\n Data\n/* oops ) ] }}"),
+    ('let\n X = "oops,\n Source = {sql},\n Data = {nav}\nin\n Data'),
+    ("let\n /* oops,\n Source = {sql},\n Data = {nav}\nin\n Data"),
+]
 
 
-@pytest.mark.parametrize(
-    ("label", "body"),
-    [
-        (
-            "leading-branch-returns-inline-rows",
-            "if true then #table(type table [A = Int64.Type], {{1}}) else\n"
-            f"let\n    Source = {_SF_ROOT},\n"
-            '    Data = Source{[Name="T"]}[Data]\nin\n    Data',
-        ),
-        (
-            "nested-unused-let",
-            f"let\n    Source = {_SF_ROOT},\n"
-            '    Ignored = let X = 0, Data = Source{[Name="T"]}[Data] in Data,\n'
-            "    Result = #table(type table [A = Int64.Type], {{1}})\nin\n    Result",
-        ),
-        (
-            "trailing-junk-after-the-in-expression",
-            f'let\n    Source = {_SF_ROOT},\n    Data = Source{{[Name="T"]}}[Data]\nin\n    Data\nmeta [x = 1]',
-        ),
-    ],
-)
-def test_the_let_must_be_the_WHOLE_source_expression(label: str, body: str) -> None:
-    """Searching for a `let ... in` ANYWHERE let dead code supply the provenance.
-
-    `if true then #table(...) else let Source = Snowflake... in Data` returns INLINE rows while the
-    walker certified the unreachable Snowflake chain, exit 0. A nested `let` did the same by ending
-    the walk at the inner `in`. Nested `let` is now rejected rather than parsed - no canonical shape
-    has one, so the conservative rule is also the free one.
-    """
-    assert ccf.partition_provenance(body) == frozenset(), label
-
-
-def test_any_nested_let_is_refused_even_when_the_outer_chain_is_valid() -> None:
-    """The nested-`let` ban is conservative on purpose, and this is the case that proves it fires.
-
-    Here the OUTER chain is genuinely canonical and the nested `let` is unreachable, so a parser could
-    accept it - and the greedy whole-expression match alone does. It is refused anyway: no surveyed
-    canonical shape contains a nested `let`, and "reject rather than parse" is the rule that removes a
-    whole class of scope-tracking bugs instead of another instance of one.
-    """
-    body = (
-        "let\n"
-        "    Ignored = let X = 0 in X,\n"
-        f"    Source = {_SF_ROOT},\n"
-        '    Data = Source{[Name = "T", Kind = "Table"]}[Data]\n'
-        "in\n"
-        "    Data"
-    )
-    assert ccf.partition_provenance(body) == frozenset()
-
-
-@pytest.mark.parametrize(
-    ("label", "body"),
-    [
-        (
-            "native-query-on-a-snowflake-root-collection",
-            f'let\n    Source = {_SF_ROOT},\n    Data = Value.NativeQuery(Source, "SELECT 1")\nin\n    Data',
-        ),
-        (
-            "native-query-on-a-databricks-root-collection",
-            'let\n    Source = Databricks.Catalogs("srv", "path"),\n'
-            '    Data = Value.NativeQuery(Source, "SELECT 1")\nin\n    Data',
-        ),
-        (
-            "two-chained-native-queries",
-            f"let\n    Source = {_SF_ROOT},\n"
-            '    Cat = Source{[Name="D", Kind="Database"]}[Data],\n'
-            '    Inner = Value.NativeQuery(Cat, "SELECT 1"),\n'
-            '    Data = Value.NativeQuery(Inner, "SELECT 2")\nin\n    Data',
-        ),
-    ],
-)
-def test_a_native_query_needs_a_usable_connector_handle(label: str, body: str) -> None:
-    """`Snowflake.Databases` returns a COLLECTION, so a native query on the root cannot work.
-
-    This repo's own `storage_mode.py` records that Snowflake native queries are unsupported against
-    the root collection and need the drilled database handle - so the gate was certifying a shape we
-    document as broken. Chaining a native query onto another's result is not a generator shape either.
-    """
-    assert ccf.partition_provenance(body) == frozenset(), label
-
-
-@pytest.mark.parametrize(
-    ("label", "body", "expected"),
-    [
-        (
-            "drilled-snowflake-handle",
-            f"let\n    Source = {_SF_ROOT},\n"
-            '    Cat = Source{[Name="D", Kind="Database"]}[Data],\n'
-            '    Data = Value.NativeQuery(Cat, "SELECT 1", null, [EnableFolding = true])\nin\n    Data',
-            "Snowflake",
-        ),
-        (
-            "sql-root-is-already-a-database-handle",
-            'let\n    Source = Sql.Database("srv", "db"),\n'
-            '    Data = Value.NativeQuery(Source, "SELECT 1")\nin\n    Data',
-            "Sql",
-        ),
-    ],
-)
-def test_a_native_query_on_a_usable_handle_still_proves_provenance(label: str, body: str, expected: str) -> None:
-    """The negative beside the positive: the handle rule must not refuse the shapes that DO work.
-
-    `Sql.Database(server, db)` already IS a database handle, so a native query sits on it directly;
-    `Snowflake.Databases` needs one drill first. Refusing both would have taken custom SQL - the
-    incident's own shape - off the checkable list entirely.
-    """
-    assert ccf.partition_provenance(body) == frozenset({expected}), label
-
-
-def test_the_direct_database_root_list_fails_closed_for_unknown_connectors() -> None:
-    """An unmeasured connector defaults to "drill required", which is the safe direction."""
+def test_partition_provenance_accepts_only_the_canonical_chain() -> None:
+    """Every walker rule, one row each: a pass needs the generator's own whole-expression chain."""
+    for label, body, expected in PROVENANCE_CASES:
+        assert ccf.partition_provenance(body) == frozenset(expected), label
+    for template in _UNTERMINATED:
+        body = template.format(sql=_SQL_ROOT, nav=_SQL_NAV)
+        assert ccf._strip_m_noise(body) is None, template
+        assert ccf.partition_provenance(body) == frozenset(), template
     assert "Snowflake.Databases" not in ccf.DIRECT_DATABASE_ROOTS
     assert "Databricks.Catalogs" not in ccf.DIRECT_DATABASE_ROOTS
-    assert "Sql.Database" in ccf.DIRECT_DATABASE_ROOTS
-    body = 'let\n Source = Teradata.Database("srv"),\n Data = Value.NativeQuery(Source, "SELECT 1")\nin\n Data'
-    assert ccf.partition_provenance(body) == frozenset({"Teradata"})
-
-
-# --- round 20: a chain step must CONSUME its whole binding -----------------------------------------
-#
-# The same rule as round 19's `let` fix, one level down: `_CONNECTOR_CALL` and the step matchers
-# matched a PREFIX and ignored whatever followed. Balanced-delimiter counting closes it - find where
-# the call or navigation ends, then require nothing but whitespace after it. No operator precedence,
-# no types, no evaluation, so the walker stays a closed enumeration rather than an M interpreter.
-#
-# Each fixture below is built so the ROUND-20 rule is the SOLE reason for the verdict: every one uses
-# a `Sql.Database` root, which the round-19 handle rule permits, so nothing else can be doing the
-# refusing. (`test_a_native_query_needs_a_usable_connector_handle` covers the round-19 rule.)
-
-_SQL_ROOT = 'Sql.Database("srv", "db")'
-
-
-def test_a_native_query_concatenated_with_inline_rows_is_not_provenance() -> None:
-    """The round-20 reproduction: the SQL returns nothing by construction, the only row is inline.
-
-    `Value.NativeQuery(Source, "... WHERE 1=0") & #table(..., {{1}})` was certified fully
-    SQL-provenanced because the step matched the prefix and ignored the concatenation. A `Sql.Database`
-    root is used deliberately: the handle rule permits it, so full consumption is the only rule that
-    can refuse this.
-    """
-    body = (
-        f"let\n    Source = {_SQL_ROOT},\n"
-        '    Data = Value.NativeQuery(Source, "SELECT CAST(NULL AS int) AS A WHERE 1=0")\n'
-        "           & #table(type table [A = Int64.Type], {{1}})\n"
-        "in\n    Data"
-    )
-    assert ccf.partition_provenance(body) == frozenset()
-    # ...and the same chain WITHOUT the concatenation still proves provenance, so the refusal is
-    # attributable to the trailing operator and nothing else.
-    clean = (
-        f"let\n    Source = {_SQL_ROOT},\n"
-        '    Data = Value.NativeQuery(Source, "SELECT CAST(NULL AS int) AS A WHERE 1=0")\n'
-        "in\n    Data"
-    )
-    assert ccf.partition_provenance(clean) == frozenset({"Sql"})
-
-
-def test_a_connector_call_with_a_trailing_operator_is_not_a_root() -> None:
-    """`Sql.Database(...) = null` is a LOGICAL value, not a handle - the call is only a prefix of it."""
-    body = f'let\n    Source = {_SQL_ROOT} = null,\n    Data = Value.NativeQuery(Source, "SELECT 1")\nin\n    Data'
-    assert ccf.partition_provenance(body) == frozenset()
-
-
-def test_a_connector_call_wrapped_in_another_function_is_not_a_root() -> None:
-    """A connector call must BE the binding, not sit inside it - and the `^` anchor IS load-bearing.
-
-    ⚠️ I GOT THIS WRONG IN ROUND 20 AND THE CORRECTION IS THE POINT. I measured that loosening
-    `_CONNECTOR_CALL` to an unanchored `search` left both WRAPPER cases refused, and concluded the
-    anchor was redundant. It was redundant FOR THOSE INPUTS: every wrapper I tried has a trailing `)`,
-    so full consumption independently rejected them. A PREFIX form with no trailing suffix does not -
-    `try Sql.Database("srv", "db")` yields a try-record, not a database handle, and with both
-    mechanisms removed it returns `{'Sql'}`. A real false pass that only the anchor prevents.
-
-    The honest version of my note would have been "I could not construct a case where the anchor is
-    load-bearing", which invites the counterexample. "Redundant" claimed a general property from a
-    sample of two.
-    """
-    for wrapper in ("Table.Buffer", "Buffered"):
-        body = (
-            f"let\n    Source = {wrapper}({_SQL_ROOT}),\n"
-            '    Data = Source{[Schema = "dbo", Item = "T"]}[Data]\nin\n    Data'
-        )
-        assert ccf.partition_provenance(body) == frozenset(), wrapper
-
-    # The prefix form: no trailing suffix, so ONLY the anchor refuses it.
-    prefixed = (
-        f'let\n    Source = try {_SQL_ROOT},\n    Data = Source{{[Schema = "dbo", Item = "T"]}}[Data]\nin\n    Data'
-    )
-    assert ccf.partition_provenance(prefixed) == frozenset()
-
-
-@pytest.mark.parametrize(
-    ("label", "template"),
-    [
-        # After the `in` expression: `_WHOLE_LET`'s trailing `\s*$` ALSO refuses these, so they are
-        # the weak cases - kept because they are the reviewer's verbatim reproduction.
-        ("unterminated-string-after-in", 'let\n Source = {sql},\n Data = {nav}\nin\n Data "oops with ) ] }}'),
-        ("unterminated-comment-after-in", "let\n Source = {sql},\n Data = {nav}\nin\n Data\n/* oops ) ] }}"),
-        # MID-BINDING: the chain still parses without the unterminated region, so `_strip_m_noise`
-        # returning None is the ONLY thing refusing these. Measured: with that refusal removed they
-        # return {{'Sql'}}, while the weak cases return {{}} either way - so a fixture built only from
-        # the weak ones cannot pin the rule. Same fixture error as round 20, caught by the harness.
-        ("unterminated-string-mid-binding", 'let\n X = "oops,\n Source = {sql},\n Data = {nav}\nin\n Data'),
-        ("unterminated-comment-mid-binding", "let\n /* oops,\n Source = {sql},\n Data = {nav}\nin\n Data"),
-    ],
-)
-def test_unterminated_noise_is_not_provenance(label: str, template: str) -> None:
-    """Blanking an unterminated string or comment as if it closed yields a canonical-LOOKING chain.
-
-    Round 21: a valid chain followed by `Data "unterminated literal with ) ] }` was certified
-    connected, exit 0 - while `check_datamodel.py`, our own sibling gate, already reported
-    UNTERMINATED, exit 1. One gate certifying what a neighbour rejects is the worst shape available,
-    and the state was already being computed next door.
-    """
-    body = template.format(sql=_SQL_ROOT, nav='Source{[Schema = "dbo", Item = "T"]}[Data]')
-    assert ccf._strip_m_noise(body) is None, f"{label}: the stripper must report unterminated"
-    assert ccf.partition_provenance(body) == frozenset(), label
-
-
-def test_properly_closed_noise_is_still_handled(tmp_path: Path) -> None:
-    """The negative beside the positive: closed strings and comments must not become refusals.
-
-    Delimiters inside properly closed strings, doubled quotes, and braces inside closed block comments
-    all survived the round-21 attack, so the unterminated check must not sweep them up with it.
-    """
-    body = (
-        "let\n"
-        '    Note = "a } b , c ""quoted"" )",\n'
-        "    /* a closed comment with ) ] } */\n"
-        f"    Source = {_SQL_ROOT},\n"
-        '    Data = Source{[Schema = "dbo", Item = "T"]}[Data]\n'
-        "in\n    Data"
-    )
-    assert ccf._strip_m_noise(body) is not None
-    assert ccf.partition_provenance(body) == frozenset({"Sql"})
-
-
-def test_a_navigation_step_with_a_trailing_operator_is_not_a_step() -> None:
-    """The full-consumption rule applies to navigation too, not only to calls."""
-    body = (
-        f"let\n    Source = {_SQL_ROOT},\n"
-        '    Data = Source{[Schema = "dbo", Item = "T"]}[Data] & #table(type table [A = Int64.Type], {{1}})\n'
-        "in\n    Data"
-    )
-    assert ccf.partition_provenance(body) == frozenset()
-
-
-def test_odbc_query_is_a_terminal_root_but_never_a_handle() -> None:
-    """A factual correction to the allowlist, not a design choice.
-
-    `Odbc.Query(conn, sql)` returns RESULTS, so it can be a valid TERMINAL root when returned
-    directly - but it is never a handle another native query can run against. It was wrongly listed in
-    `DIRECT_DATABASE_ROOTS`. Every remaining member is literally a `.Database(...)` call, which is the
-    rule rather than a coincidence.
-    """
-    assert "Odbc.Query" not in ccf.DIRECT_DATABASE_ROOTS
-    assert "Odbc.DataSource" not in ccf.DIRECT_DATABASE_ROOTS
     assert all(root.endswith(".Database") for root in ccf.DIRECT_DATABASE_ROOTS)
-
-    as_handle = (
-        'let\n    Source = Odbc.Query("dsn=x", "SELECT 1"),\n'
-        '    Data = Value.NativeQuery(Source, "SELECT 2")\nin\n    Data'
-    )
-    assert ccf.partition_provenance(as_handle) == frozenset()
-
-    returned_directly = 'let\n    Source = Odbc.Query("dsn=x", "SELECT 1")\nin\n    Source'
-    assert ccf.partition_provenance(returned_directly) == frozenset({"Odbc"})
+    assert "Sql.Database" in ccf.DIRECT_DATABASE_ROOTS

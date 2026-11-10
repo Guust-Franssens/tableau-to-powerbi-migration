@@ -1,14 +1,7 @@
-"""Tests for scripts/check_blank_placeholders.py - handover-backed BLANK() placeholders.
+"""check_blank_placeholders: handover-backed BLANK() placeholders.
 
-The handover fixture shape is copied from `_bundle-208/handover/Admin_Insights_Starter.json`:
-`workbook.model_translation_handoff.needs_review[]` entries carry `category`, `fallback_reason`,
-`has_suggestion`, `name`, and `role`; column entries in that bundle do not always carry
-`target_table`, so the checker must recover the table from TMDL.
-
-The same entries reach the checker two ways, and the tests cover both because the difference is
-the whole of the phase-2/phase-3 defect: `report.json` (`workbooks[].model_translation_handoff`) is
-the PRIMARY source and is on disk when the gate runs; the `handover/*.json` slices are written one
-phase later and are a fallback for a bundle with no usable `report.json`.
+`report.json` (`workbooks[].model_translation_handoff`) is the PRIMARY source and is on disk when the
+gate runs (phase 2); the `handover/*.json` slices are written in phase 3 and are only a fallback.
 """
 
 from __future__ import annotations
@@ -28,9 +21,14 @@ def _bundle(tmp_path: Path) -> Path:
     return bundle
 
 
-def _write_handover(bundle: Path, workbook: str, needs_review: list[dict]) -> None:
-    payload = {"workbook": {"model_translation_handoff": {"needs_review": needs_review}}}
-    (bundle / "handover" / f"{workbook}.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+def _write_handover(bundle: Path, workbook: str, needs_review: list[dict], **extra) -> None:
+    payload = {"workbook": {"model_translation_handoff": {"needs_review": needs_review, **extra}}}
+    (bundle / "handover" / f"{workbook}.json").write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _write_report_json(bundle: Path, workbooks: list[dict]) -> None:
+    bundle.mkdir(parents=True, exist_ok=True)
+    (bundle / "report.json").write_text(json.dumps({"workbooks": workbooks}), encoding="utf-8")
 
 
 def _write_model(bundle: Path, workbook: str, table: str, body: str) -> None:
@@ -41,492 +39,171 @@ def _write_model(bundle: Path, workbook: str, table: str, body: str) -> None:
 
 def _column_table(table: str = "Sales", name: str = "Flag", expr: str = "BLANK()") -> str:
     return (
-        f"table {table}\n\n"
-        f"\tcolumn '{name}' = {expr}\n"
-        "\t\tlineageTag: 11111111-1111-1111-1111-111111111111\n"
-        "\t\tsummarizeBy: none\n"
+        f"table {table}\n\n\tcolumn '{name}' = {expr}\n\t\tsummarizeBy: none\n"
         "\t\tannotation TableauFormula = IF [x] THEN 1 ELSE 0 END\n"
     )
 
 
-def _measure_table(name: str = "Group Sort", expr: str = "BLANK()") -> str:
-    return (
-        "table _Measures\n\n"
-        f"\tmeasure '{name}' = {expr}\n"
-        "\t\tlineageTag: 22222222-2222-2222-2222-222222222222\n"
-        "\t\tannotation TableauFormula = CASE [Sort] WHEN 'x' THEN 1 END\n"
-    )
+MEASURE_TABLE = "table _Measures\n\n\tmeasure 'Group Sort' = BLANK()\n\t\tannotation TableauFormula = CASE [Sort] WHEN 'x' THEN 1 END\n"
 
 
-def _write_page(report: Path, page_id: str = "page-1", display_name: str = "Overview") -> Path:
-    page = report / "definition" / "pages" / page_id
-    page.mkdir(parents=True, exist_ok=True)
-    (page / "page.json").write_text(json.dumps({"name": page_id, "displayName": display_name}), encoding="utf-8")
-    return page
+def _refused(name: str = "Flag", table: str | None = "Sales", role: str = "dimension") -> dict:
+    entry = {"category": "type_or_shape_mismatch", "fallback_reason": "IFNULL", "has_suggestion": False}
+    entry |= {"name": name, "role": role}
+    return entry | ({"target_table": table} if table else {})
 
 
-def _write_filter_visual(bundle: Path, workbook: str, table: str = "Sales", column: str = "Flag") -> None:
-    report = bundle / "pbip" / workbook / f"{workbook}.Report"
-    visual_dir = _write_page(report) / "visuals" / "visual-filter"
-    visual_dir.mkdir(parents=True)
+def _write_visual(bundle: Path, workbook: str, page_id: str, visual: dict) -> None:
+    page = bundle / "pbip" / workbook / f"{workbook}.Report" / "definition" / "pages" / page_id
+    (page / "visuals" / "v").mkdir(parents=True)
+    (page / "page.json").write_text(json.dumps({"name": page_id, "displayName": page_id}), encoding="utf-8")
+    (page / "visuals" / "v" / "visual.json").write_text(json.dumps({"name": "v", **visual}), encoding="utf-8")
+
+
+def _write_filter_visual(bundle: Path, workbook: str) -> None:
+    left = {"Column": {"Expression": {"SourceRef": {"Source": "f"}}, "Property": "Flag"}}
+    where = {"Condition": {"Comparison": {"ComparisonKind": 0, "Left": left, "Right": {"Literal": {"Value": "1L"}}}}}
+    flt = {"Version": 2, "From": [{"Name": "f", "Entity": "Sales", "Type": 0}], "Where": [where]}
     visual = {
-        "name": "visual-filter",
         "visual": {"visualType": "tableEx"},
-        "objects": {
-            "general": [
-                {
-                    "properties": {
-                        "filter": {
-                            "filter": {
-                                "Version": 2,
-                                "From": [{"Name": "f", "Entity": table, "Type": 0}],
-                                "Where": [
-                                    {
-                                        "Condition": {
-                                            "Comparison": {
-                                                "ComparisonKind": 0,
-                                                "Left": {
-                                                    "Column": {
-                                                        "Expression": {"SourceRef": {"Source": "f"}},
-                                                        "Property": column,
-                                                    }
-                                                },
-                                                "Right": {"Literal": {"Value": "1L"}},
-                                            }
-                                        }
-                                    }
-                                ],
-                            }
-                        }
-                    }
-                }
-            ]
-        },
+        "objects": {"general": [{"properties": {"filter": {"filter": flt}}}]},
     }
-    (visual_dir / "visual.json").write_text(json.dumps(visual, indent=2), encoding="utf-8")
+    _write_visual(bundle, workbook, "page-1", visual)
 
 
-def _write_binding_visual(bundle: Path, workbook: str, measure: str = "Group Sort") -> None:
-    report = bundle / "pbip" / workbook / f"{workbook}.Report"
-    visual_dir = _write_page(report, "page-2", "Group Drilldown") / "visuals" / "visual-binding"
-    visual_dir.mkdir(parents=True)
-    visual = {
-        "name": "visual-binding",
-        "visual": {
-            "visualType": "clusteredBarChart",
-            "query": {
-                "queryState": {
-                    "Tooltips": {
-                        "projections": [
-                            {
-                                "field": {
-                                    "Measure": {
-                                        "Expression": {"SourceRef": {"Entity": "_Measures"}},
-                                        "Property": measure,
-                                    }
-                                },
-                                "queryRef": f"_Measures.{measure}",
-                            }
-                        ]
-                    }
-                }
-            },
-        },
-    }
-    (visual_dir / "visual.json").write_text(json.dumps(visual, indent=2), encoding="utf-8")
+def _write_binding_visual(bundle: Path, workbook: str) -> None:
+    field = {"Measure": {"Expression": {"SourceRef": {"Entity": "_Measures"}}, "Property": "Group Sort"}}
+    state = {"Tooltips": {"projections": [{"field": field, "queryRef": "_Measures.Group Sort"}]}}
+    visual = {"visual": {"visualType": "clusteredBarChart", "query": {"queryState": state}}}
+    _write_visual(bundle, workbook, "page-2", visual)
 
 
-def test_intentional_hand_authored_blank_without_handover_is_not_flagged(tmp_path: Path) -> None:
-    """A bare BLANK() is legitimate; the handover correlation prevents false positives."""
-    bundle = _bundle(tmp_path)
-    _write_model(bundle, "Workbook", "Sales", _column_table())
-
-    report = cbp.scan(bundle)
-
-    assert report["status"] == cbp.STATUS_OK
-    assert report["placeholders_found"] == 0
+def test_correlation_requires_both_a_handover_entry_and_a_blank_body(tmp_path: Path) -> None:
+    """A hand-authored BLANK() without a handover, or a handover without a BLANK() body, is OK."""
+    bare = _bundle(tmp_path / "bare")
+    _write_model(bare, "Workbook", "Sales", _column_table())
+    assert cbp.scan(bare)["status"] == cbp.STATUS_OK and cbp.scan(bare)["placeholders_found"] == 0
+    assert cbp.main([str(bare), "--quiet"]) == cbp.EXIT_OK
+    assert cbp.main(["--bundle", str(bare), "--quiet"]) == cbp.EXIT_OK
+    no_body = _bundle(tmp_path / "nobody")
+    _write_handover(no_body, "Workbook", [_refused()])
+    _write_model(no_body, "Workbook", "Sales", _column_table(expr="1"))
+    assert cbp.scan(no_body)["status"] == cbp.STATUS_OK
 
 
 def test_filter_dependency_escalates_above_an_unreferenced_placeholder(tmp_path: Path) -> None:
-    """The exit-worthy case: a report filter depends on one placeholder; another is merely a gap."""
+    """A filter on one placeholder is material; another placeholder is merely a documented gap."""
     bundle = _bundle(tmp_path)
-    _write_handover(
-        bundle,
-        "Workbook",
-        [
-            {
-                "category": "type_or_shape_mismatch",
-                "fallback_reason": "IFNULL arguments return inconsistent types",
-                "has_suggestion": False,
-                "name": "Flag",
-                "role": "dimension",
-                "target_table": "Sales",
-            },
-            {
-                "category": "type_or_shape_mismatch",
-                "fallback_reason": "unsupported function WINDOW_SUM",
-                "has_suggestion": False,
-                "name": "Unused",
-                "role": "dimension",
-                "target_table": "Sales",
-            },
-        ],
-    )
+    _write_handover(bundle, "Workbook", [_refused(), _refused(name="Unused")])
     _write_model(bundle, "Workbook", "Sales", _column_table() + "\n" + _column_table(name="Unused"))
     _write_filter_visual(bundle, "Workbook")
-
     report = cbp.scan(bundle)
-
     assert report["status"] == cbp.STATUS_REFERENCED
     by_name = {finding["name"]: finding for finding in report["findings"]}
     assert by_name["Flag"]["severity"] == cbp.STATUS_REFERENCED
     assert by_name["Flag"]["material_dependencies"][0]["usage"] == "filter"
-    assert by_name["Unused"]["severity"] == cbp.STATUS_UNREFERENCED
-    assert by_name["Unused"]["material_dependencies"] == []
+    assert (by_name["Unused"]["severity"], by_name["Unused"]["material_dependencies"]) == (cbp.STATUS_UNREFERENCED, [])
+    assert cbp.main([str(bundle), "--quiet"]) == cbp.EXIT_REFERENCED
 
 
-def test_visual_field_binding_is_also_material(tmp_path: Path) -> None:
-    """A BLANK() measure placed in a visual role is not just a model gap; the visual consumes it."""
+def test_real_bundle_208_shape_correlates_dedupes_and_counts_a_visual_binding(tmp_path: Path) -> None:
+    """No target_table (table from TMDL), the same fallback in needs_review AND requests counts once."""
     bundle = _bundle(tmp_path)
-    _write_handover(
-        bundle,
-        "Admin_Insights_Starter",
-        [
-            {
-                "category": "model_object_parameter",
-                "fallback_reason": "bare row-level field [..] not valid in a measure",
-                "has_suggestion": False,
-                "name": "Group Sort",
-                "role": "measure",
-            }
-        ],
-    )
-    _write_model(bundle, "Admin_Insights_Starter", "_Measures", _measure_table())
-    _write_binding_visual(bundle, "Admin_Insights_Starter")
-
+    request = _refused("Group Sort", "_Measures", "measure") | {"formula": "CASE [Sort] WHEN 'x' THEN 1 END"}
+    _write_handover(bundle, "Admin", [_refused("Group Sort", None, "measure")], requests=[request])
+    _write_model(bundle, "Admin", "_Measures", MEASURE_TABLE)
     report = cbp.scan(bundle)
-
+    assert report["status"] == cbp.STATUS_UNREFERENCED
+    assert (report["placeholders_found"], report["placeholders_referenced"]) == (1, 0)
+    finding = report["findings"][0]
+    assert finding["table"] == "_Measures" and finding["handover"]["handover_path"] == "handover/Admin.json"
+    assert finding["handover"]["target_table"] == "_Measures"
+    assert cbp.main([str(bundle), "--quiet"]) == cbp.EXIT_UNREFERENCED
+    _write_binding_visual(bundle, "Admin")
+    report = cbp.scan(bundle)
     assert report["status"] == cbp.STATUS_REFERENCED
     assert report["findings"][0]["material_dependencies"][0]["usage"] == "visual_field"
 
 
-def test_real_bundle_208_handover_shape_correlates_to_the_tmdl_table(tmp_path: Path) -> None:
-    """The fixture is the real `_bundle-208` shape: no target_table, role=measure, nested path."""
-    bundle = _bundle(tmp_path)
-    _write_handover(
-        bundle,
-        "Admin_Insights_Starter",
-        [
-            {
-                "category": "model_object_parameter",
-                "fallback_reason": "bare row-level field [..] not valid in a measure",
-                "has_suggestion": False,
-                "name": "Group Sort",
-                "role": "measure",
-            }
-        ],
-    )
-    _write_model(bundle, "Admin_Insights_Starter", "_Measures", _measure_table())
-
-    report = cbp.scan(bundle)
-
-    assert report["status"] == cbp.STATUS_UNREFERENCED
-    assert report["findings"][0]["table"] == "_Measures"
-    assert report["findings"][0]["handover"]["handover_path"] == "handover/Admin_Insights_Starter.json"
-
-
-def test_real_handover_requests_and_needs_review_do_not_double_emit(tmp_path: Path) -> None:
-    """Current handovers list the same fallback in `needs_review` and `requests`; count it once."""
-    bundle = _bundle(tmp_path)
-    _write_handover(
-        bundle,
-        "Admin_Insights_Starter",
-        [
-            {
-                "category": "model_object_parameter",
-                "fallback_reason": "bare row-level field [..] not valid in a measure",
-                "has_suggestion": False,
-                "name": "Group Sort",
-                "role": "measure",
-            }
-        ],
-    )
-    payload = json.loads((bundle / "handover" / "Admin_Insights_Starter.json").read_text(encoding="utf-8"))
-    payload["workbook"]["model_translation_handoff"]["requests"] = [
-        {
-            "category": "model_object_parameter",
-            "fallback_reason": "bare row-level field [..] not valid in a measure",
-            "has_suggestion": False,
-            "name": "Group Sort",
-            "role": "measure",
-            "target_table": "_Measures",
-            "formula": "CASE [Sort] WHEN 'x' THEN 1 END",
-        }
-    ]
-    (bundle / "handover" / "Admin_Insights_Starter.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    _write_model(bundle, "Admin_Insights_Starter", "_Measures", _measure_table())
-
-    report = cbp.scan(bundle)
-    distinct = {(finding["tmdl"], finding["name"], finding["table"]) for finding in report["findings"]}
-
-    assert len(report["findings"]) == len(distinct) == 1
-    assert report["placeholders_found"] == len(distinct)
-    assert report["placeholders_referenced"] == 0
-    assert report["findings"][0]["handover"]["target_table"] == "_Measures"
-
-
-def test_handover_entry_without_blank_body_is_not_a_placeholder(tmp_path: Path) -> None:
-    """The handover alone is not enough; the model must still carry the BLANK() body."""
-    bundle = _bundle(tmp_path)
-    _write_handover(
-        bundle,
-        "Workbook",
-        [
-            {
-                "category": "type_or_shape_mismatch",
-                "fallback_reason": "IFNULL arguments return inconsistent types",
-                "has_suggestion": False,
-                "name": "Flag",
-                "role": "dimension",
-                "target_table": "Sales",
-            }
-        ],
-    )
-    _write_model(bundle, "Workbook", "Sales", _column_table(expr="1"))
-
-    assert cbp.scan(bundle)["status"] == cbp.STATUS_OK
-
-
-def _write_report_json(bundle: Path, workbooks: list[dict]) -> None:
-    """The engine's own report.json - the primary handover source, present from phase 2."""
-    payload = {"tool": "tableau-fabric-skills", "generated_at": "2026-08-19T00:00:00Z", "workbooks": workbooks}
-    bundle.mkdir(parents=True, exist_ok=True)
-    (bundle / "report.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
-
-
-def _refused_calc(name: str = "Flag", table: str | None = "Sales", role: str = "dimension") -> dict:
-    return {
-        "category": "type_or_shape_mismatch",
-        "fallback_reason": "IFNULL arguments return inconsistent types",
-        "has_suggestion": False,
-        "name": name,
-        "role": role,
-        "target_table": table,
-    }
-
-
-def test_a_fresh_bundle_correlates_from_report_json_before_any_handover_slice_exists(tmp_path: Path) -> None:
-    """`handover/` is written in phase 3, AFTER this gate runs in phase 2 - it is not engine output.
-
-    Reading the slices made the check a no-op on every first run: the folder does not exist, the
-    glob returns nothing, and the bundle is declared clean. report.json is where `slice_handovers`
-    gets the same entries from, and it is already on disk.
-    """
-    bundle = tmp_path / "bundle"
-    _write_report_json(bundle, [{"name": "Workbook", "model_translation_handoff": {"requests": [_refused_calc()]}}])
+def test_report_json_is_primary_and_names_the_pbip_folder_owner(tmp_path: Path) -> None:
+    """A fresh phase-2 bundle has no `handover/`; `pbip_folder` keys the TMDL side, not the name."""
+    bundle = tmp_path / "fresh"
+    _write_report_json(bundle, [{"name": "Workbook", "model_translation_handoff": {"requests": [_refused()]}}])
     _write_model(bundle, "Workbook", "Sales", _column_table())
     _write_filter_visual(bundle, "Workbook")
-    assert not (bundle / "handover").exists(), "the fixture is not a fresh run if the slices already exist"
-
     report = cbp.scan(bundle)
-
-    assert report["status"] == cbp.STATUS_REFERENCED
-    assert report["placeholders_found"] == 1
+    assert not (bundle / "handover").exists()
+    assert (report["status"], report["placeholders_found"]) == (cbp.STATUS_REFERENCED, 1)
     assert report["findings"][0]["handover"]["handover_path"] == "report.json"
 
-
-def test_the_pbip_folder_names_the_owner_when_it_differs_from_the_workbook_name(tmp_path: Path) -> None:
-    """`pbip_folder` is the engine's own answer to "which folder did this workbook build".
-
-    Measured in `_bundle-208`: it is `pbip/<dir>/<name>.pbip` and its `<dir>` is what the TMDL side
-    of the correlation is keyed on. Deriving the owner from the display name instead would miss any
-    workbook whose folder was sanitised, and miss it SILENTLY - as a clean bundle.
-    """
-    bundle = tmp_path / "bundle"
-    _write_report_json(
-        bundle,
-        [
-            {
-                "name": "Workbook (Live Snowflake)",
-                "pbip_folder": "pbip/Workbook_Live_Snowflake_/Workbook_Live_Snowflake_.pbip",
-                "model_translation_handoff": {"requests": [_refused_calc()]},
-            }
-        ],
-    )
-    _write_model(bundle, "Workbook_Live_Snowflake_", "Sales", _column_table())
-
-    report = cbp.scan(bundle)
-
-    assert report["placeholders_found"] == 1
-    assert report["findings"][0]["owner"] == "Workbook_Live_Snowflake_"
+    renamed = tmp_path / "renamed"
+    entry = {"name": "Workbook (Live)", "pbip_folder": "pbip/Workbook_Live_/Workbook_Live_.pbip"}
+    _write_report_json(renamed, [entry | {"model_translation_handoff": {"requests": [_refused()]}}])
+    _write_model(renamed, "Workbook_Live_", "Sales", _column_table())
+    report = cbp.scan(renamed)
+    assert report["placeholders_found"] == 1 and report["findings"][0]["owner"] == "Workbook_Live_"
 
 
-def test_a_previous_estates_slices_cannot_outlive_the_report_json_that_replaced_them(tmp_path: Path) -> None:
-    """Reusing `--output` leaves the last estate's `handover/` in place; it is not evidence about this one.
+def test_slices_are_a_fallback_only_when_report_json_is_absent_or_unreadable(tmp_path: Path) -> None:
+    """Stale slices cannot outlive a report.json that says "none"; an unreadable one degrades loudly."""
+    stale = _bundle(tmp_path / "stale")
+    _write_handover(stale, "Workbook", [_refused()])
+    _write_report_json(stale, [{"name": "Workbook", "model_translation_handoff": {"requests": []}}])
+    _write_model(stale, "Workbook", "Sales", _column_table())
+    _write_filter_visual(stale, "Workbook")
+    assert cbp.scan(stale)["status"] == cbp.STATUS_OK and cbp.scan(stale)["placeholders_found"] == 0
 
-    The current report.json lists workbooks and no refused calcs, which is an authoritative "there
-    are none". Topping that up from stale slices correlates the PREVIOUS estate's names against the
-    CURRENT run's TMDL, which is how a fixed calc keeps being reported as broken.
-    """
-    bundle = _bundle(tmp_path)
-    _write_handover(bundle, "Workbook", [_refused_calc()])
-    _write_report_json(bundle, [{"name": "Workbook", "model_translation_handoff": {"requests": []}}])
-    _write_model(bundle, "Workbook", "Sales", _column_table())
-    _write_filter_visual(bundle, "Workbook")
-
-    report = cbp.scan(bundle)
-
-    assert report["status"] == cbp.STATUS_OK
-    assert report["placeholders_found"] == 0
-
-
-def test_null_model_translation_handoff_with_blank_body_is_incomplete_not_clean(tmp_path: Path) -> None:
-    """A null handoff means the workbook was not checked, not that it has no engine placeholders (#276)."""
-    bundle = tmp_path / "bundle"
-    _write_report_json(bundle, [{"name": "Workbook", "model_translation_handoff": None}])
-    _write_model(bundle, "Workbook", "Sales", _column_table())
-
-    report = cbp.scan(bundle)
-
-    assert report["status"] == cbp.STATUS_INCOMPLETE
-    assert report["placeholders_found"] == 0
-    assert report["workbooks_unchecked"] == 1
-    assert report["workbooks_unchecked_blank_objects"] == 1
-    assert "NOT CHECKED" in cbp.render(report)
-    assert cbp.main([str(bundle), "--quiet"]) == cbp.EXIT_INCOMPLETE
-
-
-def test_blank_bodies_under_owners_without_workbook_entries_are_reported_as_skipped(tmp_path: Path) -> None:
-    """Shared datasources have no workbooks[] handoff entry, so their BLANK() bodies are explicitly out of scope."""
-    bundle = tmp_path / "bundle"
-    _write_report_json(bundle, [{"name": "Workbook", "model_translation_handoff": {"requests": []}}])
-    _write_model(bundle, "Workbook", "Sales", _column_table(expr="1"))
-    _write_model(bundle, "DS_Flight_Level", "Flights", _column_table(table="Flights"))
-
-    report = cbp.scan(bundle)
-
-    assert report["status"] == cbp.STATUS_INCOMPLETE
-    assert report["skipped_shared_datasources"] == 1
-    assert report["skipped_shared_datasource_blank_objects"] == 1
-    assert report["skipped_shared_datasource_details"] == [{"owner": "DS_Flight_Level", "blank_objects": 1}]
-    assert "outside this handover check - NOT CHECKED" in cbp.render(report)
-
-
-def test_a_bundle_without_a_usable_report_json_still_reads_the_handover_slices(tmp_path: Path) -> None:
-    """Backward compatibility: a bundle produced before the coordinator wrote a report.json."""
-    bundle = _bundle(tmp_path)
-    _write_handover(bundle, "Workbook", [_refused_calc()])
-    _write_model(bundle, "Workbook", "Sales", _column_table())
-
-    report = cbp.scan(bundle)
-
+    legacy = _bundle(tmp_path / "legacy")
+    _write_handover(legacy, "Workbook", [_refused()])
+    _write_model(legacy, "Workbook", "Sales", _column_table())
+    report = cbp.scan(legacy)
     assert report["status"] == cbp.STATUS_UNREFERENCED
     assert report["findings"][0]["handover"]["handover_path"] == "handover/Workbook.json"
 
-
-def test_a_truncated_handover_slice_is_counted_rather_than_raised(tmp_path: Path) -> None:
-    """A corrupt input is evidence, not an exception.
-
-    The two sibling readers in this module (`_page_names`, `_report_references`) already guard their
-    reads. This one did not, and it is called from a coordinator that runs three other gates after
-    it: the raise meant none of them printed a verdict, and the process exited 1 - which that script
-    reads as "the engine itself failed".
-    """
-    bundle = _bundle(tmp_path)
-    _write_handover(bundle, "Workbook", [_refused_calc()])
-    (bundle / "handover" / "Truncated.json").write_text('{"workbook": {', encoding="utf-8")
-    _write_model(bundle, "Workbook", "Sales", _column_table())
-
-    report = cbp.scan(bundle)
-
-    assert report["placeholders_found"] == 1, "the readable slice's evidence was lost with the corrupt one"
-    assert report["handover_unreadable"] == 1
-    assert report["handover_unreadable_paths"] == ["handover/Truncated.json"]
-    assert "Truncated.json" in cbp.render(report), "an uncorrelatable input must be visible in the verdict"
-
-
-def test_an_unreadable_report_json_degrades_to_the_slices_and_says_so(tmp_path: Path) -> None:
-    """The primary source failing must not be silent: it is why the fallback is being trusted."""
-    bundle = _bundle(tmp_path)
-    (bundle / "report.json").write_text('{"workbooks": [', encoding="utf-8")
-    _write_handover(bundle, "Workbook", [_refused_calc()])
-    _write_model(bundle, "Workbook", "Sales", _column_table())
-
-    report = cbp.scan(bundle)
-
-    assert report["placeholders_found"] == 1
-    assert report["handover_unreadable_paths"] == ["report.json"]
+    (legacy / "report.json").write_text('{"workbooks": [', encoding="utf-8")
+    report = cbp.scan(legacy)
+    assert (report["placeholders_found"], report["handover_unreadable_paths"]) == (1, ["report.json"])
     assert "report.json" in cbp.render(report)
 
 
-def test_an_unreadable_input_alone_does_not_invent_a_placeholder(tmp_path: Path) -> None:
-    """The false-positive control for the guard: nothing correlated, so the status is still OK."""
+def test_a_truncated_slice_is_counted_rather_than_raised(tmp_path: Path) -> None:
+    """A corrupt input is visible evidence, never an exception and never an invented placeholder."""
     bundle = _bundle(tmp_path)
     (bundle / "handover" / "Truncated.json").write_text('{"workbook": {', encoding="utf-8")
     _write_model(bundle, "Workbook", "Sales", _column_table())
-
     report = cbp.scan(bundle)
-
-    assert report["status"] == cbp.STATUS_OK
-    assert report["handover_unreadable"] == 1
+    assert (report["status"], report["handover_unreadable"]) == (cbp.STATUS_OK, 1)
     assert cbp.main([str(bundle), "--quiet"]) == cbp.EXIT_OK
+    _write_handover(bundle, "Workbook", [_refused()])
+    report = cbp.scan(bundle)
+    assert report["placeholders_found"] == 1
+    assert report["handover_unreadable_paths"] == ["handover/Truncated.json"]
+    assert "Truncated.json" in cbp.render(report)
 
 
-def test_existing_model_with_no_tmdl_is_incomplete_not_ok(tmp_path: Path) -> None:
-    """A cache-only `.SemanticModel` measures no placeholder evidence and must not pass."""
-    model = tmp_path / "CacheOnly.SemanticModel"
-    model.mkdir()
+def test_unchecked_scope_is_incomplete_not_clean(tmp_path: Path) -> None:
+    """A null handoff (#276), a shared-datasource owner, or a cache-only model is NOT CHECKED."""
+    null = tmp_path / "null"
+    _write_report_json(null, [{"name": "Workbook", "model_translation_handoff": None}])
+    _write_model(null, "Workbook", "Sales", _column_table())
+    report = cbp.scan(null)
+    assert report["status"] == cbp.STATUS_INCOMPLETE and report["placeholders_found"] == 0
+    assert (report["workbooks_unchecked"], report["workbooks_unchecked_blank_objects"]) == (1, 1)
+    assert "NOT CHECKED" in cbp.render(report)
+    assert cbp.main([str(null), "--quiet"]) == cbp.EXIT_INCOMPLETE
 
-    report = cbp.scan(model)
-
+    shared = tmp_path / "shared"
+    _write_report_json(shared, [{"name": "Workbook", "model_translation_handoff": {"requests": []}}])
+    _write_model(shared, "Workbook", "Sales", _column_table(expr="1"))
+    _write_model(shared, "DS_Flight_Level", "Flights", _column_table(table="Flights"))
+    report = cbp.scan(shared)
     assert report["status"] == cbp.STATUS_INCOMPLETE
-    assert report["nothing_measured"] is True
-    assert cbp.main([str(model), "--quiet"]) == cbp.EXIT_INCOMPLETE
+    assert (report["skipped_shared_datasources"], report["skipped_shared_datasource_blank_objects"]) == (1, 1)
+    assert report["skipped_shared_datasource_details"] == [{"owner": "DS_Flight_Level", "blank_objects": 1}]
+    assert "outside this handover check - NOT CHECKED" in cbp.render(report)
 
-
-def test_cli_exit_codes_distinguish_clean_gap_incomplete_and_material_dependency(tmp_path: Path) -> None:
-    """The process status is the gate: clean, documented gap, incomplete scope, material dependency."""
-    clean = _bundle(tmp_path / "clean")
-    _write_model(clean, "Workbook", "Sales", _column_table())
-    incomplete = tmp_path / "incomplete"
-    _write_report_json(incomplete, [{"name": "Workbook", "model_translation_handoff": None}])
-    _write_model(incomplete, "Workbook", "Sales", _column_table())
-    gap = _bundle(tmp_path / "gap")
-    _write_handover(
-        gap,
-        "Workbook",
-        [
-            {
-                "category": "type_or_shape_mismatch",
-                "fallback_reason": "unsupported function INDEX",
-                "has_suggestion": False,
-                "name": "Flag",
-                "role": "dimension",
-                "target_table": "Sales",
-            }
-        ],
-    )
-    _write_model(gap, "Workbook", "Sales", _column_table())
-    material = _bundle(tmp_path / "material")
-    _write_handover(
-        material,
-        "Workbook",
-        [
-            {
-                "category": "type_or_shape_mismatch",
-                "fallback_reason": "IFNULL arguments return inconsistent types",
-                "has_suggestion": False,
-                "name": "Flag",
-                "role": "dimension",
-                "target_table": "Sales",
-            }
-        ],
-    )
-    _write_model(material, "Workbook", "Sales", _column_table())
-    _write_filter_visual(material, "Workbook")
-
-    assert cbp.main([str(clean), "--quiet"]) == cbp.EXIT_OK
-    assert cbp.main([str(gap), "--quiet"]) == cbp.EXIT_UNREFERENCED
-    assert cbp.main([str(incomplete), "--quiet"]) == cbp.EXIT_INCOMPLETE
-    assert cbp.main([str(material), "--quiet"]) == cbp.EXIT_REFERENCED
-    assert cbp.main(["--bundle", str(clean), "--quiet"]) == cbp.EXIT_OK
+    cache_only = tmp_path / "CacheOnly.SemanticModel"
+    cache_only.mkdir()
+    report = cbp.scan(cache_only)
+    assert report["status"] == cbp.STATUS_INCOMPLETE and report["nothing_measured"] is True
+    assert cbp.main([str(cache_only), "--quiet"]) == cbp.EXIT_INCOMPLETE
