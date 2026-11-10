@@ -222,6 +222,24 @@ def test_s2_duplicate_or_case_colliding_roots_never_enter_s1(
     )
 
 
+def test_s2_empty_supplied_s1_observations_are_refused_not_treated_as_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    observed = [result.verified for result in malformed_results("empty")]
+    assert observed == []
+    violation, results = None, ()
+    with monkeypatch.context() as patch:
+        forbid_source_operations(patch)
+        patch.setattr(roles, "verify_s1", forbidden)
+        patch.setattr(roles, "_facts", forbidden)
+        try:
+            results = roles.verify_phase1_role_identity([UPPER, OTHER], verified=observed)
+        except _ForbiddenSourceOperation as exc:
+            violation = str(exc)
+
+    assert violation is None, violation
+    assert len(results) == 2
+    assert all(result.blockers == ("package_root_binding_invalid",) for result in results)
+
+
 @pytest.mark.parametrize("change", ["root-spelling", "identity-spelling", "case-foreign", "duplicate-overwrite"])
 def test_s2_fresh_s1_observations_are_bound_before_any_role_read(change: str, monkeypatch: pytest.MonkeyPatch) -> None:
     observed = iter(result.verified for result in malformed_results(change))

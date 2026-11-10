@@ -2103,8 +2103,16 @@ def test_evidence_requires_an_exact_canonical_walked_member(tmp_path: Path, orig
     assert spelling not in json.dumps(result.as_dict())
 
 
-@pytest.mark.parametrize("published", [{"key": []}, 0.5])
-def test_invalid_published_rows_remain_counted_and_block(tmp_path: Path, published: Any) -> None:
+@pytest.mark.parametrize(
+    ("published", "expected"),
+    [
+        ({}, "published_dependency_identity_missing"),
+        ({"id": DS_UNIT}, "published_dependency_identity_missing"),
+        ({"key": []}, "published_dependency_invalid"),
+        (0.5, "published_dependency_invalid"),
+    ],
+)
+def test_invalid_published_rows_remain_counted_and_block(tmp_path: Path, published: Any, expected: str) -> None:
     provider, consumer = cohort(tmp_path)
     spec = json.loads((consumer / "migration-spec.json").read_text(encoding="utf-8"))
     spec["data_sources"].append({"published_datasource": published})
@@ -2115,11 +2123,6 @@ def test_invalid_published_rows_remain_counted_and_block(tmp_path: Path, publish
 
     assert len(result.dependencies) == 2, "a declared row disappeared from the dependency denominator"
     assert result.dependencies[0].code == "published_dependency_authority_contradiction"
-    expected = (
-        "published_dependency_identity_missing"
-        if published in ({}, {"id": DS_UNIT})
-        else "published_dependency_invalid"
-    )
     assert (result.dependencies[1].state, result.dependencies[1].code) == ("mismatch", expected)
     assert result.topology == "published_consumer"
     assert result.verdict == "BLOCKED"
