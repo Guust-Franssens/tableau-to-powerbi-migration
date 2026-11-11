@@ -106,8 +106,9 @@ def unguarded_call_sites(calls: list[SlugCall]) -> list[SlugCall]:
 # --- claim 1: every lossy decision goes through the index ---------------------------------------
 
 
-def test_every_slug_call_site_is_inside_the_index_or_allowlisted() -> None:
-    """A new lossy call site is a CI failure, not a round-8 discovery."""
+def test_every_slug_call_site_is_inside_the_index_or_a_current_allowlist_entry() -> None:
+    """A new lossy call site is a CI failure, not a round-8 discovery; an allowlisted function that
+    no longer calls ``_slug()`` is a stale licence."""
     calls = collect_slug_calls(SOURCE.read_text(encoding="utf-8"))
     assert calls, "found no _slug() call sites at all - the collector is broken, not the source"
     offenders = unguarded_call_sites(calls)
@@ -116,6 +117,9 @@ def test_every_slug_call_site_is_inside_the_index_or_allowlisted() -> None:
         "Route the decision through NormalizedIndex, or add the function to REPORTING_ONLY and "
         "extend the non-interference matrix so the claim is actually proved."
     )
+    stale = sorted(set(REPORTING_ONLY) - {call.enclosing for call in calls})
+    assert not stale, f"REPORTING_ONLY names functions that no longer call _slug(): {stale}"
+    assert all(reason.strip() for reason in REPORTING_ONLY.values())
 
 
 def test_the_collector_finds_calls_outside_the_index() -> None:
@@ -135,42 +139,26 @@ def elsewhere(name):
     assert [call.enclosing for call in unguarded_call_sites(calls)] == ["elsewhere"]
 
 
-def test_the_allowlist_is_current_and_documented() -> None:
-    """An allowlisted function that no longer calls ``_slug()`` is a stale licence."""
-    names = {call.enclosing for call in collect_slug_calls(SOURCE.read_text(encoding="utf-8"))}
-    stale = sorted(set(REPORTING_ONLY) - names)
-    assert not stale, f"REPORTING_ONLY names functions that no longer call _slug(): {stale}"
-    assert all(reason.strip() for reason in REPORTING_ONLY.values())
-
-
 # --- claim 2: the index cannot answer without a cardinality check -------------------------------
 
 
 def test_the_index_refuses_zero_and_refuses_many() -> None:
-    """``unique`` is the only accessor, and it refuses BOTH failure directions."""
+    """``unique`` is the only accessor, and it refuses BOTH failure directions. Aliases of ONE
+    finding (``add_spelling``) are one candidate; two different findings sharing a key are two."""
     index: cu.NormalizedIndex[str] = cu.NormalizedIndex()
     assert index.unique("absent") is None
-
     index.add("A-B", "first")
-    assert index.unique("A B") == "first"
-    assert index.count("a/b") == 1
-
+    assert (index.unique("A B"), index.count("a/b")) == ("first", 1)
     index.add("A B", "second")
     assert index.unique("A-B") is None, "a key answered by two candidates must refuse, not pick one"
     assert index.count("A-B") == 2
 
-
-def test_add_spelling_does_not_inflate_a_single_candidate() -> None:
-    """Aliases of ONE finding are one candidate; two different findings sharing a key are two."""
-    index: cu.NormalizedIndex[str] = cu.NormalizedIndex()
-    index.add_spelling("A-B", "finding")
-    index.add_spelling("A B", "finding")
-    assert index.unique("a b") == "finding"
-    assert index.count("a b") == 1
-
-    index.add_spelling("A_B", "other")
-    assert index.unique("a b") is None
-    assert index.count("a b") == 2
+    spellings: cu.NormalizedIndex[str] = cu.NormalizedIndex()
+    spellings.add_spelling("A-B", "finding")
+    spellings.add_spelling("A B", "finding")
+    assert (spellings.unique("a b"), spellings.count("a b")) == ("finding", 1)
+    spellings.add_spelling("A_B", "other")
+    assert (spellings.unique("a b"), spellings.count("a b")) == (None, 2)
 
 
 def test_the_index_exposes_no_way_to_read_a_bucket() -> None:

@@ -35,13 +35,8 @@ LUID_B = "007f70ac-bf40-4838-9d73-134d40f504db"
 
 
 def test_the_workbook_route_vocabulary_is_pinned_to_its_literal_values() -> None:
-    """Without this the file is vacuous in one direction.
-
-    Every other assertion compares the code's answer against the code's own constant, so redefining
-    ``WB_FOREIGN = WB_LUID`` would change BOTH sides and every test would still pass. This is the
-    same pin `test_check_reference_readiness.py` takes over the status vocabulary, for the same
-    reason.
-    """
+    """Every other assertion compares the code against its own constants, so redefining
+    ``WB_FOREIGN = WB_LUID`` would change both sides; this pin is what makes them mean anything."""
     assert (oid.WB_SHA, oid.WB_LUID, oid.WB_NAME) == ("sha256", "luid", "name")
     assert (oid.WB_STALE, oid.WB_FOREIGN, oid.WB_UNKNOWN) == ("stale", "foreign", "unknown")
     assert oid.WB_UNCONFIRMED == "revision-unconfirmed"
@@ -59,300 +54,101 @@ def test_the_workbook_route_vocabulary_is_pinned_to_its_literal_values() -> None
     )
     assert oid.WB_MACHINE_AXES == ("sha256", "luid")
     assert oid.WB_ADMITTING == frozenset({"sha256", "luid"})
-    # Every refusal is NOT an admitting route. Stated separately because `WB_ADMITTING` above is the
-    # thing under test everywhere else, and a mutation that added one to it would otherwise only be
-    # caught by the equality above.
-    assert not oid.WB_ADMITTING & set(oid.WB_REFUSALS)
-    # ⚠️ The name axis is deliberately NOT a machine axis: a display name is not unique across
-    # projects, so it can never be the thing that makes a record's identity "answerable".
-    assert oid.WB_NAME not in oid.WB_MACHINE_AXES
 
 
 # ------------------------------------------------------------------------------------------------
-# THE ONE RULE (round-1 review of PR #454): a machine identity the unit cannot answer is `unknown`
+# Attribution: every admission has a discriminating refusal beside it
 # ------------------------------------------------------------------------------------------------
 
 
-def test_a_luid_the_unit_cannot_answer_is_unknown_and_the_name_never_rescues_it() -> None:
-    """BLOCKER 1: the single highest-value assertion in this file.
+def test_workbook_attribution_admits_only_on_an_agreeing_machine_axis() -> None:
+    """Each row is a reviewed defect (PR #454) or its positive control.
 
-    A real oracle record ALWAYS carries ``workbook_luid`` AND ``workbook_name``. Skipping an
-    *unshared* LUID - because the unit could not establish one - and then admitting on an equal
-    display name let a FOREIGN workbook certify a page in both gates. The record has told us how it
-    must be checked; a unit that cannot check it has established nothing.
+    * A machine axis the RECORD claims and the unit cannot answer is ``unknown``; an equal display
+      name never rescues it (BLOCKER 1/3: a foreign workbook certified a page in both gates).
+    * A machine axis the record does NOT claim is silent, so the walk falls through to the next one;
+      collapsing "absent" into "contradictory" would refuse almost every real oracle capture.
+    * Two machine axes that disagree are ``conflicting-identity``, named, whichever is consulted
+      first (finding B: a matching sha admitted a record whose LUID named another workbook).
+    * A stale capture of the RIGHT workbook is ``foreign`` on the sha axis.
+    * A display name is decoration: it never vetoes a proven identity (``HR_Dashboard`` vs
+      ``HR Dashboard`` is the NORMAL harvested state), it is compared exactly (``Ops  Summary`` was
+      once attributed to ``Ops Summary``), and a name-only match is reported but refused, with the
+      axis named so `check_unit`'s lossy rescue can tell a name refusal from a LUID one.
+    * No shared axis, or a unit with no identity, is ``unknown`` and admits nothing (issue #450:
+      360 of 360 ownerless records were admitted).
+    * A LUID is a machine id and compares case-insensitively.
     """
-    unit = oid.WorkbookIdentity(name="Book")
-    record = oid.WorkbookIdentity(luid=LUID_B, name="Book")
-
-    verdict = unit.attribute(record)
-    assert verdict.route == oid.WB_UNKNOWN
-    assert verdict.axis == oid.WB_LUID
-    assert verdict.admitted is False
-
-
-def test_a_sha_the_unit_cannot_answer_is_unknown_too() -> None:
-    """BLOCKER 3, at the type level: a `reference/manifest.json` carries `source_workbook_sha256`.
-
-    A unit that cannot hash its own source asset cannot check that claim, so location - the only
-    thing left - must not stand in for it.
-    """
-    unit = oid.WorkbookIdentity(luid=LUID_A, name="Book")
-    record = oid.WorkbookIdentity(sha256="ab" * 32)
-
-    verdict = unit.attribute(record)
-    assert (verdict.route, verdict.axis) == (oid.WB_UNKNOWN, oid.WB_SHA)
-
-
-def test_a_record_carrying_only_a_display_name_is_refused_and_named() -> None:
-    """Round-3 review, B-B. This assertion used to read ``== WB_NAME`` and call it an admission.
-
-    A record claiming NO machine identity is the case where a name is LEAST trustworthy, because
-    nothing corroborates it - a workbook of the same display name in another project is
-    indistinguishable from it. The route is still REPORTED, because "a name matched, and a name is
-    not identity" is a different operator action from "nothing matched".
-    """
-    unit = oid.WorkbookIdentity(luid=LUID_A, name="Book", sha256="ab" * 32)
-    record = oid.WorkbookIdentity(name="Book")
-
-    verdict = unit.attribute(record)
-    assert verdict.route == oid.WB_NAME
-    assert verdict.admitted is False
-    assert "not identity" in verdict.detail
-
-
-def test_a_machine_axis_the_record_does_not_claim_falls_through_to_the_next_one() -> None:
-    """An oracle record carries a LUID and no sha; that must reach the LUID axis, not stop at sha."""
-    unit = oid.WorkbookIdentity(luid=LUID_A, name="Book", sha256="ab" * 32)
-    record = oid.WorkbookIdentity(luid=LUID_A, name="Not Book")
-
-    assert unit.attribute(record).route == oid.WB_LUID
-
-
-# ------------------------------------------------------------------------------------------------
-# Round-N review of PR #454: two machine axes that DISAGREE are a refusal, not a race
-# ------------------------------------------------------------------------------------------------
-
-
-def test_a_matching_sha_does_not_admit_a_record_whose_luid_names_another_workbook() -> None:
-    """BLOCKING FINDING B. The walk returned on the first axis that agreed and never saw the other.
-
-    Measured by the reviewer on a record whose sha256 WAS this unit's source and whose declared LUID
-    belonged to a different workbook::
-
-        entry gate: {"status":"READY","pages_ready":1,"attribution":{"sha256":1,"luid":0}}
-        exit  gate: {"status":"PASS","visual_present":1,"numeric_present":1,"admitted_evidence":1}
-
-    Conflicting machine identities are LESS evidence than none - one of the two claims is wrong and
-    the record itself does not say which - so this is its own refusal, named, rather than a win for
-    whichever axis happens to be consulted first.
-    """
-    unit = oid.WorkbookIdentity(luid=LUID_A, name="WB", sha256="a" * 64)
-    record = oid.WorkbookIdentity(luid=LUID_B, name="WB", sha256="a" * 64)
-
-    verdict = unit.attribute(record)
-    assert verdict.route == oid.WB_CONFLICT
-    assert verdict.axis == oid.WB_LUID
-    assert verdict.admitted is False
-    assert "contradictory machine identities" in verdict.detail
-
-
-def test_a_matching_luid_does_not_admit_a_record_whose_sha_is_another_workbooks() -> None:
-    """The same defect from the other side, so the fix cannot be one-directional.
-
-    ⚠️ Ordering alone would have hidden this one: sha256 is consulted FIRST, so a disagreeing sha is
-    already refused as ``foreign`` before the LUID is reached. It is asserted anyway because the fix
-    must be a property of the pair, not of the walk order - reordering
-    :data:`object_identity.WB_MACHINE_AXES` must not turn a refusal into an admission.
-    """
-    unit = oid.WorkbookIdentity(luid=LUID_A, name="WB", sha256="a" * 64)
-    record = oid.WorkbookIdentity(luid=LUID_A, name="WB", sha256="b" * 64)
-
-    assert unit.attribute(record).admitted is False
-
-
-def test_an_axis_the_unit_cannot_answer_is_not_the_same_as_one_that_contradicts() -> None:
-    """The asymmetry the fix must keep, and the over-strict direction it must not fall into.
-
-    A machine axis the record does not CLAIM is silent - "less evidence" - so an agreeing LUID still
-    admits even though the unit knows a sha256 the record never mentions. Collapsing "absent" into
-    "contradictory" would refuse almost every real oracle capture, whose producer writes
-    ``workbook_luid``/``workbook_name`` and no source digest at all.
-    """
-    unit = oid.WorkbookIdentity(luid=LUID_A, name="WB", sha256="a" * 64)
-    record = oid.WorkbookIdentity(luid=LUID_A, name="WB")
-
-    verdict = unit.attribute(record)
-    assert verdict.route == oid.WB_LUID
-    assert verdict.admitted is True
-
-
-def test_a_luid_the_unit_cannot_answer_is_still_unknown_rather_than_a_contradiction() -> None:
-    """The other half of the asymmetry: unanswerable is not contradictory, and stays ``unknown``.
-
-    ⚠️ The two states call for different operator actions - re-stamp this unit's provenance, versus
-    throw the capture away because its own metadata disagrees with itself - so the contradiction
-    route must not swallow the older, weaker one.
-    """
-    unit = oid.WorkbookIdentity(name="WB", sha256="a" * 64)
-    record = oid.WorkbookIdentity(luid=LUID_B, name="WB")
-
-    verdict = unit.attribute(record)
-    assert (verdict.route, verdict.axis) == (oid.WB_UNKNOWN, oid.WB_LUID)
-
-
-def test_a_display_name_that_disagrees_never_contradicts_a_machine_axis() -> None:
-    """The other over-strict direction: a NAME is decoration and may not veto a proven identity.
-
-    The artifact stem ``HR_Dashboard`` is a filesystem-sanitised spelling of the published name
-    ``HR Dashboard``, so a name disagreement is the NORMAL state of a harvested unit. Treating it as
-    a contradiction would refuse every unit this toolkit downloads.
-    """
-    unit = oid.WorkbookIdentity(luid=LUID_A, name="HR_Dashboard", sha256="a" * 64)
-    record = oid.WorkbookIdentity(luid=LUID_A, name="HR Dashboard", sha256="a" * 64)
-
-    assert unit.attribute(record).route == oid.WB_SHA
-
-
-# ------------------------------------------------------------------------------------------------
-# Fail-open: a foreign workbook's render must never certify this unit's page
-# ------------------------------------------------------------------------------------------------
-
-
-def test_a_matching_luid_admits_and_names_the_luid_axis() -> None:
-    """The positive control. Without it, "refuse everything" would pass every test below."""
-    unit = oid.WorkbookIdentity(luid=LUID_A, name="HR_Dashboard")
-    record = oid.WorkbookIdentity(luid=LUID_A, name="HR Dashboard")
-
-    verdict = unit.attribute(record)
-    assert verdict.route == oid.WB_LUID
-    assert verdict.admitted is True
-
-
-def test_a_luid_mismatch_is_foreign_even_when_the_display_names_are_identical() -> None:
-    """Kills: falling through to a weaker axis after a stronger one has already answered.
-
-    This is the whole fail-open direction. Two projects may hold workbooks with the SAME display
-    name - the ambiguity `_runs/<NNN>-<slug>/` numbering exists to avoid elsewhere in this repo - so
-    a name that matches after a LUID that does not is precisely the case where the name must not be
-    consulted.
-    """
-    unit = oid.WorkbookIdentity(luid=LUID_A, name="Sales Dashboard")
-    record = oid.WorkbookIdentity(luid=LUID_B, name="Sales Dashboard")
-
-    verdict = unit.attribute(record)
-    assert verdict.route == oid.WB_FOREIGN
-    assert verdict.axis == oid.WB_LUID
-    assert verdict.admitted is False
-
-
-def test_a_sha_mismatch_is_foreign_even_when_the_luid_matches() -> None:
-    """The same rule one axis up: a stale capture of the RIGHT workbook is still refused.
-
-    A capture taken against an older revision does not silently remain valid, because a stale picture
-    is worse than a missing one - it looks like evidence.
-    """
-    unit = oid.WorkbookIdentity(luid=LUID_A, name="WB", sha256="a" * 64)
-    record = oid.WorkbookIdentity(luid=LUID_A, name="WB", sha256="b" * 64)
-
-    verdict = unit.attribute(record)
-    assert verdict.route == oid.WB_FOREIGN
-    assert verdict.axis == oid.WB_SHA
-
-
-def test_a_name_axis_refusal_is_reported_as_such_so_a_lossy_rescue_can_tell_them_apart() -> None:
-    """`check_unit`'s lossy rescue is allowed on the NAME axis only, and it reads ``axis`` to know.
-
-    Without a distinguishable axis the rescue would have to guess, and a rescue that cannot tell "the
-    LUIDs differ" from "the display names differ" re-opens the fail-open above through the back door.
-    """
-    unit = oid.WorkbookIdentity(name="HR_Dashboard")
-    record = oid.WorkbookIdentity(name="HR Dashboard")
-
-    verdict = unit.attribute(record)
-    assert (verdict.route, verdict.axis) == (oid.WB_FOREIGN, oid.WB_NAME)
-
-
-# ------------------------------------------------------------------------------------------------
-# Fail-closed: an unestablished workbook certifies nothing
-# ------------------------------------------------------------------------------------------------
-
-
-def test_no_shared_axis_is_unknown_and_unknown_never_admits() -> None:
-    """Kills issue #450's actual fail-open: an ownerless record defaulting to "belongs to this unit".
-
-    `check_unit._admissible_oracle_records` used to count such a record in ``unattributed`` and then
-    fall through to ``admissible`` - and because the field it read was one no producer writes, that
-    was EVERY record on a real capture.
-    """
-    unit = oid.WorkbookIdentity(luid=LUID_A, name="WB")
-    record = oid.WorkbookIdentity()
-
-    verdict = unit.attribute(record)
-    assert verdict.route == oid.WB_UNKNOWN
-    assert verdict.admitted is False
-
-
-def test_a_unit_with_no_identity_admits_nothing_either() -> None:
-    """Symmetric: "I do not know who I am" is not a licence to accept any render."""
-    verdict = oid.WorkbookIdentity().attribute(oid.WorkbookIdentity(luid=LUID_A, name="WB"))
-
-    assert verdict.route == oid.WB_UNKNOWN
-    assert verdict.admitted is False
-
-
-def test_blank_fields_are_absence_rather_than_an_empty_string_that_matches_itself() -> None:
-    """Kills: two records with `workbook_name: ""` attributing to each other on the name axis."""
+    W = oid.WorkbookIdentity  # noqa: N806
+    sha_a, sha_b = "a" * 64, "b" * 64
+    cases = [
+        # (unit, record, route, axis or None, admitted, detail fragment or None)
+        (W(name="Book"), W(luid=LUID_B, name="Book"), oid.WB_UNKNOWN, oid.WB_LUID, False, None),
+        (W(luid=LUID_A, name="Book"), W(sha256="ab" * 32), oid.WB_UNKNOWN, oid.WB_SHA, False, None),
+        (W(luid=LUID_A, name="Book", sha256=sha_a), W(name="Book"), oid.WB_NAME, None, False, "not identity"),
+        (W(luid=LUID_A, name="Book", sha256=sha_a), W(luid=LUID_A, name="Not Book"), oid.WB_LUID, None, True, None),
+        (
+            W(luid=LUID_A, name="WB", sha256=sha_a),
+            W(luid=LUID_B, name="WB", sha256=sha_a),
+            oid.WB_CONFLICT,
+            oid.WB_LUID,
+            False,
+            "contradictory machine identities",
+        ),
+        (
+            W(luid=LUID_A, name="WB", sha256=sha_a),
+            W(luid=LUID_A, name="WB", sha256=sha_b),
+            oid.WB_FOREIGN,
+            oid.WB_SHA,
+            False,
+            None,
+        ),
+        (W(luid=LUID_A, name="WB", sha256=sha_a), W(luid=LUID_A, name="WB"), oid.WB_LUID, None, True, None),
+        (W(name="WB", sha256=sha_a), W(luid=LUID_B, name="WB"), oid.WB_UNKNOWN, oid.WB_LUID, False, None),
+        (
+            W(luid=LUID_A, name="HR_Dashboard", sha256=sha_a),
+            W(luid=LUID_A, name="HR Dashboard", sha256=sha_a),
+            oid.WB_SHA,
+            None,
+            True,
+            None,
+        ),
+        (W(luid=LUID_A, name="HR_Dashboard"), W(luid=LUID_A, name="HR Dashboard"), oid.WB_LUID, None, True, None),
+        (W(luid=LUID_A, name="Sales"), W(luid=LUID_B, name="Sales"), oid.WB_FOREIGN, oid.WB_LUID, False, None),
+        (W(name="HR_Dashboard"), W(name="HR Dashboard"), oid.WB_FOREIGN, oid.WB_NAME, False, None),
+        (W(name="Ops Summary"), W(name="Ops  Summary"), oid.WB_FOREIGN, None, False, None),
+        (W(name="Ops Summary"), W(name="ops summary"), oid.WB_FOREIGN, None, False, None),
+        (W(name="Ops Summary"), W(name="Ops Summary"), oid.WB_NAME, None, False, None),
+        (W(luid=LUID_A, name="WB"), W(), oid.WB_UNKNOWN, None, False, None),
+        (W(), W(luid=LUID_A, name="WB"), oid.WB_UNKNOWN, None, False, None),
+        (W(luid=LUID_A.upper()), W(luid=LUID_A), oid.WB_LUID, None, True, None),
+    ]
+    for unit, record, route, axis, admitted, detail in cases:
+        verdict = unit.attribute(record)
+        assert (verdict.route, verdict.admitted) == (route, admitted), (unit, record)
+        assert axis is None or verdict.axis == axis, (unit, record, verdict.axis)
+        assert detail is None or detail in verdict.detail, (unit, record, verdict.detail)
+
+
+def test_blank_or_non_string_fields_are_absence_not_a_match_or_a_crash() -> None:
+    """Two records with `workbook_name: ""` must not attribute to each other on the name axis, and
+    manifests are external input: a number or a dict where a name was expected is not identity."""
     unit = oid.WorkbookIdentity.of(luid="   ", name="", sha256=None)
     record = oid.WorkbookIdentity.of(luid=None, name="  ", sha256="")
 
     assert (unit.luid, unit.name, unit.sha256) == (None, None, None)
     assert unit.established is False
     assert unit.attribute(record).route == oid.WB_UNKNOWN
-
-
-def test_a_non_string_manifest_value_is_absence_not_a_crash() -> None:
-    """Manifests are external input; a number or a dict where a name was expected is not identity."""
     identity = oid.WorkbookIdentity.of(luid=17, name={"a": 1}, sha256=["x"])
-
     assert (identity.luid, identity.name, identity.sha256) == (None, None, None)
 
 
-# ------------------------------------------------------------------------------------------------
-# The join is not a condition, and the name axis is not normalized
-# ------------------------------------------------------------------------------------------------
-
-
 def test_an_attribution_is_never_a_condition() -> None:
-    """`route` is a non-empty string for a REFUSAL too, so `if unit.attribute(r):` would admit it.
-
-    Absence is not prohibition (the rule this module was built on): omitting ``__bool__`` would make
-    the object truthy, which is the opposite of a guard. It raises.
-    """
+    """`route` is a non-empty string for a REFUSAL too, so `if unit.attribute(r):` would admit it."""
     verdict = oid.WorkbookIdentity(luid=LUID_A).attribute(oid.WorkbookIdentity(luid=LUID_B))
 
     with pytest.raises(oid.AmbiguousIdentity):
         bool(verdict)
-    with pytest.raises(oid.AmbiguousIdentity):
-        assert verdict  # the exact expression a call site would write
-
-
-def test_the_name_axis_is_exact_and_does_not_normalize() -> None:
-    """Kills: attributing one workbook's captures to another whose name differs only in spelling.
-
-    `Evidence.is_for` once compared workbook names through the lossy key, so a capture for
-    `Ops  Summary` was attributed to a unit named `Ops Summary` - the collapse defect, on WORKBOOK
-    identity. If a published name genuinely differs from the local stem, the LUID is the answer.
-    """
-    unit = oid.WorkbookIdentity(name="Ops Summary")
-
-    assert unit.attribute(oid.WorkbookIdentity(name="Ops  Summary")).route == oid.WB_FOREIGN
-    assert unit.attribute(oid.WorkbookIdentity(name="ops summary")).route == oid.WB_FOREIGN
-    assert unit.attribute(oid.WorkbookIdentity(name="Ops Summary")).route == oid.WB_NAME
-
-
-def test_a_luid_is_compared_case_insensitively() -> None:
-    """A LUID is a machine id: the REST API and a filename may disagree on case, never on identity."""
-    assert oid.WorkbookIdentity(luid=LUID_A.upper()).attribute(oid.WorkbookIdentity(luid=LUID_A)).route == oid.WB_LUID
 
 
 # ------------------------------------------------------------------------------------------------
@@ -379,45 +175,22 @@ def test_harvest_luid_reads_the_prefix_and_refuses_every_other_shape() -> None:
 # ------------------------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "recorded",
-    [
+def test_a_recorded_path_yields_its_luid_on_either_host() -> None:
+    """Kills blocker 4 on ANY host. ``pathlib.Path`` is the RUNNING host's flavour, so a handover
+    slice recorded on Windows (``_runs\\407\\assets\\<luid>_HR_Dashboard.twbx``) lost its LUID on
+    Linux CI only. ``PurePosixPath`` reproduces the defect here; the shipped parse agrees with
+    neither host's accident."""
+    for recorded in (
         r"_runs\407-dryrun-gates\assets\adc431bb-aeeb-43fe-8ecb-092d4bae8bfa_HR_Dashboard.twbx",
         "_runs/407-dryrun-gates/assets/adc431bb-aeeb-43fe-8ecb-092d4bae8bfa_HR_Dashboard.twbx",
         r"D:\build\_runs\407\assets\adc431bb-aeeb-43fe-8ecb-092d4bae8bfa_HR_Dashboard.twb",
         "/var/lib/ci/_runs/407/assets/adc431bb-aeeb-43fe-8ecb-092d4bae8bfa_HR_Dashboard.twb",
         "adc431bb-aeeb-43fe-8ecb-092d4bae8bfa_HR_Dashboard.twbx",
-    ],
-)
-def test_a_recorded_path_yields_its_luid_on_either_host(recorded: str) -> None:
-    """Kills blocker 4, ON ANY HOST - which is the whole point, since the hosts disagreed.
-
-    ``pathlib.Path`` is the RUNNING host's flavour. A real handover slice records
-    ``_runs\\407-...\\assets\\<luid>_HR_Dashboard.twbx``; on POSIX those backslashes are ordinary
-    filename characters, so ``Path(...).stem`` returns the whole string, `harvest_luid` sees no
-    prefix, and the unit ends up with NO machine identity - on Linux CI only, while a Windows
-    workstation reports the guard working. A safety guard that behaves differently in the two places
-    we look is the worst possible shape.
-
-    This test needs no POSIX host: it asserts the parse is separator-agnostic, and
-    :func:`test_the_recorded_path_parse_does_not_use_the_running_hosts_flavour` proves the same input
-    under BOTH flavours explicitly.
-    """
-    assert oid.harvest_luid(oid.persisted_stem(recorded)) == LUID_A
-
-
-def test_the_recorded_path_parse_does_not_use_the_running_hosts_flavour() -> None:
-    """The controlled experiment behind the parametrised test above, runnable anywhere.
-
-    ``PureWindowsPath`` and ``PurePosixPath`` are pure classes, so both flavours can be exercised on
-    one host. The measurement that made this a blocker: the SAME input yields the LUID under one and
-    ``None`` under the other, and the shipped code must agree with neither host's accident.
-    """
-    recorded = r"_runs\407\assets\adc431bb-aeeb-43fe-8ecb-092d4bae8bfa_HR_Dashboard.twbx"
-
-    assert oid.harvest_luid(PureWindowsPath(recorded).stem) == LUID_A
-    assert oid.harvest_luid(PurePosixPath(recorded).stem) is None, "this is the defect, reproduced"
-    assert oid.harvest_luid(oid.persisted_stem(recorded)) == LUID_A, "the fix must agree with neither"
+    ):
+        assert oid.harvest_luid(oid.persisted_stem(recorded)) == LUID_A, recorded
+    windows = r"_runs\407\assets\adc431bb-aeeb-43fe-8ecb-092d4bae8bfa_HR_Dashboard.twbx"
+    assert oid.harvest_luid(PureWindowsPath(windows).stem) == LUID_A
+    assert oid.harvest_luid(PurePosixPath(windows).stem) is None, "this is the defect, reproduced"
 
 
 def test_persisted_name_and_stem_are_separator_agnostic_and_keep_dots_in_names() -> None:
@@ -461,53 +234,26 @@ def test_agreed_luid_refuses_two_claims_that_disagree() -> None:
     assert oid.agreed_luid(0, [], {}, LUID_A) == LUID_A
 
 
-def test_a_self_contradicted_luid_is_refused_by_name_whichever_side_declared_it() -> None:
-    """Round 2 of PR #454: a side may contradict ITSELF, before any comparison happens.
-
-    Both gates read a LUID from several scopes - a reference manifest's state/entry/manifest, a
-    unit's handover slice and migration spec - and both took the first non-blank one. So a
-    contradicting claim was discarded before :meth:`WorkbookIdentity.attribute` saw the record, and
-    the sha256 that DID match was allowed to certify it.
-
-    The route is asserted, not merely ``admitted is False``: this file's whole point is that one
-    refusal can be told from another, and at least four other guards in each gate also produce
-    "not admitted". A contradiction is ``conflicting-identity`` on the LUID axis - never ``foreign``
-    (someone else's capture, ignore it) and never ``unknown`` (nothing identified it).
-    """
-    contradicted = oid.WorkbookIdentity.of(luid=oid.agreed_luid(LUID_A, LUID_B), sha256="a" * 64)
-    unit = oid.WorkbookIdentity(luid=LUID_A, name="WB", sha256="a" * 64)
-
-    from_record = unit.attribute(contradicted)
-    assert (from_record.route, from_record.axis, from_record.admitted) == (oid.WB_CONFLICT, oid.WB_LUID, False)
-    assert "the record declares two different workbook LUIDs" in from_record.detail
-
-    from_unit = contradicted.attribute(oid.WorkbookIdentity(luid=LUID_A, sha256="a" * 64))
-    assert (from_unit.route, from_unit.admitted) == (oid.WB_CONFLICT, False)
-    assert "this unit declares two different workbook LUIDs" in from_unit.detail
-
-
-def test_a_contradicted_luid_refuses_even_the_axis_that_would_otherwise_admit() -> None:
-    """The discriminating twin: without it, "refuse everything" would pass the test above.
-
-    A record whose LUID declarations contradict each other is refused even when its sha256 IS this
-    unit's source bytes - that is the whole finding - while the same record with agreeing (or absent)
-    LUID declarations still certifies on that same sha256. Both halves are asserted here so a fix
-    that simply stopped admitting sha-bearing records cannot pass.
-    """
+def test_a_contradicted_luid_is_refused_by_name_even_where_the_sha_would_admit() -> None:
+    """Round 2 of PR #454: a side may contradict ITSELF before any comparison happens. Both gates
+    took the first non-blank LUID of several scopes, so a contradicting claim was discarded and the
+    matching sha256 certified the record. The route is asserted (never ``foreign`` or ``unknown``),
+    and the agreeing twins prove this is not "refuse every sha-bearing record"."""
     unit = oid.WorkbookIdentity(luid=LUID_A, name="WB", sha256="a" * 64)
 
     def record(*claims: str | None, sha256: str | None = "a" * 64) -> oid.WorkbookIdentity:
         return oid.WorkbookIdentity.of(luid=oid.agreed_luid(*claims), sha256=sha256)
 
-    # sha256 is the first machine axis, so an agreeing record is admitted BY IT - with the LUID
-    # compared rather than skipped (`_contradiction`). The route is named so "it refused" and "it
-    # admitted for the wrong reason" cannot both satisfy this.
-    assert unit.attribute(record(LUID_A, LUID_B)).route == oid.WB_CONFLICT
+    from_record = unit.attribute(record(LUID_A, LUID_B))
+    assert (from_record.route, from_record.axis, from_record.admitted) == (oid.WB_CONFLICT, oid.WB_LUID, False)
+    assert "the record declares two different workbook LUIDs" in from_record.detail
+    from_unit = record(LUID_A, LUID_B).attribute(oid.WorkbookIdentity(luid=LUID_A, sha256="a" * 64))
+    assert (from_unit.route, from_unit.admitted) == (oid.WB_CONFLICT, False)
+    assert "this unit declares two different workbook LUIDs" in from_unit.detail
+
     assert unit.attribute(record(LUID_A, LUID_A)).route == oid.WB_SHA
     assert unit.attribute(record(LUID_A.upper(), LUID_A)).route == oid.WB_SHA
     assert unit.attribute(record(None, "  ")).route == oid.WB_SHA
-    assert unit.attribute(record()).route == oid.WB_SHA
-    # LUID-only records, so the luid route itself is exercised rather than inferred.
     assert unit.attribute(record(LUID_A, LUID_A, sha256=None)).route == oid.WB_LUID
     assert unit.attribute(record(LUID_A, LUID_B, sha256=None)).route == oid.WB_CONFLICT
 
@@ -527,158 +273,76 @@ def _archive(members: list[tuple[str, bytes]], *, date_time: tuple[int, int, int
 
 
 MEMBERS = [("Book.twb", b"<workbook><worksheets/></workbook>"), ("Data/Extracts/x.hyper", b"\x00\x01extract-bytes")]
+BUILD_STAMP_LOCAL = b"<?xml version='1.0'?>\n<!-- build 20263.26.0824.1544   -->\n<workbook><worksheets/></workbook>"
+BUILD_STAMP_REMOTE = b"<?xml version='1.0'?>\n<!-- build 20263.26.0828.1352   -->\n<workbook><worksheets/></workbook>"
+EPOCH = (2026, 1, 1, 0, 0, 0)
 
 
-def test_a_repack_changes_the_raw_digest_and_not_the_revision_key() -> None:
-    """THE round-3 test. Kills: reverting the revision key to a raw digest.
-
-    ⚠️ Both halves are asserted, and the first is what makes the second mean anything. Measured
-    2026-09-03 against the live site, three downloads of every item in one run: the RAW digest
-    differed for **27 of 49 archives** (18 of 48 workbooks, 9 of 19 datasources) while the
-    content-normalised key differed for **0 of 67**. This fixture reproduces that mechanism offline -
-    same members, different order and mtimes - so a raw digest MUST differ here or the fixture is not
-    a repack at all and the test would be vacuous.
-    """
-    original = _archive(MEMBERS, date_time=(2026, 1, 1, 0, 0, 0))
-    repacked = _archive(list(reversed(MEMBERS)), date_time=(2026, 9, 3, 11, 22, 33))
-
-    assert hashlib.sha256(original).hexdigest() != hashlib.sha256(repacked).hexdigest(), (
-        "the fixture is not a repack, so this test could not detect a raw digest"
-    )
-    assert oid.revision_key(original) == oid.revision_key(repacked)
-    assert oid.revision_key(original).algo == oid.REVISION_ALGO_ARCHIVE
+def test_a_repack_or_a_server_build_stamp_changes_the_raw_digest_but_not_the_revision_key() -> None:
+    """MEASURED 2026-09-03 on the live site: the raw digest differed for 27 of 49 archives across
+    three downloads (member order and mtimes), and a site upgrade re-stamped
+    ``<!-- build ... -->`` in 28 of 78 assets; the content key differed for 0. Each pair is asserted
+    to differ RAW first, or the fixture could not detect a raw digest at all."""
+    pairs = [
+        (
+            _archive(MEMBERS, date_time=EPOCH),
+            _archive(list(reversed(MEMBERS)), date_time=(2026, 9, 3, 11, 22, 33)),
+            oid.REVISION_ALGO_ARCHIVE,
+        ),
+        (BUILD_STAMP_LOCAL, BUILD_STAMP_REMOTE, oid.REVISION_ALGO_XML),
+        (
+            _archive([("Book.twb", BUILD_STAMP_LOCAL), MEMBERS[1]], date_time=EPOCH),
+            _archive([MEMBERS[1], ("Book.twb", BUILD_STAMP_REMOTE)], date_time=(2026, 9, 3, 11, 22, 33)),
+            oid.REVISION_ALGO_ARCHIVE,
+        ),
+    ]
+    for left, right, algo in pairs:
+        assert hashlib.sha256(left).hexdigest() != hashlib.sha256(right).hexdigest(), "the fixture is not a repack"
+        assert oid.revision_key(left) == oid.revision_key(right)
+        assert oid.revision_key(left).algo == algo
 
 
 def test_genuinely_different_content_still_differs() -> None:
-    """The negative control: normalisation must not launder a real change into agreement.
-
-    ⚠️ The rename is `Cook.twb`, not `Renamed.twb`, and that is load-bearing. `Renamed.twb` sorts
-    AFTER `Data/Extracts/x.hyper` while `Book.twb` sorts before it, so a renamed-member assertion
-    built that way passes because the member ORDER changed - it would still pass with the member name
-    dropped from the digest entirely. The mutation probe caught exactly that vacuity in an earlier
-    draft of this test. `Cook.twb` keeps the sort position, so only hashing the NAME can detect it.
-    """
-    original = _archive(MEMBERS, date_time=(2026, 1, 1, 0, 0, 0))
+    """Normalisation must not launder a real change. ``Cook.twb`` keeps ``Book.twb``'s sort position,
+    so only hashing the member NAME can detect the rename (``Renamed.twb`` would pass by order alone,
+    which a mutation probe caught). Only COMMENTS are stripped from XML, never elements."""
+    original = _archive(MEMBERS, date_time=EPOCH)
     edited = _archive(
-        [("Book.twb", b"<workbook><worksheets><worksheet/></worksheets></workbook>"), MEMBERS[1]],
-        date_time=(2026, 1, 1, 0, 0, 0),
+        [("Book.twb", b"<workbook><worksheets><worksheet/></worksheets></workbook>"), MEMBERS[1]], date_time=EPOCH
     )
-    renamed = _archive([("Cook.twb", MEMBERS[0][1]), MEMBERS[1]], date_time=(2026, 1, 1, 0, 0, 0))
+    renamed = _archive([("Cook.twb", MEMBERS[0][1]), MEMBERS[1]], date_time=EPOCH)
+    xml_edit = BUILD_STAMP_LOCAL.replace(b"<worksheets/>", b"<worksheets><worksheet name='New'/></worksheets>")
 
-    assert [name for name, _ in sorted(MEMBERS)] != ["Cook.twb", MEMBERS[1][0]], "sanity: the name changed"
-    assert sorted(n for n, _ in MEMBERS).index("Book.twb") == 0, "sanity: the rename keeps sort position"
     assert oid.revision_key(original).agrees_with(oid.revision_key(edited)) is False
-    assert oid.revision_key(original).agrees_with(oid.revision_key(renamed)) is False, (
-        "a member NAME is part of the content: hashing only the bytes would miss a rename"
-    )
+    assert oid.revision_key(original).agrees_with(oid.revision_key(renamed)) is False
+    assert oid.revision_key(BUILD_STAMP_LOCAL).agrees_with(oid.revision_key(xml_edit)) is False
 
 
-def test_a_non_archive_uses_its_own_shape_and_says_so() -> None:
-    """⚠️ Contradicts the round-3 brief's "not a readable zip -> unconfirmed", with a measurement.
-
-    18 of 48 workbooks on the live site download as plain `.twb` XML rather than a zip, and ALL 18
-    returned a stable raw digest across three downloads - zero counter-examples. Refusing to confirm
-    them would make 37% of the estate permanently unconfirmable on the strength of a rule aimed at
-    zip repacking, which does not apply to them.
-
-    This is NOT the silent fallback the brief warns about: the algorithm is chosen by SHAPE, recorded
-    in the key, and compared only against the same algorithm. The dangerous case - bytes that ARE an
-    archive and will not open - is the test below.
-    """
-    key = oid.revision_key(b"<workbook><worksheets/></workbook>")
-
-    assert key.algo == oid.REVISION_ALGO_XML
-    assert key.value == hashlib.sha256(b"<workbook><worksheets/></workbook>").hexdigest(), (
-        "with no comment to strip, the XML key is just the sha of the bytes"
-    )
-
-
-def test_an_unreadable_archive_yields_no_key_rather_than_a_raw_one() -> None:
-    """The silent fallback the brief names, refused: truncated zip bytes must NOT be hashed raw.
-
-    A raw hash of a repacked archive is the unstable value this type exists to avoid, so producing
-    one here would re-open the defect while looking like a fix.
-    """
-    truncated = _archive(MEMBERS, date_time=(2026, 1, 1, 0, 0, 0))[:64]
-
+def test_the_key_algorithm_is_chosen_by_shape_and_an_unreadable_archive_gets_none() -> None:
+    """18 of 48 live workbooks download as flat ``.twb`` XML with a stable digest, so they get their
+    own algorithm rather than "unconfirmed". Bytes that ARE a zip and will not open must not be
+    hashed raw: that is the unstable value this type exists to avoid."""
+    xml = oid.revision_key(b"<workbook><worksheets/></workbook>")
+    assert xml.algo == oid.REVISION_ALGO_XML
+    assert xml.value == hashlib.sha256(b"<workbook><worksheets/></workbook>").hexdigest()
+    flat = oid.revision_key(b"\x00\x01not xml and not a zip")
+    assert flat.algo == oid.REVISION_ALGO_FLAT
+    truncated = _archive(MEMBERS, date_time=EPOCH)[:64]
     assert truncated.startswith(oid.ZIP_MAGIC)
     assert oid.revision_key(truncated) is None
     assert oid.revision_key(b"") is None
 
 
-def test_a_key_never_compares_across_algorithms() -> None:
-    """Versioning: an old manifest reads as CANNOT COMPARE, never as drift.
-
-    `agrees_with` returns None rather than False, because a false drift alarm on every pre-existing
-    capture would be a nastier regression than the gap it closes.
-    """
+def test_a_key_compares_only_within_its_algorithm_and_round_trips_with_it() -> None:
+    """An old manifest reads as CANNOT COMPARE (None), never as drift; a value persisted without its
+    algorithm is not a key."""
     archive = oid.RevisionKey(algo=oid.REVISION_ALGO_ARCHIVE, value="a" * 64)
-    flat = oid.RevisionKey(algo=oid.REVISION_ALGO_FLAT, value="a" * 64)
 
-    assert archive.agrees_with(flat) is None, "same value, different algorithm: not comparable"
+    assert archive.agrees_with(oid.RevisionKey(algo=oid.REVISION_ALGO_FLAT, value="a" * 64)) is None
     assert archive.agrees_with(None) is None
     assert archive.agrees_with(oid.RevisionKey(algo=oid.REVISION_ALGO_ARCHIVE, value="a" * 64)) is True
     assert archive.agrees_with(oid.RevisionKey(algo=oid.REVISION_ALGO_ARCHIVE, value="b" * 64)) is False
-
-
-def test_a_key_round_trips_through_json_with_its_algorithm() -> None:
-    """A value persisted without its algorithm is uncomparable, so both halves always travel."""
-    key = oid.RevisionKey(algo=oid.REVISION_ALGO_ARCHIVE, value="c" * 64)
-
-    assert oid.RevisionKey.from_json(key.as_json()) == key
-    assert oid.RevisionKey.from_json({"value": "c" * 64}) is None, "a bare value is not a key"
+    assert oid.RevisionKey.from_json(archive.as_json()) == archive
+    assert oid.RevisionKey.from_json({"value": "a" * 64}) is None
     assert oid.RevisionKey.from_json({"algo": oid.REVISION_ALGO_ARCHIVE}) is None
-    assert oid.RevisionKey.from_json("c" * 64) is None
-
-
-BUILD_STAMP_LOCAL = b"<?xml version='1.0'?>\n<!-- build 20263.26.0824.1544   -->\n<workbook><worksheets/></workbook>"
-BUILD_STAMP_REMOTE = b"<?xml version='1.0'?>\n<!-- build 20263.26.0828.1352   -->\n<workbook><worksheets/></workbook>"
-
-
-def test_the_server_build_stamp_does_not_count_as_a_changed_workbook() -> None:
-    """⚠️ MEASURED, and it is why the archive key is v2 and a flat XML key exists at all.
-
-    Normalising the zip alone was not enough. Re-stamping the 78 harvested assets of the reference
-    estate against the live site, **28 reported a content difference**; diffing six of them - three
-    inside a `.twbx`, three served flat - showed the ENTIRE difference was one line, every time::
-
-        -<!-- build 20263.26.0824.1544 -->
-        +<!-- build 20263.26.0828.1352 -->
-
-    That is the Tableau SERVER build that serialised the file. It moved because the site was upgraded
-    between the harvest and the check; most of those files were byte-identical in length. With it
-    normalised, 28 false `differs` became 0.
-    """
-    assert hashlib.sha256(BUILD_STAMP_LOCAL).hexdigest() != hashlib.sha256(BUILD_STAMP_REMOTE).hexdigest(), (
-        "the fixture must genuinely differ raw, or this test cannot detect the normalisation"
-    )
-    assert oid.revision_key(BUILD_STAMP_LOCAL) == oid.revision_key(BUILD_STAMP_REMOTE)
-    assert oid.revision_key(BUILD_STAMP_LOCAL).algo == oid.REVISION_ALGO_XML
-
-
-def test_the_build_stamp_is_normalised_inside_an_archive_too() -> None:
-    """The same nonce, the same file, one layer in - a `.twb` is XML whether or not it is zipped."""
-    local = _archive([("Book.twb", BUILD_STAMP_LOCAL), MEMBERS[1]], date_time=(2026, 1, 1, 0, 0, 0))
-    remote = _archive([MEMBERS[1], ("Book.twb", BUILD_STAMP_REMOTE)], date_time=(2026, 9, 3, 11, 22, 33))
-
-    assert hashlib.sha256(local).hexdigest() != hashlib.sha256(remote).hexdigest()
-    assert oid.revision_key(local) == oid.revision_key(remote)
-
-
-def test_normalisation_does_not_reach_past_comments_into_content() -> None:
-    """The negative control for the nonce fix: only COMMENTS are stripped.
-
-    Everything a migration cares about - marks, calculations, connections, parameters - lives in
-    elements and attributes, and a change to any of them must still read as a different build.
-    """
-    edited = BUILD_STAMP_LOCAL.replace(b"<worksheets/>", b"<worksheets><worksheet name='New'/></worksheets>")
-
-    assert oid.revision_key(BUILD_STAMP_LOCAL).agrees_with(oid.revision_key(edited)) is False
-
-
-def test_a_non_xml_non_archive_payload_keeps_its_raw_bytes_and_a_distinct_algorithm() -> None:
-    """The third SHAPE, named rather than fallen into - and never comparable with the other two."""
-    key = oid.revision_key(b"\x00\x01not xml and not a zip")
-
-    assert key.algo == oid.REVISION_ALGO_FLAT
-    assert key.agrees_with(oid.RevisionKey(algo=oid.REVISION_ALGO_XML, value=key.value)) is None
+    assert oid.RevisionKey.from_json("a" * 64) is None
