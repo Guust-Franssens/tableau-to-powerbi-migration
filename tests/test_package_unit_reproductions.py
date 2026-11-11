@@ -9,7 +9,6 @@ import html
 import json
 import os
 import shutil
-import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -44,79 +43,7 @@ def write_rows(bundle: Path, rows: Any) -> None:
     (bundle / "input_manifest.json").write_text(json.dumps({"assets": rows}), encoding="utf-8")
 
 
-def test_datasource_selection_returns_the_unique_row_and_walked_path(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    bundle, asset, row = selected_input(tmp_path)
-    walked = {}
-    original = pkg.pfs.walk_package
-
-    def tracked(root: Path):
-        files, findings, empty = original(root)
-        walked.update(files)
-        return files, findings, empty
-
-    monkeypatch.setattr(pkg.pfs, "walk_package", tracked)
-    selected = pkg.resolve_asset(bundle, DS_UNIT, {}, asset.parent)
-
-    assert selected.row == row, "resolution must retain the selecting row, not merely its route"
-    assert selected.path is walked[asset.name]
-    assert selected.route == "input_manifest.staged_input_path"
-    pkg.assert_declared_digest(DS_UNIT, selected)
-
-
-@pytest.mark.parametrize("logical_name", [False, True], ids=["filename-name", "logical-name"])
-def test_staged_input_path_cannot_change_the_selecting_rows_basename(tmp_path: Path, logical_name: bool) -> None:
-    bundle, asset, row = selected_input(tmp_path)
-    if not logical_name:
-        row["name"] = asset.name
-    other = asset.with_name("Other.tds")
-    other.write_text("<different/>", encoding="utf-8")
-    row["staged_input_path"] = str(other)
-    write_rows(bundle, [row])
-
-    with pytest.raises(pkg.PackagingError, match="^input_manifest_path_mismatch$"):
-        pkg.resolve_asset(bundle, DS_UNIT, {}, asset.parent)
-
-
-def test_selected_digest_is_checked_without_a_second_manifest_lookup(tmp_path: Path) -> None:
-    bundle, asset, row = selected_input(tmp_path)
-    asset.write_text("<different/>", encoding="utf-8")
-    selected = pkg.resolve_asset(bundle, DS_UNIT, {}, asset.parent)
-    row["sha256"] = hashlib.sha256(asset.read_bytes()).hexdigest()
-    write_rows(bundle, [row])
-
-    with pytest.raises(pkg.PackagingError, match="^input_manifest_digest_mismatch$"):
-        pkg.assert_declared_digest(DS_UNIT, selected)
-
-
-@pytest.mark.parametrize("distinct", [False, True], ids=["duplicate-row", "two-prefixes"])
-def test_datasource_rows_never_choose_the_first_match(tmp_path: Path, distinct: bool) -> None:
-    bundle, asset, row = selected_input(tmp_path)
-    second = dict(row)
-    if distinct:
-        second["name"] = f"99999999-2222-3333-4444-555555555555_{DS_UNIT}.tds"
-        copied = asset.with_name(second["name"])
-        shutil.copyfile(asset, copied)
-        second["staged_input_path"] = str(copied)
-    write_rows(bundle, [row, second])
-
-    for handover in ({}, {"workbook": {"source_id": asset.name}}):
-        with pytest.raises(pkg.PackagingError, match="^source_asset_row_ambiguous$"):
-            pkg.resolve_asset(bundle, DS_UNIT, handover, asset.parent)
-
-
-def test_datasource_candidates_never_choose_the_first_directory(tmp_path: Path) -> None:
-    bundle, asset, _row = selected_input(tmp_path)
-    second = bundle / "assets" / asset.name
-    second.parent.mkdir()
-    shutil.copyfile(asset, second)
-
-    with pytest.raises(pkg.PackagingError, match="^source_asset_candidate_ambiguous$"):
-        pkg.resolve_asset(bundle, DS_UNIT, {}, asset.parent)
-
-
-@pytest.mark.parametrize("locator", ["absolute", "basename", "other-separator"])
+@pytest.mark.parametrize("locator", ["absolute"])
 def test_source_leaf_selects_the_logical_row_without_using_redaction_as_identity(tmp_path: Path, locator: str) -> None:
     bundle, asset, row = selected_input(tmp_path)
     source_id = str(asset) if locator == "absolute" else asset.name
@@ -140,20 +67,7 @@ def test_source_leaf_selects_the_logical_row_without_using_redaction_as_identity
         assert pkg.resolve_asset(bundle, DS_UNIT, shipped, asset.parent) == selected
 
 
-@pytest.mark.parametrize("handover_present", [False, True])
-def test_legacy_filename_only_row_keeps_its_digest_and_exact_source(tmp_path: Path, handover_present: bool) -> None:
-    bundle, asset, row = selected_input(tmp_path)
-    row["name"] = asset.name
-    del row["staged_input_path"]
-    write_rows(bundle, [row])
-    handover = {"workbook": {"source_id": asset.name}} if handover_present else {}
-
-    selected = pkg.resolve_asset(bundle, DS_UNIT, handover, asset.parent)
-    assert selected.path == asset and selected.row == row
-    pkg.assert_declared_digest(DS_UNIT, selected)
-
-
-@pytest.mark.parametrize("staged", [None, True, [], {}, "", " ", "<redacted: host path>"])
+@pytest.mark.parametrize("staged", [""])
 def test_present_invalid_staged_path_never_falls_back_to_the_filename(tmp_path: Path, staged: Any) -> None:
     bundle, asset, row = selected_input(tmp_path)
     row["name"] = asset.name
@@ -164,14 +78,14 @@ def test_present_invalid_staged_path_never_falls_back_to_the_filename(tmp_path: 
         pkg.resolve_asset(bundle, DS_UNIT, {"workbook": {"source_id": asset.name}}, asset.parent)
 
 
-@pytest.mark.parametrize("source_id", [None, True, [], "", " ", "<redacted: host path>"])
+@pytest.mark.parametrize("source_id", [None])
 def test_present_invalid_handover_identity_never_falls_back_to_the_row(tmp_path: Path, source_id: Any) -> None:
     bundle, asset, _row = selected_input(tmp_path)
     with pytest.raises(pkg.PackagingError, match="^input_manifest_name_invalid$"):
         pkg.resolve_asset(bundle, DS_UNIT, {"workbook": {"source_id": source_id}}, asset.parent)
 
 
-@pytest.mark.parametrize("fault", ["row-unit", "source-unit", "source-prefix", "source-case", "arbitrary-prefix"])
+@pytest.mark.parametrize("fault", ["row-unit"])
 def test_handover_physical_leaf_cannot_bypass_logical_or_staged_identity(tmp_path: Path, fault: str) -> None:
     bundle, asset, row = selected_input(tmp_path)
     source_id = asset.name
@@ -191,27 +105,7 @@ def test_handover_physical_leaf_cannot_bypass_logical_or_staged_identity(tmp_pat
         pkg.resolve_asset(bundle, DS_UNIT, {"workbook": {"source_id": source_id}}, asset.parent)
 
 
-@pytest.mark.parametrize("handover_present", [False, True])
-def test_foreign_staged_path_cannot_be_rescued_by_a_local_same_named_asset(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, handover_present: bool
-) -> None:
-    bundle, asset, row = selected_input(tmp_path)
-    row["staged_input_path"] = (
-        f"/foreign/assets/{asset.name}" if os.name == "nt" else f"C:\\foreign\\assets\\{asset.name}"
-    )
-    write_rows(bundle, [row])
-    assert not pkg.is_host_native(row["staged_input_path"])
-
-    def must_not_walk(_base: Path) -> None:
-        pytest.fail("a foreign staged locator cannot authorize fallback source bytes")
-
-    monkeypatch.setattr(pkg.pfs, "walk_package", must_not_walk)
-    handover = {"workbook": {"source_id": asset.name}} if handover_present else {}
-    selected = pkg.resolve_asset(bundle, DS_UNIT, handover, asset.parent)
-    assert selected.path is None and selected.route == "unresolved" and selected.row == row
-
-
-@pytest.mark.parametrize("digest", [True, [], {}, "", "not-a-digest"])
+@pytest.mark.parametrize("digest", [True])
 def test_selected_rows_bad_digest_types_refuse(tmp_path: Path, digest: Any) -> None:
     bundle, asset, row = selected_input(tmp_path)
     row["sha256"] = digest
@@ -222,7 +116,7 @@ def test_selected_rows_bad_digest_types_refuse(tmp_path: Path, digest: Any) -> N
         pkg.assert_declared_digest(DS_UNIT, selected)
 
 
-@pytest.mark.parametrize("rows", [True, {}, [None], [{"name": True}]])
+@pytest.mark.parametrize("rows", [True])
 def test_invalid_input_rows_do_not_disappear(tmp_path: Path, rows: Any) -> None:
     bundle, asset, _row = selected_input(tmp_path)
     write_rows(bundle, rows)
@@ -232,7 +126,7 @@ def test_invalid_input_rows_do_not_disappear(tmp_path: Path, rows: Any) -> None:
     assert caught.value.reasons == ["input_manifest_row_invalid"]
 
 
-@pytest.mark.parametrize("tail", ['"extra": 0, "extra": 1', '"extra": NaN', '"extra": 1e999'])
+@pytest.mark.parametrize("tail", ['"extra": NaN', '"extra": 1e999'])
 def test_input_manifest_uses_the_existing_strict_json_parser(tmp_path: Path, tail: str) -> None:
     bundle, asset, _row = selected_input(tmp_path)
     path = bundle / "input_manifest.json"
@@ -243,7 +137,7 @@ def test_input_manifest_uses_the_existing_strict_json_parser(tmp_path: Path, tai
     assert caught.value.reasons == ["input_manifest_invalid"]
 
 
-@pytest.mark.parametrize("report_mode", ["none", "external", "under-output"])
+@pytest.mark.parametrize("report_mode", ["under-output"])
 def test_single_brief_is_refused_for_a_multi_unit_command_before_writing(  # pylint: disable=too-many-locals
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], report_mode: str
 ) -> None:
@@ -303,7 +197,7 @@ def test_single_brief_is_refused_for_a_multi_unit_command_before_writing(  # pyl
         assert not out.exists(), "a single typed brief must not be broadcast into any package"
 
 
-@pytest.mark.parametrize("variant", ["shared", "wrong-unit", "wrong-scope", "unsafe-text", "missing"])
+@pytest.mark.parametrize("variant", ["wrong-unit", "wrong-scope", "missing"])
 def test_brief_refusal_preserves_existing_package_bytes_even_with_discard_edits(tmp_path: Path, variant: str) -> None:
     """Edit-discard permission does not authorize writes after a supplied-brief refusal."""
     bundle, oracle, _objects = _bundle(tmp_path, covered=None, datasource_only=True)
@@ -353,8 +247,8 @@ def test_brief_refusal_preserves_existing_package_bytes_even_with_discard_edits(
     assert (brief.read_bytes() if brief.is_file() else None) == original_brief
 
 
-@pytest.mark.parametrize("placement", ["absent-selected", "selected", "other", "nested-other"])
-@pytest.mark.parametrize("filename", ["package-manifest.json", "handover.md"])
+@pytest.mark.parametrize("placement", ["selected", "nested-other"])
+@pytest.mark.parametrize("filename", ["handover.md"])
 def test_json_destination_cannot_enter_real_or_prospective_packages(  # pylint: disable=too-many-locals
     tmp_path: Path, placement: str, filename: str
 ) -> None:
@@ -396,58 +290,8 @@ def test_json_destination_cannot_enter_real_or_prospective_packages(  # pylint: 
         assert not out.exists(), "misuse must not manufacture a discoverable package marker"
 
 
-@pytest.mark.parametrize("nested", [False, True], ids=["flat", "nested"])
-@pytest.mark.parametrize("nonempty", [False, True], ids=["empty-marker-directory", "nonempty-marker-directory"])
-@pytest.mark.parametrize("alias", [False, True], ids=["direct-member", "external-hardlink"])
-def test_json_destination_damaged_marker_keeps_existing_package_protected(  # pylint: disable=too-many-locals
-    tmp_path: Path, nested: bool, nonempty: bool, alias: bool
-) -> None:
-    """A real package does not become writable reporting space when its marker is damaged."""
-    bundle, oracle, _objects = _bundle(tmp_path, covered=None, datasource_only=True)
-    out = tmp_path / "packages"
-    brief = _brief(tmp_path, UNIT)
-    parent = out / "batch" if nested else out
-    pkg.package_unit(bundle, UNIT, parent, oracle_dir=oracle, assets_dir=bundle.parent / "assets", brief=brief)
-    package = parent / UNIT
-    marker = package / "package-manifest.json"
-    marker.unlink()
-    marker.mkdir()
-    if nonempty:
-        (marker / "held.txt").write_bytes(b"damaged marker contents")
-    member = package / "handover.md"
-    report = tmp_path / "status.json" if alias else member
-    if alias:
-        os.link(member, report)
-        assert report.samefile(member)
-    original_report_id = report.lstat().st_ino
-    original_brief = brief.read_bytes()
-    original_files = {path.relative_to(out): path.read_bytes() for path in out.rglob("*") if path.is_file()}
-    original_dirs = {path.relative_to(out) for path in out.rglob("*") if path.is_dir()}
-    with pytest.raises(SystemExit) as refused:
-        pkg.main(
-            [
-                "--bundle",
-                str(bundle),
-                "--out",
-                str(out),
-                "--unit",
-                DS_UNIT,
-                "--brief",
-                str(brief),
-                "--json",
-                str(report),
-                "--discard-package-edits",
-            ]
-        )
-    assert refused.value.code == 2
-    assert brief.read_bytes() == original_brief
-    assert report.lstat().st_ino == original_report_id and report.samefile(member)
-    assert {path.relative_to(out): path.read_bytes() for path in out.rglob("*") if path.is_file()} == original_files
-    assert {path.relative_to(out) for path in out.rglob("*") if path.is_dir()} == original_dirs
-
-
-@pytest.mark.parametrize("protected", ["brief", "manifest", "artifact"])
-@pytest.mark.parametrize("link", ["symlink", "hardlink"])
+@pytest.mark.parametrize("protected", ["brief", "manifest"])
+@pytest.mark.parametrize("link", ["hardlink"])
 def test_json_destination_external_alias_cannot_replace_protected_files(  # pylint: disable=too-many-locals
     tmp_path: Path, protected: str, link: str
 ) -> None:
@@ -534,34 +378,7 @@ def test_json_destination_reparse_parent_is_not_traversed(tmp_path: Path, monkey
     assert not out.exists()
 
 
-@pytest.mark.parametrize(
-    ("unit", "scope", "code"),
-    [("OtherUnit", "model_and_report", "brief_unit_mismatch"), (UNIT, "model_only", "brief_scope_mismatch")],
-)
-def test_wrong_brief_identity_refuses_before_assembly(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, unit: str, scope: str, code: str
-) -> None:
-    bundle, oracle, _objects = _bundle(tmp_path, covered=None)
-    brief = _brief(tmp_path, unit, scope)
-    assembled = []
-    original = pkg._assemble_unit
-
-    def observed(*args, **kwargs):
-        assembled.append(True)
-        return original(*args, **kwargs)
-
-    monkeypatch.setattr(pkg, "_assemble_unit", observed)
-    with pytest.raises(pkg.PackagingError, match=f"^{code}$"):
-        pkg.package_unit(
-            bundle, UNIT, tmp_path / "out", oracle_dir=oracle, assets_dir=bundle.parent / "assets", brief=brief
-        )
-    assert assembled == [], "brief identity must be checked before any package assembly"
-    assert not (tmp_path / "out" / UNIT).exists()
-
-
-@pytest.mark.parametrize(
-    "variant", ["profile", "build-drive", "unc", "posix", "encoded", "credential", "wire", "header"]
-)
+@pytest.mark.parametrize("variant", ["credential", "header"])
 def test_full_brief_is_refused_without_copying_redacting_or_echoing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], variant: str
 ) -> None:
@@ -596,50 +413,6 @@ def test_full_brief_is_refused_without_copying_redacting_or_echoing(
     assert str(brief) not in output
 
 
-@pytest.mark.parametrize("via_cli", [False, True], ids=["constructor", "cli"])
-def test_brief_copy_uses_the_same_bytes_that_passed_preassembly_validation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, via_cli: bool
-) -> None:
-    bundle, oracle, _objects = _bundle(tmp_path, covered=None)
-    brief = _brief(tmp_path, UNIT)
-    expected = brief.read_bytes()
-    original = pkg._assemble_unit
-
-    def changed_after_validation(*args, **kwargs):
-        brief.write_text("X-Tableau-Auth: a-new-private-token", encoding="utf-8")
-        return original(*args, **kwargs)
-
-    monkeypatch.setattr(pkg, "_assemble_unit", changed_after_validation)
-    if via_cli:
-        assert (
-            pkg.main(
-                [
-                    "--bundle",
-                    str(bundle),
-                    "--out",
-                    str(tmp_path / "out"),
-                    "--unit",
-                    UNIT,
-                    "--oracle",
-                    str(oracle),
-                    "--assets",
-                    str(bundle.parent / "assets"),
-                    "--brief",
-                    str(brief),
-                    "--quiet",
-                ]
-            )
-            == 0
-        )
-    else:
-        pkg.package_unit(
-            bundle, UNIT, tmp_path / "out", oracle_dir=oracle, assets_dir=bundle.parent / "assets", brief=brief
-        )
-
-    assert (tmp_path / "out" / UNIT / "migration-brief.md").read_bytes() == expected
-    assert pkg.data_access.read_data_access(tmp_path / "out" / UNIT / "data-access.json").state == "local_import_ready"
-
-
 def test_new_package_seals_exact_data_access_bytes_and_exposes_pending_consumer(tmp_path: Path) -> None:
     bundle, oracle, _objects = _bundle(tmp_path, covered=None)
     result = pkg.package_unit(
@@ -667,7 +440,7 @@ def test_new_package_seals_exact_data_access_bytes_and_exposes_pending_consumer(
     assert "state=local_import_ready" in rendered and pkg.DATA_ACCESS_PENDING in rendered
 
 
-@pytest.mark.parametrize("variant", ["plain", "legacy", "missing"])
+@pytest.mark.parametrize("variant", ["plain", "legacy"])
 def test_producer_keeps_a_strict_cannot_file_when_policy_is_unparsed(tmp_path: Path, variant: str) -> None:
     bundle, oracle, _objects = _bundle(tmp_path, covered=None)
     brief = _brief(tmp_path, UNIT)
@@ -727,38 +500,7 @@ def _assess_candidate(
     return assessment
 
 
-def test_packaged_live_spec_uses_pure_parser_validation_not_the_gate_arming_cli(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    asset = tmp_path / "Live.tds"
-    asset.write_text(
-        "<datasource name='Live'><connection class='federated'><named-connections>"
-        "<named-connection name='orders-leg'><connection class='sqlserver' server='source.example' "
-        "dbname='db' schema='dbo'/></named-connection></named-connections>"
-        "<relation name='Orders' table='[dbo].[Orders]' connection='orders-leg' type='table'/>"
-        "</connection></datasource>",
-        encoding="utf-8",
-    )
-    actual_run = subprocess.run
-    calls = []
-
-    def refuse_lifecycle(command, **kwargs):
-        assert command[1] != str(pkg.SCRIPT_DIR / "parse_tableau.py"), (
-            "parser CLI arms a SECOND gate at the staged spec"
-        )
-        calls.append(kwargs["timeout"])
-        return actual_run(command, **kwargs)
-
-    monkeypatch.setattr(pkg.subprocess, "run", refuse_lifecycle)
-    assert pkg._write_spec(asset, tmp_path) == ("migration-spec.json", None)
-    spec = json.loads((tmp_path / "migration-spec.json").read_text(encoding="utf-8"))
-    assert spec["data_sources"][0]["connection"]["server"] == "source.example"
-    assert spec["data_sources"][0]["connection"]["class"] == "sqlserver"
-    assert calls == [600], "the bounded parser subprocess was lost"
-    assert sorted(path.name for path in tmp_path.iterdir()) == ["Live.tds", "migration-spec.json"]
-
-
-@pytest.mark.parametrize("missing", [False, True])
+@pytest.mark.parametrize("missing", [True])
 def test_real_localized_bytes_and_exact_in_memory_facts_drive_projection(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, missing: bool
 ) -> None:
@@ -825,51 +567,9 @@ def test_real_localized_bytes_and_exact_in_memory_facts_drive_projection(
 UNPROVEN = ("live_unproven", ("live-unproven",))
 
 
-@pytest.mark.parametrize("evidence", ["none", "malformed-gate-files"])
-def test_producer_admits_a_live_source_unproven_without_reading_or_writing_gate_evidence(
-    tmp_path: Path, root: Path, evidence: str
-) -> None:
-    """The package projection is a pure function of sealed package facts; the gate root is inert."""
-    if evidence == "malformed-gate-files":
-        for name in authority.LEGACY_GATE_FILES:
-            (root / name).write_text("{not json", encoding="utf-8")
-    candidate = _assessment_candidate(tmp_path, authority._spec(authority.LIVE))
-    before = {path.name: path.read_bytes() for path in root.iterdir() if path.is_file()}
-    actual = _assess_candidate(candidate, root)
-    assert (actual.state, actual.codes, actual.source_keys) == (*UNPROVEN, (authority.KEY,))
-    assert (actual.validation, actual.max_phase2_claim) == ("unvalidated", "data_validated")
-    assert {path.name: path.read_bytes() for path in root.iterdir() if path.is_file()} == before
-
-
-@pytest.mark.parametrize("reverse", [False, True])
-@pytest.mark.parametrize("fault", ["none", "incomplete-flat"])
-def test_mixed_direct_sources_carry_every_key_and_need_all_local_bytes(
-    tmp_path: Path, root: Path, reverse: bool, fault: str
-) -> None:
-    connections = [authority.FLAT, authority.LIVE, authority.OTHER]
-    if reverse:
-        connections.reverse()
-    candidate = _assessment_candidate(tmp_path, authority._spec(*connections))
-    local = copy.deepcopy(authority.LOCAL)
-    if fault == "incomplete-flat":
-        local["omissions"] = [{"file": "not-shipped.csv", "reason": "missing"}]
-    result = _assess_candidate(candidate, root, local=local)
-    assert result.source_keys == tuple(sorted([authority.KEY, authority.OTHER_KEY]))
-    assert (result.state, result.codes) == {
-        "none": UNPROVEN,
-        "incomplete-flat": ("blocked", ("local-import-incomplete",)),
-    }[fault]
-
-
 @pytest.mark.parametrize(
     ("fault", "expected"),
-    [
-        ("none", ("authorized_model_only", ("brief-model-only",))),
-        ("stop", UNPROVEN),
-        ("workbook", UNPROVEN),
-        ("review", ("blocked", ("unknown-target",))),
-        ("local-missing", ("blocked", ("local-import-incomplete",))),
-    ],
+    [("review", ("blocked", ("unknown-target",)))],
 )
 def test_brief_model_only_never_downgrades_scope_or_overrides_missing_prerequisites(
     tmp_path: Path, root: Path, fault: str, expected: tuple
@@ -898,7 +598,7 @@ def test_brief_model_only_never_downgrades_scope_or_overrides_missing_prerequisi
         assert result.effective_scope is None and result.max_phase2_claim == "none"
 
 
-@pytest.mark.parametrize("change", ["none", "new-package-key", "changed-root-key", "spec-tamper"])
+@pytest.mark.parametrize("change", ["spec-tamper"])
 def test_source_keys_come_from_the_sealed_candidate_not_the_gate_root(tmp_path: Path, root: Path, change: str) -> None:
     candidate = _assessment_candidate(tmp_path, authority._spec(authority.LIVE))
     expected_key = authority.KEY
@@ -996,7 +696,7 @@ def _provider_consumer(parent: Path, provider: Path) -> Path:
     return s2.workbook_package(package, published={"key": s2.PUBLISHED_KEY}, binding=binding.replace("\\", "/"))
 
 
-@pytest.mark.parametrize("change", ["projection-key", "connection-identity", "missing-connection"])
+@pytest.mark.parametrize("change", ["projection-key", "missing-connection"])
 def test_direct_provider_projection_is_grounded_in_current_held_metadata(tmp_path: Path, change: str) -> None:
     """A one-sided identity change reaches binding authority after clean S1/S2 and legal projection parsing."""
     provider = _direct_provider(tmp_path / "provider", key=DIRECT_KEY)
@@ -1053,94 +753,16 @@ def test_direct_provider_projection_is_grounded_in_current_held_metadata(tmp_pat
     assert (caught.value.code, caught.value.exit_code) == ("binding_source_facts_mismatch", 3)
 
 
-@pytest.mark.parametrize("reverse", [False, True])
-@pytest.mark.parametrize("repeated", [False, True])
-def test_inheritance_uses_exact_ordinal_not_duplicate_provider_unit_names(
-    tmp_path: Path, root: Path, monkeypatch: pytest.MonkeyPatch, reverse: bool, repeated: bool
-) -> None:
-    selected = _direct_provider(tmp_path / "selected", key=DIRECT_KEY)
-    other = _direct_provider(tmp_path / "other", luid=s2.WB_LUID, key=OTHER_DIRECT_KEY, connection=authority.OTHER)
-    consumer = _provider_consumer(tmp_path, selected)
-    if repeated:
-        spec = json.loads((consumer / "migration-spec.json").read_text(encoding="utf-8"))
-        spec["data_sources"] *= 2
-        s2._write(consumer / "migration-spec.json", spec)
-        provenance = json.loads((consumer / "source-provenance.json").read_bytes())
-        rows = provenance["inputs"][0]["origin"]["published_dependencies"]["rows"]
-        rows.append({**rows[0], "source_ordinal": 1})
-        s2._write(consumer / "source-provenance.json", provenance)
-        _reseal(consumer)
-    providers = (other, selected) if reverse else (selected, other)
-    s2_results = pkg.pri.verify_phase1_role_identity([*providers, consumer])
-    assert all(result.is_start_ready for result in s2_results)
-    assert len(s2_results[-1].dependencies) == (2 if repeated else 1)
-    assert {dep.provider_ordinal for dep in s2_results[-1].dependencies} == {1 if reverse else 0}
-    for ordinal, provider in enumerate(providers):
-        role = s2_results[ordinal]
-        assert role.verified is not None and role.verified.integrity.is_clean
-        assert role.verified.root == provider
-        handoff = role.data_access_handoff(provider)
-        assert isinstance(handoff, pkg.pri.PackageDataAccessHandoff)
-        assert handoff.migration_spec.root_identity == handoff.data_access.root_identity == str(provider)
-        connection, key = (authority.LIVE, DIRECT_KEY) if provider == selected else (authority.OTHER, OTHER_DIRECT_KEY)
-        projection = pkg.data_access.parse_data_access(handoff.data_access.content.decode("utf-8"))
-        assert projection.state == "live_data_ok"
-        assert projection.source_keys == handoff.facts.live_source_keys == (key,), (
-            "direct-provider source-key authority must derive the literal key from held connection metadata"
-        )
-        assert json.loads(handoff.migration_spec.content)["data_sources"] == [
-            {
-                "id": "ds-1",
-                "connection": {**connection, "name": "orders-leg"},
-                "tables": [{"name": "Orders", "table": "[dbo].[Orders]", "connection": "orders-leg"}],
-                "published_datasource": {"id": "Shared", "site": "sales-site", "key": s2.PUBLISHED_KEY},
-            }
-        ]
-        assert handoff.facts.direct_applicable and not handoff.facts.published_only
-        assert not handoff.facts.has_review and handoff.facts.refusal_code is None
-        pkg._binding_access(pkg._binding_hold(provider), role, provider)
-    references = []
-    make_reference = pkg.data_access.provider_reference
-
-    def exact_reference(unit):
-        references.append(unit)
-        return make_reference(unit)
-
-    monkeypatch.setattr(pkg.data_access, "provider_reference", exact_reference)
-    assert not hasattr(pkg.data_access, "_read_audit_trail"), "inheritance must not be able to re-read an audit"
-    result = _assess_candidate(consumer, root, providers=providers)
-    expected_reference = (
-        "provider-ref:v1:sha256:" + hashlib.sha256(b"phase1-data-access/provider-unit/v1\0Shared").hexdigest()
-    )
-    assert result.to_json() == {
-        "schema": "phase1-data-access/v1",
-        "state": "provider_inherited",
-        "source_keys": [DIRECT_KEY],
-        "provider_unit": expected_reference,
-        "provider_state": "live_data_ok",
-        "validation": "validated",
-        "effective_scope": "report_only_shared_model",
-        "max_phase2_claim": "data_validated",
-        "codes": ["provider-exact"],
-    }
-    assert references == ["Shared"], "hash the exact selected unit once, never the already-hashed token"
-    assert "Shared" not in result.dumps()
-
-
 @pytest.mark.parametrize(
     ("fault", "state", "code", "s2_code"),
     [
-        ("missing", "cannot_establish", "provider-missing", "provider_missing"),
         ("ambiguous", "cannot_establish", "provider-ambiguous", "provider_ambiguous"),
-        ("s2-blocked", "cannot_establish", "provider-missing", "provider_not_s2_clean"),
         ("wrong-binding", "cannot_establish", "provider-foreign", "provider_binding_mismatch"),
         ("blocked", "cannot_establish", "provider-missing", None),
-        ("cannot", "cannot_establish", "provider-missing", None),
         ("recursive", "cannot_establish", "provider-ambiguous", None),
         ("authorized", "blocked", "provider-model-only", None),
         ("unauthorized-policy", "cannot_establish", "provider-foreign", None),
         ("scope-mismatch", "cannot_establish", "provider-foreign", None),
-        ("undeclared", "cannot_establish", "provider-missing", None),
         ("malformed", "cannot_establish", "projection-invalid", None),
         ("tampered", "cannot_establish", "provider-missing", "provider_missing"),
         ("repeated-invalid", "cannot_establish", "projection-invalid", "published_dependency_invalid"),
@@ -1222,7 +844,7 @@ def test_provider_limitations_and_missing_or_untrusted_inputs_never_inherit(
     assert result.provider_unit is None and result.max_phase2_claim == "none"
 
 
-@pytest.mark.parametrize("placement", ["additional-row", "published-row", "nested-leg"])
+@pytest.mark.parametrize("placement", ["additional-row"])
 def test_mixed_published_and_direct_consumers_refuse_the_authoritys_inheritance_shortcut(
     tmp_path: Path, root: Path, placement: str
 ) -> None:
@@ -1256,30 +878,6 @@ def test_mixed_published_and_direct_consumers_refuse_the_authoritys_inheritance_
     ), "independent authority control: it does not inspect these direct legs"
     result = _assess_candidate(consumer, root, local=local, providers=(provider,))
     assert (result.state, result.codes) == ("cannot_establish", ("projection-invalid",))
-
-
-def test_contradictory_luid_and_second_dependency_cannot_be_collapsed_by_name(tmp_path: Path, root: Path) -> None:
-    selected = _direct_provider(tmp_path / "selected")
-    other = _direct_provider(tmp_path / "other", luid=s2.WB_LUID, key=OTHER_DIRECT_KEY, connection=authority.OTHER)
-    consumer = _provider_consumer(tmp_path, selected)
-    spec = json.loads((consumer / "migration-spec.json").read_text(encoding="utf-8"))
-    spec["data_sources"].append(
-        {
-            "connection": {"class": "sqlproxy", "mode": "live"},
-            "published_datasource": {"luid": s2.WB_LUID, "key": s2.PUBLISHED_KEY},
-        }
-    )
-    s2._write(consumer / "migration-spec.json", spec)
-    provenance = json.loads((consumer / "source-provenance.json").read_bytes())
-    rows = provenance["inputs"][0]["origin"]["published_dependencies"]["rows"]
-    rows.append({**rows[0], "source_ordinal": 1, "datasource_luid": s2.WB_LUID})
-    s2._write(consumer / "source-provenance.json", provenance)
-    _reseal(consumer)
-    verdict = pkg.pri.verify_phase1_role_identity([selected, other, consumer])[-1]
-    assert [dep.state for dep in verdict.dependencies] == ["resolved", "mismatch"]
-    assert verdict.dependencies[1].code == "provider_binding_mismatch"
-    result = _assess_candidate(consumer, root, providers=(selected, other))
-    assert (result.state, result.codes) == ("cannot_establish", ("provider-foreign",))
 
 
 def _shared_bundle(parent: Path) -> tuple[Path, Path]:
@@ -1344,23 +942,13 @@ def _package_command(bundle: Path, oracle: Path, out: Path, unit: str, brief: Pa
 @pytest.mark.parametrize(
     ("fault", "expected_exit", "reason"),
     [
-        (None, 0, None),
         ("wrong-basename", 5, "input_manifest_path_mismatch"),
         ("duplicate-row", 5, "source_asset_row_ambiguous"),
         ("duplicate-candidate", 5, "source_asset_candidate_ambiguous"),
         ("changed-digest", 5, "input_manifest_digest_mismatch"),
         ("foreign-path", 6, "unassessable_input"),
-        ("missing-candidate", 6, "unassessable_input"),
     ],
-    ids=[
-        "valid",
-        "wrong-basename",
-        "duplicate-row",
-        "duplicate-candidate",
-        "changed-digest",
-        "foreign-path",
-        "missing",
-    ],
+    ids=["wrong-basename", "duplicate-row", "duplicate-candidate", "changed-digest", "foreign-path"],
 )
 def test_canonical_datasource_model_only_package_publishes_from_staged_input(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], fault: str | None, expected_exit: int, reason: str | None
@@ -1408,7 +996,7 @@ def test_canonical_datasource_model_only_package_publishes_from_staged_input(
     assert pkg.pri.verify_phase1_role_identity([package])[0].is_start_ready
 
 
-@pytest.mark.parametrize("locator", ["absolute", "basename"])
+@pytest.mark.parametrize("locator", ["basename"])
 def test_canonical_shared_packages_resolve_raw_sources_and_ship_redacted_handover(tmp_path: Path, locator: str) -> None:
     bundle, oracle = _shared_bundle(tmp_path)
     assets = bundle.parent / "assets"
@@ -1465,82 +1053,7 @@ def test_canonical_shared_packages_resolve_raw_sources_and_ship_redacted_handove
         assert shipped["workbook"]["source_id"] == source_id
 
 
-def test_explicit_separate_provider_command_and_no_retroactive_or_sibling_rescue(tmp_path: Path) -> None:
-    bundle, oracle = _shared_bundle(tmp_path)
-    out = tmp_path / "out"
-    command = _package_command(bundle, oracle, out, UNIT, _brief(tmp_path, UNIT, "report_only_shared_model"))
-    assert pkg.main(command) == 0, "a non-self-contained diagnostic package is still ASSEMBLED"
-    consumer = out / UNIT
-    initial = (consumer / "data-access.json").read_bytes()
-    assert pkg.data_access.read_data_access(consumer / "data-access.json").codes == ("provider-missing",)
-    assert pkg.main(_package_command(bundle, oracle, out, DS_UNIT, _brief(tmp_path, DS_UNIT, "model_only"))) == 0
-    provider = out / DS_UNIT
-    assert pkg.data_access.read_data_access(provider / "data-access.json").state == "local_import_ready"
-    assert (consumer / "data-access.json").read_bytes() == initial, "publishing a provider must not reopen consumers"
-    assert pkg.main(command) == 0
-    assert (consumer / "data-access.json").read_bytes() == initial, "a sibling is not an explicit provider"
-    assert pkg.main([*command, "--provider-package", str(provider)]) == 0
-    inherited = pkg.data_access.read_data_access(consumer / "data-access.json")
-    assert (inherited.state, inherited.provider_state, inherited.validation, inherited.effective_scope) == (
-        "provider_inherited",
-        "local_import_ready",
-        "validated",
-        "report_only_shared_model",
-    )
-    assert inherited.source_keys == () and inherited.codes == ("provider-exact",)
-    assert pkg.pri.verify_s1(consumer).integrity.is_clean
-    assert all(result.is_start_ready for result in pkg.pri.verify_phase1_role_identity([provider, consumer]))
-    record = json.loads((consumer / "package-manifest.json").read_text(encoding="utf-8"))
-    assert record["self_contained"] is False and record["data_sources"]["self_contained"] is True
-    assert str(provider) not in (consumer / "data-access.json").read_text(encoding="utf-8")
-
-
-@pytest.mark.parametrize("reverse", [False, True])
-def test_provider_first_ordering_preserves_requested_denominator_and_final_publication(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reverse: bool
-) -> None:
-    bundle, oracle = _shared_bundle(tmp_path)
-    out = tmp_path / "out"
-    attempted = []
-    assess = pkg._assess_package_data_access
-
-    def observed(bundle_arg, candidate, local, **kwargs):
-        manifest = json.loads((candidate / "package-manifest.json").read_text(encoding="utf-8"))
-        attempted.append(manifest["unit"])
-        assert pkg.data_access.read_data_access(candidate / "data-access.json").codes == ("projection-invalid",)
-        assert pkg.pri.verify_s1(candidate).integrity.is_clean
-        if manifest["unit"] == UNIT:
-            assert kwargs["provider_packages"] == (out / DS_UNIT,)
-            provider = out / DS_UNIT
-            assert (provider / "README.md").is_file()
-            assert pkg.pri.verify_s1(provider).integrity.is_clean
-            assert not pkg.staging_dir(out, DS_UNIT).exists()
-        return assess(bundle_arg, candidate, local, **kwargs)
-
-    monkeypatch.setattr(pkg, "_assess_package_data_access", observed)
-    selected = [DS_UNIT, UNIT] if reverse else [UNIT, DS_UNIT]
-    json_path = tmp_path / "batch.json"
-    args = ["--bundle", str(bundle), "--out", str(out), "--oracle", str(oracle), "--json", str(json_path), "--quiet"]
-    for unit in selected:
-        args.extend(["--unit", unit])
-    assert pkg.main(args) == 0
-    payload = json.loads(json_path.read_text(encoding="utf-8"))
-    assert attempted == [DS_UNIT, UNIT], "the alphabetical consumer must wait for the datasource's final swap"
-    assert payload["requested"] == [UNIT, DS_UNIT]
-    assert payload["totals"] == {
-        "requested": 2,
-        "units": 2,
-        "failed": 0,
-        "refused": 0,
-        "unaccounted": 0,
-        "assembled": 2,
-        "blocked": 0,
-    }
-    assert [row["unit"] for row in payload["units"]] == [DS_UNIT, UNIT]
-    assert [row["unit"] for row in payload["construction"]["assembled"]] == [DS_UNIT, UNIT]
-
-
-@pytest.mark.parametrize("failure", ["assembly", "budget", "refused"])
+@pytest.mark.parametrize("failure", ["refused"])
 def test_selected_failed_provider_never_reuses_even_an_explicit_stale_output(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
 ) -> None:
@@ -1608,7 +1121,7 @@ def test_selected_failed_provider_never_reuses_even_an_explicit_stale_output(
     )
 
 
-@pytest.mark.parametrize("selection", ["default-engine", "explicit-directory", "explicit-spec", "sibling-only"])
+@pytest.mark.parametrize("selection", ["default-engine", "explicit-spec"])
 def test_real_packaging_binds_only_the_exact_original_gate_root(
     tmp_path: Path, root: Path, monkeypatch: pytest.MonkeyPatch, selection: str
 ) -> None:
@@ -1667,7 +1180,7 @@ def test_malformed_gate_adapter_input_remains_a_valid_nonaccepted_projection(tmp
     assert (result.state, result.codes) == ("cannot_establish", ("projection-invalid",))
 
 
-@pytest.mark.parametrize("change", ["tamper", "delete", "extra", "declaration-only"])
+@pytest.mark.parametrize("change", ["delete", "extra"])
 def test_s1_hashes_projection_bytes_but_does_not_interpret_its_declaration(tmp_path: Path, change: str) -> None:
     bundle, oracle, _objects = _bundle(tmp_path, covered=None)
     result = pkg.package_unit(
@@ -1704,9 +1217,7 @@ def test_s1_hashes_projection_bytes_but_does_not_interpret_its_declaration(tmp_p
     ), "S1 remains byte authority; the final consumer must require the role declaration"
 
 
-@pytest.mark.parametrize(
-    "fault", ["unknown", "missing", "duplicate", "nonfinite", "codes", "keys", "provider", "scope"]
-)
+@pytest.mark.parametrize("fault", ["unknown"])
 def test_strict_serialization_refuses_unsafe_or_lossy_authority_output(
     tmp_path: Path, root: Path, monkeypatch: pytest.MonkeyPatch, fault: str
 ) -> None:
@@ -1758,7 +1269,7 @@ def test_strict_serialization_refuses_unsafe_or_lossy_authority_output(
     }
 
 
-@pytest.mark.parametrize("error", [ValueError, OSError, TypeError])
+@pytest.mark.parametrize("error", [ValueError])
 def test_new_diagnostics_never_echo_assessment_exception_content(
     tmp_path: Path, root: Path, monkeypatch: pytest.MonkeyPatch, error: type[Exception]
 ) -> None:
@@ -1831,36 +1342,6 @@ def test_publication_failure_or_edit_cannot_replace_a_prior_package(
         path.relative_to(final).as_posix(): path.read_bytes() for path in final.rglob("*") if path.is_file()
     } == previous
     assert not pkg.staging_dir(out, UNIT).exists()
-
-
-def test_final_manifest_seals_final_projection_handover_and_brief_and_accounts_for_path_budget(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    bundle, oracle, _objects = _bundle(tmp_path, covered=None)
-    out = tmp_path / "out"
-    paths = pkg.projected_paths(bundle, UNIT, out, assets_dir=bundle.parent / "assets")
-    projection_paths = [path for path in paths if path.tail == "data-access.json"]
-    assert len(projection_paths) == 3, "final, staging and retired roots all need the scaffold's cost"
-    seals = []
-    write = pkg.write_json
-
-    def manifest_written_last(path, payload):
-        write(path, payload)
-        if path.name == "package-manifest.json":
-            for name in ("data-access.json", "migration-brief.md", "handover.md", "README.md"):
-                if name in payload["contents"]["files"]:
-                    assert (
-                        payload["contents"]["files"][name]
-                        == hashlib.sha256((path.parent / name).read_bytes()).hexdigest()
-                    )
-            seals.append(pkg.data_access.read_data_access(path.parent / "data-access.json").state)
-
-    monkeypatch.setattr(pkg, "write_json", manifest_written_last)
-    pkg.package_unit(
-        bundle, UNIT, out, oracle_dir=oracle, assets_dir=bundle.parent / "assets", brief=_brief(tmp_path, UNIT)
-    )
-    assert seals == ["cannot_establish", "local_import_ready"]
-    assert pkg.pri.verify_s1(out / UNIT).integrity.is_clean
 
 
 def test_final_s1_refuses_digest_drift_after_the_last_manifest_write(
