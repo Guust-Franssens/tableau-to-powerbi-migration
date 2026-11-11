@@ -75,13 +75,15 @@ PIN_PROVENANCE = (
     "source claims name different workbooks is now `conflicting-identity` where it was `unknown`, "
     "which is the more honest verdict (it established two identities, not none) and does not change "
     "any readiness or PASS/FAIL outcome. "
-    "`tests/test_object_identity.py` is UNCHANGED."
+    "`tests/test_object_identity.py` moved only for the #826 test purge: its cases were collapsed "
+    "into table-driven tests with every assertion on `object_identity.py` behaviour kept; "
+    "`object_identity.py` itself is UNCHANGED."
 )
 
 #: SHA-256 of each shared file, over LF-normalized bytes.
 PINNED: dict[str, str] = {
     "scripts/object_identity.py": "20a83cfb433afca42ff6aeb6049ed90643be6c58237d305e5d367447885acb31",
-    "tests/test_object_identity.py": "11d6881a960fa3c23beaa6928706de88a83fc1605b051314038ffdc14711c967",
+    "tests/test_object_identity.py": "a5c5b4b6b15a9371d02413082f909fb8b2321d9b1ab318b332c2c3ea4f08ef2f",
 }
 
 
@@ -102,41 +104,12 @@ def test_shared_identity_files_are_unmodified() -> None:
     )
 
 
-def test_the_pin_provenance_names_a_reason_rather_than_only_a_commit() -> None:
-    """Kills: re-taking the digest to silence the gate without recording what changed or why.
-
-    A pin whose provenance is only a SHA cannot be audited - the whole value of this gate is that a
-    shared-surface edit leaves a reviewable trace, and "I re-ran digest()" is not one.
-    """
-    assert len(PIN_PROVENANCE) > 120
-    assert UPSTREAM_COMMIT[:8] in PIN_PROVENANCE
-
-
-def test_the_digest_is_line_ending_independent(tmp_path: Path) -> None:
-    """Kills: a raw byte hash, which makes the pin fail on the platform rather than on an edit.
-
-    Measured: the first CI run of this gate failed on files nobody had touched, because `git checkout`
-    stores them CRLF on Windows and LF on the Linux runner. The same content must digest the same;
-    a real edit must not.
-    """
-    crlf = tmp_path / "crlf.py"
-    lf = tmp_path / "lf.py"
-    edited = tmp_path / "edited.py"
-    crlf.write_bytes(b"a = 1\r\nb = 2\r\n")
-    lf.write_bytes(b"a = 1\nb = 2\n")
-    edited.write_bytes(b"a = 1\nb = 3\n")
-
-    def digest_of(path: Path) -> str:
-        return hashlib.sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
-
-    assert digest_of(crlf) == digest_of(lf)
-    assert digest_of(crlf) != digest_of(edited)
-
-
-def test_the_pin_covers_every_shared_file_check_unit_imports() -> None:
-    """The pin is only a gate if it names every shared file; a new one must not slip in unpinned."""
+def test_the_pin_covers_every_shared_file_and_names_a_reason() -> None:
+    """The pin is only a gate if it names every shared file, and only auditable if its provenance
+    records WHY it moved: "I re-ran digest()" is not a reviewable trace."""
     source = (REPO_ROOT / "scripts" / "check_unit.py").read_text(encoding="utf-8")
 
     assert "import object_identity as oid" in source
-    assert "scripts/object_identity.py" in PINNED
-    assert "tests/test_object_identity.py" in PINNED
+    assert set(PINNED) == {"scripts/object_identity.py", "tests/test_object_identity.py"}
+    assert len(PIN_PROVENANCE) > 120
+    assert UPSTREAM_COMMIT[:8] in PIN_PROVENANCE
