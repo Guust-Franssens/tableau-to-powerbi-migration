@@ -1109,6 +1109,9 @@ def _status_human(result: dict) -> None:
             )
         if observed.get("inventory_scope") is not None:
             rows.append("Inventory scope: " + scalar(observed["inventory_scope"]))
+        denominator = observed.get("scope_denominator")
+        if denominator is not None:
+            rows.append(f"Scope denominator: {scalar(denominator.get('status'))}; {pairs(denominator.get('counts'))}")
         if observed.get("units") or observed.get("inventory_scope") == "established":
             rows.append("Units (ID or -, kind, name, stage, working package):")
         for unit in observed.get("units") or []:
@@ -1164,7 +1167,8 @@ def _status_human(result: dict) -> None:
                 "assessment evidence observed; no migration readiness or handoff was checked."
                 if assessing
                 else f"inventory scope={scalar(observed.get('inventory_scope'))}; "
-                f"{len(observed.get('units', []))} observed units (not the commissioned denominator)."
+                f"{sum(unit.get('stage') != 'not_started' for unit in observed.get('units', []))} observed units "
+                "(not the commissioned denominator)."
             )
             if result.get("run_location") is not None
             else "selected run identity was not established; no accepted run or child location is shown."

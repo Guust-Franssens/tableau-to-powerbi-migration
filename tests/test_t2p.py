@@ -1138,6 +1138,22 @@ def test_status_native_envelopes(monkeypatch, capsys, case, json_mode):
 def test_status_human_preserves_every_observation(monkeypatch, capsys, order):
     """Ordered anonymous units, duplicate occurrences and run-level findings remain independent."""
     observed = _status_observed()
+    observed["units"].append(
+        {
+            "unit": "PRIVATE_PLANNED_CANARY",
+            "kind": "workbook",
+            "scope": "scoped",
+            "generated_working_copy": "missing",
+            "handover": "missing",
+            "occurrences": [],
+            "package": None,
+            "current_certification": "NOT_CHECKED",
+            "id": None,
+            "name": "Planned",
+            "stage": "not_started",
+            "working_package": "not-started",
+        }
+    )
     if order == "units":
         observed["units"].reverse()
         for unit in observed["units"]:
@@ -1155,7 +1171,9 @@ def test_status_human_preserves_every_observation(monkeypatch, capsys, order):
     assert "Now: inventory scope=established; 2 observed units (not the commissioned denominator)." in captured.out
     assert "Units (ID or -, kind, name, stage, working package):" in captured.out
     assert "Recorded allocation status: active (metadata only; not process liveness)" in captured.out
-    assert "Inventory scope: established" in captured.out
+    assert "Inventory scope: established\nScope denominator: established; workbooks=1; required_datasources=1\n" in (
+        captured.out
+    ), "the sealed scope denominator is shown in text, not only in --json"
     assert "Unscoped packages: 1" in captured.out
     assert captured.err == ""
     expected = []

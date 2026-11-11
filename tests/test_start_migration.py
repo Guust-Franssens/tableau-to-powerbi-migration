@@ -827,7 +827,7 @@ def test_site_run_streams_children_allocates_under_toolkit_and_has_honest_handof
     monkeypatch.chdir(unrelated_cwd)
     pipeline = _Pipeline(monkeypatch, tmp_path, capsys)
 
-    code = frontdoor.main([])
+    code = frontdoor.main(["--storage-decision", "policy.json"])
 
     out, err = _captured(capsys, pipeline)
     run = work_dirs.runs_root(pipeline.root) / "001-site"
@@ -862,7 +862,11 @@ def test_site_run_streams_children_allocates_under_toolkit_and_has_honest_handof
     assert manifest["assessment_scope"] == "site"
     assert manifest["attribution"] == {"driver": "operator"}
     default_env = frontdoor.build_parser().parse_args([]).env.expanduser().resolve()
-    assert manifest.get("front_door") == {"env": str(default_env), "storage_decision": None}
+    # The engine child runs at the toolkit root, so a relative policy is recorded there, not at the caller cwd.
+    assert manifest.get("front_door") == {
+        "env": str(default_env),
+        "storage_decision": str((pipeline.root / "policy.json").resolve()),
+    }
     assert "stages" not in manifest and "preparation" not in manifest
     assert "BUNDLE + REFERENCES CAPTURED" in out
     assert f"BUNDLE {run / 'bundle'} (present)" in out

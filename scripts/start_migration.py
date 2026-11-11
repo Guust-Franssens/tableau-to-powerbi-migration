@@ -751,7 +751,10 @@ def main(
         "attribution": attribution,
         "front_door": {
             "env": str(env_path),
-            "storage_decision": str(args.storage_decision.expanduser().resolve()) if args.storage_decision else None,
+            # The engine child runs with cwd=REPO_ROOT, so a relative policy resolves there.
+            "storage_decision": (
+                str((REPO_ROOT / args.storage_decision.expanduser()).resolve()) if args.storage_decision else None
+            ),
         },
     }
     if assessing:
