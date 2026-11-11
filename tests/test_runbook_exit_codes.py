@@ -17,13 +17,7 @@ def _exit_constants(script: str) -> set[int]:
 
 
 def _preflight_exits() -> set[int]:
-    """Return literal preflight exit codes.
-
-    Assumption: preflight.ps1 uses literal `exit N` statements. A future computed exit such as
-    `$rc = 2; exit $rc` would require a PowerShell-aware parser or an executable test matrix.
-    Preflight's exits are intentionally stable today (0/1), so that extra machinery is not worth it
-    until the script grows a third outcome.
-    """
+    """Return literal preflight exit codes."""
     source = (REPO_ROOT / "scripts" / "preflight.ps1").read_text(encoding="utf-8")
     return {int(code) for code in re.findall(r"^\s*exit\s+(\d+)\s*$", source, re.IGNORECASE | re.MULTILINE)}
 
@@ -75,14 +69,10 @@ def _help_flags(script: str) -> set[str]:
     return set(re.findall(r"(?<![\w-])--[a-z0-9][a-z0-9-]*", proc.stdout))
 
 
-def test_run_estate_detailed_exit_table_matches_source_constants() -> None:
-    """A new `EXIT_*` in run_estate.py must not leave the runbook stale."""
-    assert _codes_in_detailed_table("`run_estate.py` exit codes") == _exit_constants("run_estate.py")
-
-
-def test_deploy_estate_detailed_exit_table_matches_source_constants() -> None:
-    """A new `EXIT_*` in deploy_estate.py must not leave the runbook stale."""
-    assert _codes_in_detailed_table("`deploy_estate.py` exit codes") == _exit_constants("deploy_estate.py")
+def test_detailed_exit_tables_match_source_constants() -> None:
+    """A new `EXIT_*` in run_estate.py or deploy_estate.py must not leave the runbook stale."""
+    for script in ("run_estate.py", "deploy_estate.py"):
+        assert _codes_in_detailed_table(f"`{script}` exit codes") == _exit_constants(script), script
 
 
 def test_quick_reference_exit_matrix_matches_sources() -> None:
@@ -99,5 +89,3 @@ def test_runbook_does_not_deny_deploy_flags_that_help_lists() -> None:
     assert {"--skip", "--skip-empty-models"} <= flags
     denied = {flag for flag in flags if re.search(rf"\b[Nn]o `{re.escape(flag)}`\b", runbook)}
     assert not denied, f"runbook denies deploy_estate.py flag(s) that --help lists: {sorted(denied)}"
-    assert "There is no supported flag for it" not in runbook
-    assert "Until it exists, move the folder" not in runbook

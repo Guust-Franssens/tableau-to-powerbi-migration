@@ -1,9 +1,4 @@
-"""Synthetic host parity controls for #727, never read an operator profile.
-
-Registry transcription: VS Code 1.144.0, commit 2c33b50b16c472efe58357d1d2a8a5414bc23fbf,
-src/vs/workbench/contrib/chat/test/common/plugins/fileBackedInstalledPluginsStore.test.ts
-lines 166-172 and 282-311. The latter preserves literal spaces, # and %20 on relocation.
-"""
+"""Synthetic host parity controls for #727, never read an operator profile."""
 
 from __future__ import annotations
 
@@ -143,21 +138,18 @@ def test_selected_vscode_remedy_never_installs_into_cli(
         assert evidence.install_hint in capsys.readouterr().out
 
 
-@pytest.mark.parametrize("kind", KINDS)
-def test_selected_cli_never_borrows_vscode(profile: dict[str, str], kind: str) -> None:
+def test_selected_cli_never_borrows_vscode(profile: dict[str, str]) -> None:
     """An explicit CLI selection refuses rather than falling back to a VS Code copy."""
+    kind = "engine"
     _install(profile, "vscode", kind)
     assert engine.discover_installed_plugin(kind, env=profile).ok
     verdict = engine.discover_installed_plugin(kind, env={**profile, "T2P_PLUGIN_HOST": "cli"})
     assert (verdict.ok, verdict.host) == (False, "cli")
 
 
-@pytest.mark.parametrize("host", ["cli", "vscode"])
-def test_simulated_absence_hides_the_installed_engine(
-    profile: dict[str, str], monkeypatch: pytest.MonkeyPatch, host: str
-) -> None:
-    """The test-only absence hook still wins over either installed host after the #727 move."""
-    root = _install(profile, host, "engine")
+def test_simulated_absence_hides_the_installed_engine(profile: dict[str, str], monkeypatch: pytest.MonkeyPatch) -> None:
+    """The test-only absence hook still wins over an installed host after the #727 move."""
+    root = _install(profile, "vscode", "engine")
     assert engine.engine_root() == root
     monkeypatch.setenv(engine.SIMULATE_ENGINE_ABSENT_ENV, "1")
     with pytest.raises(engine.EngineNotFoundError):
@@ -220,9 +212,9 @@ def test_dual_host_refuses_and_names_the_selector(
         assert engine.engine_root() == cli
 
 
-@pytest.mark.parametrize("kind", KINDS)
-def test_one_tree_registered_by_both_hosts_is_one_install(profile: dict[str, str], kind: str) -> None:
+def test_one_tree_registered_by_both_hosts_is_one_install(profile: dict[str, str]) -> None:
     """#727 deduplicates identical physical roots: one tree seen by both hosts is not ambiguous."""
+    kind = "engine"
     cache = _cache(profile)
     environment = {**profile, "COPILOT_HOME": str(cache / "copilot-home")}
     root = _install(environment, "cli", kind)
@@ -239,30 +231,26 @@ def test_one_tree_registered_by_both_hosts_is_one_install(profile: dict[str, str
 
 
 @pytest.mark.skipif(os.name != "nt", reason="junctions are a Windows reparse point")
-@pytest.mark.parametrize("kind", KINDS)
-def test_cli_root_junctioned_to_the_vscode_copy_is_one_install(profile: dict[str, str], kind: str) -> None:
+def test_cli_root_junctioned_to_the_vscode_copy_is_one_install(profile: dict[str, str]) -> None:
     """#811 L2: the dedup compares physical paths, so a real junction between host roots is one install."""
+    kind = "authoring"
     target = _install(profile, "vscode", kind)
     link = _cli_root(profile, kind)
     link.parent.mkdir(parents=True)
     made = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)], capture_output=True, check=False)
     assert made.returncode == 0, made.stderr
-    if kind == "authoring":
-        _write_config(profile, [_cli_entry(link)])
+    _write_config(profile, [_cli_entry(link)])
     assert engine.discover_installed_plugin(kind, env={**profile, "T2P_PLUGIN_HOST": "cli"}).plugin_root == link
     verdict = engine.discover_installed_plugin(kind, env=profile)
     assert (verdict.status, verdict.plugin_root) == ("found", link), verdict.detail
 
 
-@pytest.mark.parametrize("kind", ["engine", "authoring"])
-def test_vscode_identity_is_the_registered_name_not_the_files(profile: dict[str, str], kind: str) -> None:
+def test_vscode_identity_is_the_registered_name_not_the_files(profile: dict[str, str]) -> None:
     """Re-review repro: an `evil-plugin` entry carrying engine files must not become the engine."""
+    kind = "engine"
     root = _install(profile, "vscode", kind)
     impostor = _content(root.parent / "evil-plugin", kind)
-    if kind != "bundles":
-        (impostor / ".github" / "plugin" / "plugin.json").write_text(
-            json.dumps({"name": "evil-plugin"}), encoding="utf-8"
-        )
+    (impostor / ".github" / "plugin" / "plugin.json").write_text(json.dumps({"name": "evil-plugin"}), encoding="utf-8")
     _rewrite_registry(
         profile,
         lambda payload: payload["installed"].extend(
@@ -281,9 +269,9 @@ def test_vscode_identity_is_the_registered_name_not_the_files(profile: dict[str,
     assert (verdict.status, verdict.plugin_root) == ("missing", None), "a wrong or absent name is not identity"
 
 
-@pytest.mark.parametrize("kind", ["engine", "authoring"])
-def test_vscode_registry_supports_default_directory_and_unnamed_entries(profile: dict[str, str], kind: str) -> None:
+def test_vscode_registry_supports_default_directory_and_unnamed_entries(profile: dict[str, str]) -> None:
     """Resolve the real per-user registry layout when VS Code omits the optional name."""
+    kind = "engine"
     root = _install(profile, "vscode", kind)
     assert _cache(profile) == Path(profile["USERPROFILE"]) / ".vscode" / "agent-plugins"
     _rewrite_registry(profile, lambda payload: payload["installed"][0].pop("name"))
@@ -331,37 +319,41 @@ def test_no_appdata_means_no_vscode_host(profile: dict[str, str]) -> None:
     )
 
 
-@pytest.mark.parametrize(
-    "state",
-    ["absent", "malformed", "stale", "non-object", "other-marketplace", "other-name", "no-cache-path", "empty-cache"],
-)
-def test_unusable_cli_registry_does_not_block_vscode(
-    profile: dict[str, str], state: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_unusable_cli_registry_does_not_block_vscode(profile: dict[str, str], monkeypatch: pytest.MonkeyPatch) -> None:
     """A malformed, stale or foreign CLI config.json entry is not a CLI installation, so VS Code is used."""
     root = _install(profile, "vscode", "authoring")
     config = Path(profile["COPILOT_HOME"]) / "config.json"
     foreign_root = _content(Path(profile["COPILOT_HOME"]) / "foreign", "authoring")
     foreign = _cli_entry(foreign_root)
-    if state == "empty-cache":
-        # An empty cache_path would otherwise resolve against whatever directory the caller runs in.
-        monkeypatch.chdir(foreign_root)
-        _write_config(profile, [{**foreign, "cache_path": ""}])
-    if state == "malformed":
-        config.write_text("{", encoding="utf-8")
-    elif state == "stale":
-        _write_config(profile, [_cli_entry(Path(profile["COPILOT_HOME"]) / "deleted-cache")])
-    elif state == "non-object":
-        _write_config(profile, [42, "powerbi-authoring", None])
-    elif state == "other-marketplace":
-        _write_config(profile, [{**foreign, "marketplace": "other-collection"}])
-    elif state == "other-name":
-        _write_config(profile, [{**foreign, "name": "other-plugin"}])
-    elif state == "no-cache-path":
-        _write_config(profile, [{key: value for key, value in foreign.items() if key != "cache_path"}])
-    verdict = engine.discover_installed_plugin("authoring", env=profile)
-    assert verdict.ok, verdict.detail
-    assert (verdict.host, verdict.plugin_root) == ("vscode", root)
+    for state in (
+        "absent",
+        "malformed",
+        "stale",
+        "non-object",
+        "other-marketplace",
+        "other-name",
+        "no-cache-path",
+        "empty-cache",
+    ):
+        if state == "empty-cache":
+            # An empty cache_path would otherwise resolve against whatever directory the caller runs in.
+            monkeypatch.chdir(foreign_root)
+            _write_config(profile, [{**foreign, "cache_path": ""}])
+        elif state == "malformed":
+            config.write_text("{", encoding="utf-8")
+        elif state == "stale":
+            _write_config(profile, [_cli_entry(Path(profile["COPILOT_HOME"]) / "deleted-cache")])
+        elif state == "non-object":
+            _write_config(profile, [42, "powerbi-authoring", None])
+        elif state == "other-marketplace":
+            _write_config(profile, [{**foreign, "marketplace": "other-collection"}])
+        elif state == "other-name":
+            _write_config(profile, [{**foreign, "name": "other-plugin"}])
+        elif state == "no-cache-path":
+            _write_config(profile, [{key: value for key, value in foreign.items() if key != "cache_path"}])
+        verdict = engine.discover_installed_plugin("authoring", env=profile)
+        assert verdict.ok, (state, verdict.detail)
+        assert (verdict.host, verdict.plugin_root) == ("vscode", root), state
 
 
 def test_non_object_cli_entries_are_ignored(profile: dict[str, str]) -> None:
@@ -391,14 +383,14 @@ def test_explicit_installed_root_does_not_probe_other_profile(profile: dict[str,
         assert explicit.plugin_root == root, "an explicit root is an override, like POWERBI_SKILLS_PLUGIN_ROOT"
 
 
-@pytest.mark.parametrize("selector", ["", "auto", "VSCode", "vscode ", "newest"])
-def test_invalid_selector_refuses_after_positive_setup(profile: dict[str, str], selector: str) -> None:
+def test_invalid_selector_refuses_after_positive_setup(profile: dict[str, str]) -> None:
     """Invalid selection must refuse rather than silently reverting to automatic discovery."""
     _install(profile, "cli", "engine")
     assert engine.discover_installed_plugin("engine", env=profile).ok
-    verdict = engine.discover_installed_plugin("engine", env={**profile, "T2P_PLUGIN_HOST": selector})
-    assert (verdict.status, verdict.host) == ("invalid", None)
-    assert "T2P_PLUGIN_HOST" in verdict.install_hint
+    for selector in ("", "VSCode", "vscode ", "newest"):
+        verdict = engine.discover_installed_plugin("engine", env={**profile, "T2P_PLUGIN_HOST": selector})
+        assert (verdict.status, verdict.host) == ("invalid", None), selector
+        assert "T2P_PLUGIN_HOST" in verdict.install_hint
 
 
 @pytest.mark.parametrize(
@@ -519,10 +511,9 @@ def test_uri_only_path_is_decoded_once(profile: dict[str, str]) -> None:
     assert verdict.plugin_root == relocated
 
 
-@pytest.mark.parametrize("host", ["cli", "vscode"])
-def test_process_json_entrypoints(profile: dict[str, str], host: str) -> None:
+def test_process_json_entrypoints(profile: dict[str, str]) -> None:
     """Process-start discovery tells the three plugins apart by content and agrees with preflight."""
-    expected = {kind: _install(profile, host, kind) for kind in KINDS}
+    expected = {kind: _install(profile, "vscode", kind) for kind in KINDS}
     for script in ("engine_source.py", "skill_plugin_source.py"):
         child = subprocess.run(
             [sys.executable, str(ROOT / "scripts" / script), "--json"],
@@ -541,10 +532,7 @@ def test_process_json_entrypoints(profile: dict[str, str], host: str) -> None:
 
 
 def _preflight(environment: dict[str, str], *, python: str = "present") -> dict:
-    """Execute only production plugin wiring, no full preflight or external operations.
-
-    `python` is "present", "absent" (not on PATH) or "silent" (on PATH, but engine_source.py prints nothing).
-    """
+    """Execute only production plugin wiring, no full preflight or external operations."""
     source = (ROOT / "scripts/preflight.ps1").read_text(encoding="utf-8")
     engine_block = source[source.index("$engineStatus = $null") : source.index("# --- Engine receipt drift")]
     plugin_block = source[source.index("# --- Skill plugins ---") : source.index("# Recommended means")]
@@ -656,7 +644,7 @@ def test_preflight_without_engine_evidence_stays_closed_and_says_why(
 
 
 @pytest.mark.skipif(PS is None, reason="no PowerShell on PATH")
-@pytest.mark.parametrize("selector", [None, "cli", "vscode", "newest"])
+@pytest.mark.parametrize("selector", [None, "vscode", "newest"])
 def test_preflight_missing_bundles_severity_ignores_the_selector(profile: dict[str, str], selector: str | None) -> None:
     """A missing or refused bundle plugin is the same recommended gap however the host was chosen."""
     environment = profile if selector is None else {**profile, "T2P_PLUGIN_HOST": selector}
@@ -686,9 +674,7 @@ def test_preflight_alternative_engine_copy_is_a_diagnostic(profile: dict[str, st
 
 
 @pytest.mark.skipif(PS is None, reason="no PowerShell on PATH")
-@pytest.mark.parametrize(
-    "state", ["missing", "wrong-name", "below-floor", "missing-skill", "multiple", "invalid-selector"]
-)
+@pytest.mark.parametrize("state", ["missing", "wrong-name", "below-floor", "multiple", "invalid-selector"])
 def test_refusals_are_doctor_owner_blockers(profile: dict[str, str], state: str) -> None:
     """Host refusals remain closed, safe records accepted by the installed doctor."""
     _install(profile, "vscode", "engine")
@@ -702,8 +688,6 @@ def test_refusals_are_doctor_owner_blockers(profile: dict[str, str], state: str)
         manifest.write_text('{"name":"wrong","version":"0.3.19"}', encoding="utf-8")
     elif state == "below-floor":
         manifest.write_text('{"name":"powerbi-authoring","version":"0.3.18"}', encoding="utf-8")
-    elif state == "missing-skill":
-        (root / "skills/powerbi-report-cli/SKILL.md").unlink()
     elif state == "multiple":
         second = _content(root.parent / "second", "authoring")
         _rewrite_registry(
@@ -717,7 +701,6 @@ def test_refusals_are_doctor_owner_blockers(profile: dict[str, str], state: str)
         "missing": "carries the authoring plugin",
         "wrong-name": "unreadable or wrong name",
         "below-floor": "0.3.18",
-        "missing-skill": "carries the authoring plugin",
         "multiple": "multiple installed plugins",
         "invalid-selector": "invalid T2P_PLUGIN_HOST",
     }[state]

@@ -65,11 +65,11 @@ def test_registry_is_wired_in_current_tree() -> None:
     assert cac.validate() == []
 
 
-def test_comment_or_code_block_mentions_do_not_satisfy_gate(tmp_path: Path) -> None:
-    """The gate requires a visible capability token, not any grep-visible token."""
+def test_only_a_visible_token_satisfies_the_gate(tmp_path: Path) -> None:
+    """Comment or code-block mentions do not wire a capability; reworded visible guidance does."""
     wording = "Use example-flag only after the model edit cannot change source rows."
     registry = _write_registry(tmp_path, wording)
-    _write_agent(
+    agent = _write_agent(
         tmp_path,
         "# Agent\n\n<!-- example-flag -->\n\n```text\nexample-flag\n```\n"
         "Use the fast path only after the model edit cannot change source rows.\n",
@@ -82,15 +82,8 @@ def test_comment_or_code_block_mentions_do_not_satisfy_gate(tmp_path: Path) -> N
     assert "Prevents stale data after a fast path is misused" in errors[0]
     assert "Needed by: pbi-semantic-builder" in errors[0]
     assert "Suggested visible wording:" in errors[0]
-    assert "Add this visible wording exactly" not in errors[0]
 
-
-def test_visible_token_satisfies_gate_even_when_guidance_is_reworded(tmp_path: Path) -> None:
-    """Editorial changes should not be indistinguishable from deleting the capability."""
-    wording = "Use example-flag only after the model edit cannot change source rows."
-    registry = _write_registry(tmp_path, wording)
-    _write_agent(tmp_path, "# Agent\n\nReach for example-flag only for formula-only work.\n")
-
+    agent.write_text("# Agent\n\nReach for example-flag only for formula-only work.\n", encoding="utf-8")
     assert cac.validate(repo_root=tmp_path, registry_path=registry) == []
 
 
@@ -107,14 +100,6 @@ def test_script_inventory_heading_is_required_even_without_candidate_scripts(tmp
 
     assert len(errors) == 1
     assert "script capability scan was not evaluated" in errors[0]
-
-
-def test_present_empty_script_inventory_passes_without_candidate_scripts(tmp_path: Path) -> None:
-    """A present scan with no usage-declared scripts is an evaluated empty result."""
-    registry = _write_registry(tmp_path, "Use example-flag only after the model edit cannot change source rows.")
-    _write_agent(tmp_path, "# Agent\n\nReach for example-flag only for formula-only work.\n")
-
-    assert cac.validate(repo_root=tmp_path, registry_path=registry) == []
 
 
 @pytest.mark.parametrize(

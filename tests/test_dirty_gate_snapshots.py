@@ -1,9 +1,4 @@
-"""Golden-output tests for the committed dirty gate fixture.
-
-These snapshots only prove that gate stdout did not change. They pass happily on output that is
-verbose, confusing, or otherwise unhelpful. The harness makes drift visible in code review; judging
-whether the output is good remains a review job.
-"""
+"""Golden-output tests for the committed dirty gate fixture."""
 
 from __future__ import annotations
 

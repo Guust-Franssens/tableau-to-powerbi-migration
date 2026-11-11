@@ -1,11 +1,4 @@
-"""The conversion engine has ONE source: the installed plugin. These tests are issue #107's fix.
-
-The defect was never "the code picked the wrong tree". It was that picking a tree at all was SILENT:
-three modules each carried their own candidate list, the machine had two engines installed at
-different versions, and a bundle could not say which one built it. So every test here asserts a
-FAILURE mode - that the resolver refuses rather than substitutes - because a resolver that falls back
-passes any test written about its happy path.
-"""
+"""The conversion engine has ONE source: the installed plugin (#107)."""
 
 from __future__ import annotations
 
@@ -95,105 +88,45 @@ print(json.dumps({
         assert verdict["error"] is None
 
 
-# ---------------------------------------------------------------------------
-# No fallback. This is the whole point.
-# ---------------------------------------------------------------------------
-
-
-def test_a_missing_plugin_raises_instead_of_finding_another_copy(tmp_path: Path, monkeypatch) -> None:
-    """The failure that mattered: a sibling clone standing in for an absent plugin, silently.
-
-    A second tree exists here and is even on the alternatives list, so any fallback logic would find
-    it. The resolver must still refuse.
-    """
+def test_a_missing_plugin_raises_and_names_the_fix(tmp_path: Path, monkeypatch) -> None:
+    """A sibling tree on the alternatives list must never stand in for an absent plugin."""
     sibling = _make_engine_tree(tmp_path / "sibling")
     monkeypatch.setattr(engine_source, "PLUGIN_ENGINE_ROOT", tmp_path / "not-installed")
     monkeypatch.setattr(engine_source, "ALTERNATIVE_ENGINE_ROOTS", (sibling,))
 
-    with pytest.raises(engine_source.EngineNotFoundError):
-        engine_source.engine_root()
-    with pytest.raises(engine_source.EngineNotFoundError):
-        engine_source.engine_scripts_dir()
-
-
-def test_the_error_names_the_path_and_the_install_command(tmp_path: Path, monkeypatch) -> None:
-    """An unactionable failure gets worked around; this one has to say what to run."""
-    monkeypatch.setattr(engine_source, "PLUGIN_ENGINE_ROOT", tmp_path / "not-installed")
     with pytest.raises(engine_source.EngineNotFoundError) as caught:
         engine_source.engine_root()
     message = str(caught.value)
     assert str(tmp_path / "not-installed") in message
     assert "copilot plugin install tableau-fabric-skills@tableau-collection" in message
+    with pytest.raises(engine_source.EngineNotFoundError):
+        engine_source.engine_scripts_dir()
 
 
-def test_the_plugin_resolves_when_it_is_installed(tmp_path: Path, monkeypatch) -> None:
+def test_the_plugin_resolves_and_a_clean_machine_reports_ok(tmp_path: Path, monkeypatch) -> None:
     plugin = _make_engine_tree(tmp_path / "plugin", version="2.126.0")
     monkeypatch.setattr(engine_source, "PLUGIN_ENGINE_ROOT", plugin)
+    monkeypatch.setattr(engine_source, "ALTERNATIVE_ENGINE_ROOTS", (tmp_path / "absent",))
     assert engine_source.engine_root() == plugin
     assert engine_source.engine_scripts_dir() == plugin / engine_source.ENGINE_SKILL / "scripts"
-    assert engine_source.engine_version() == "2.126.0"
+    verdict = engine_source.status()
+    assert (verdict["ok"], verdict["alternatives"], verdict["version"]) == (True, [], "2.126.0")
 
 
-# ---------------------------------------------------------------------------
-# A second tree stays VISIBLE as a diagnostic (#727), never selected
-# ---------------------------------------------------------------------------
-
-
-def test_an_alternative_tree_is_reported(tmp_path: Path, monkeypatch) -> None:
+def test_only_a_real_second_tree_is_reported_and_never_selected(tmp_path: Path, monkeypatch) -> None:
+    """#727: a sibling engine is advisory; the plugin itself and an empty decoy folder are not alternatives."""
     plugin = _make_engine_tree(tmp_path / "plugin", version="2.126.0")
     sibling = _make_engine_tree(tmp_path / "sibling", version="2.113.0")
+    decoy = tmp_path / "tableau-fabric-skills"
+    decoy.mkdir()
     monkeypatch.setattr(engine_source, "PLUGIN_ENGINE_ROOT", plugin)
-    monkeypatch.setattr(engine_source, "ALTERNATIVE_ENGINE_ROOTS", (sibling,))
+    monkeypatch.setattr(engine_source, "ALTERNATIVE_ENGINE_ROOTS", (plugin, decoy, sibling))
 
     assert engine_source.alternative_engine_roots() == [sibling]
     verdict = engine_source.status()
     assert verdict["alternatives"] == [str(sibling)]
-    assert verdict["root"] == str(plugin), "the alternative is reported, never selected"
-    assert verdict["ok"] is True, "#727: nonselected sibling checkouts are advisory, not deletions"
-
-
-def test_a_clean_machine_reports_ok(tmp_path: Path, monkeypatch) -> None:
-    plugin = _make_engine_tree(tmp_path / "plugin")
-    monkeypatch.setattr(engine_source, "PLUGIN_ENGINE_ROOT", plugin)
-    monkeypatch.setattr(engine_source, "ALTERNATIVE_ENGINE_ROOTS", (tmp_path / "absent",))
-
-    verdict = engine_source.status()
+    assert verdict["root"] == str(plugin)
     assert verdict["ok"] is True
-    assert verdict["alternatives"] == []
-    assert verdict["version"] == "2.126.0"
-
-
-def test_the_plugin_is_never_reported_as_its_own_alternative(tmp_path: Path, monkeypatch) -> None:
-    """A candidate path that happens to BE the plugin (symlink, duplicate entry) is not a second copy."""
-    plugin = _make_engine_tree(tmp_path / "plugin")
-    monkeypatch.setattr(engine_source, "PLUGIN_ENGINE_ROOT", plugin)
-    monkeypatch.setattr(engine_source, "ALTERNATIVE_ENGINE_ROOTS", (plugin,))
-    assert engine_source.alternative_engine_roots() == []
-
-
-def test_an_empty_directory_is_not_an_engine(tmp_path: Path, monkeypatch) -> None:
-    """`is_engine_tree` keys on the engine skill, not on the folder name."""
-    decoy = tmp_path / "tableau-fabric-skills"
-    decoy.mkdir()
-    monkeypatch.setattr(engine_source, "ALTERNATIVE_ENGINE_ROOTS", (decoy,))
-    assert engine_source.alternative_engine_roots() == []
-
-
-def test_the_shipped_alternative_list_covers_the_trees_this_project_used() -> None:
-    """The list is only as good as what is on it - an unlisted tree is one preflight cannot block.
-
-    These two are the locations that actually held a second engine on a real machine: the sibling
-    clone beside the repo, and `~/vscode-projects/tableau-fabric-skills`, which was `run_estate.py`'s
-    argparse default and therefore the tree the whole estate ran on.
-    """
-    listed = {str(path).lower() for path in engine_source.ALTERNATIVE_ENGINE_ROOTS}
-    assert str(engine_source.REPO_ROOT.parent / "tableau-fabric-skills").lower() in listed
-    assert str(Path.home() / "vscode-projects" / "tableau-fabric-skills").lower() in listed
-
-
-# ---------------------------------------------------------------------------
-# An override must be deliberate, and it must be recorded
-# ---------------------------------------------------------------------------
 
 
 def test_a_noncanonical_engine_is_refused_by_default(tmp_path: Path, monkeypatch) -> None:
@@ -207,7 +140,7 @@ def test_a_noncanonical_engine_is_refused_by_default(tmp_path: Path, monkeypatch
     assert engine_source.resolve_engine(None) == plugin
 
 
-def test_provenance_marks_an_override_as_noncanonical(tmp_path: Path, monkeypatch) -> None:
+def test_provenance_marks_overrides_and_absence(tmp_path: Path, monkeypatch) -> None:
     plugin = _make_engine_tree(tmp_path / "plugin", version="2.126.0")
     other = _make_engine_tree(tmp_path / "other", version="2.113.0")
     monkeypatch.setattr(engine_source, "PLUGIN_ENGINE_ROOT", plugin)
@@ -220,45 +153,17 @@ def test_provenance_marks_an_override_as_noncanonical(tmp_path: Path, monkeypatc
         "plugin_root": str(plugin),
     }
     override = engine_source.engine_provenance(other)
-    assert override["canonical"] is False
-    assert override["source"] == "override"
-    assert override["version"] == "2.113.0"
+    assert (override["canonical"], override["source"], override["version"]) == (False, "override", "2.113.0")
 
-
-def test_provenance_records_the_absence_rather_than_omitting_it(tmp_path: Path, monkeypatch) -> None:
-    """A bundle built with no resolvable engine must still say so - never a missing key."""
     monkeypatch.setattr(engine_source, "PLUGIN_ENGINE_ROOT", tmp_path / "gone")
-    provenance = engine_source.engine_provenance()
-    assert provenance["source"] == "unresolved"
-    assert provenance["version"] is None
-    assert provenance["canonical"] is False
+    absent = engine_source.engine_provenance()
+    assert (absent["source"], absent["version"], absent["canonical"]) == ("unresolved", None, False)
 
 
-# ---------------------------------------------------------------------------
-# The bundle answers "what built me?" on its own
-# ---------------------------------------------------------------------------
-
-
-def test_the_receipt_records_the_engine_path_and_version(tmp_path: Path, monkeypatch) -> None:
-    """The acceptance criterion of #107, verbatim: traceable without asking the machine."""
-    plugin = _make_engine_tree(tmp_path / "plugin", version="2.126.0")
-    monkeypatch.setattr(engine_source, "PLUGIN_ENGINE_ROOT", plugin)
-
-    bundle = tmp_path / "bundle"
-    bundle.mkdir()
-    (bundle / "report.json").write_text("{}", encoding="utf-8")
-    receipt = json.loads(migration_bundle.write_engine_receipt(bundle, plugin).read_text(encoding="utf-8"))
-
-    assert receipt["engine"]["version"] == "2.126.0"
-    assert receipt["engine"]["root"] == str(plugin)
-    assert receipt["engine"]["canonical"] is True
-
-
-def test_the_receipt_still_matches_its_bundle(tmp_path: Path, monkeypatch) -> None:
-    """Adding a key must not break the receipt matcher that verifies a bundle against this file."""
+def test_the_receipt_records_the_engine_and_still_matches_its_bundle(tmp_path: Path, monkeypatch) -> None:
     from migration_bundle import _receipt_matches_bundle  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
 
-    plugin = _make_engine_tree(tmp_path / "plugin")
+    plugin = _make_engine_tree(tmp_path / "plugin", version="2.126.0")
     monkeypatch.setattr(engine_source, "PLUGIN_ENGINE_ROOT", plugin)
 
     bundle = tmp_path / "bundle"
@@ -267,32 +172,22 @@ def test_the_receipt_still_matches_its_bundle(tmp_path: Path, monkeypatch) -> No
     (bundle / "input_manifest.json").write_text('{"inputs": []}', encoding="utf-8")
     receipt = json.loads(migration_bundle.write_engine_receipt(bundle, plugin).read_text(encoding="utf-8"))
 
+    assert receipt["engine"]["version"] == "2.126.0"
+    assert receipt["engine"]["root"] == str(plugin)
+    assert receipt["engine"]["canonical"] is True
     assert _receipt_matches_bundle(bundle, receipt)
 
 
-# ---------------------------------------------------------------------------
-# Every caller uses the one resolver
-# ---------------------------------------------------------------------------
+def test_no_script_carries_its_own_engine_path() -> None:
+    """A second hard-coded path is a second resolution order - exactly what #107 was."""
+    for script in ("harvest_estate_assets.py", "run_estate.py", "dax_oracle_server.py", "transpile_tableau_calc.py"):
+        text = (REPO_ROOT / "scripts" / script).read_text(encoding="utf-8")
+        assert "installed-plugins" not in text, f"{script} hard-codes a plugin path; use engine_source"
+        assert "vscode-projects" not in text, f"{script} hard-codes a clone path; use engine_source"
+        assert "engine_source" in text, f"{script} must resolve the engine through engine_source"
 
 
-@pytest.mark.parametrize(
-    "script",
-    ["harvest_estate_assets.py", "run_estate.py", "dax_oracle_server.py", "transpile_tableau_calc.py"],
-)
-def test_no_script_carries_its_own_engine_path(script: str) -> None:
-    """A second hard-coded path is a second resolution order - exactly what #107 was.
-
-    Matching on the literal plugin/clone path fragments is the point: they are what each of these
-    four files used to contain, and re-introducing one is how the divergence would come back.
-    """
-    text = (REPO_ROOT / "scripts" / script).read_text(encoding="utf-8")
-    assert "installed-plugins" not in text, f"{script} hard-codes a plugin path; use engine_source"
-    assert "vscode-projects" not in text, f"{script} hard-codes a clone path; use engine_source"
-    assert "engine_source" in text, f"{script} must resolve the engine through engine_source"
-
-
-def test_the_cli_exits_nonzero_when_the_engine_is_not_the_only_one(tmp_path: Path) -> None:
-    """preflight reads this exit code path indirectly; a vacuous zero would make the gate useless."""
+def test_the_cli_exits_nonzero_when_the_engine_is_not_the_only_one() -> None:
     proc = subprocess.run(
         [sys.executable, str(REPO_ROOT / "scripts" / "engine_source.py"), "--json"],
         capture_output=True,

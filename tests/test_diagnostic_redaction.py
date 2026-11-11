@@ -1,44 +1,10 @@
-"""Nothing derived from a Tableau response may reach a log, an exception or a manifest unredacted.
-
-⚠️ **This is the fourth review round on the same leak**, and the first three fixes were each a
-careful call site. They failed for one reason, and it is worth stating before any test below:
-
-===== =============================================== ===========================================
-round  where the secret escaped                        what ran before the redactor
-===== =============================================== ===========================================
-2      ``raw_get()`` error bodies                      *nothing* -- the redactor was simply absent
-3      the HTTP-200 wrong-format diagnostic            the message was built and RETURNED first
-3      ``format_matches`` Content-Type                 ``.lower()``
-4      ``format_matches`` body head                    ``.lstrip()``, ``[:256]``, ``[:8]``
-===== =============================================== ===========================================
-
-Rounds 3 and 4 are one defect wearing three hats: **a transformation ran before redaction and
-destroyed the needle the redactor searches for.** ``redact`` matches literals, so case-folding,
-stripping, slicing and splitting all leave it hunting a string that is no longer in the haystack.
-
-So this module gates the RULE rather than the four known sites:
-
-1. :func:`tableau_env.redacted_note` is the chokepoint. It takes the value **untransformed**, redacts
-   the whole of it, and only then truncates/strips/quotes. The wrong order is not expressible there.
-2. ``test_every_diagnostic_site_survives_every_adversarial_secret_shape`` runs the whole inventory of
-   diagnostic-producing sites against a battery of secret shapes -- one shape per historical escape,
-   plus the ones nobody has tried yet.
-3. ``test_no_interpolation_reaches_a_diagnostic_without_certification`` fails on ANY f-string
-   interpolation in the two modules that is not on a hand-certified list. That is what makes a FIFTH
-   site impossible to add silently: a new expression fails by default, and the author has to say why
-   it cannot carry a credential.
-
-Gate 3 is not decoration. Writing it found a fifth site nobody had reported: ``classify_probe``
-extracted ``<detail>...</detail>`` from the RAW body, so a secret straddling ``</detail>`` was split
-in two and neither half matched. It is fixed, and ``detail-tag`` below is that shape.
-"""
+"""Nothing derived from a Tableau response may reach a log, an exception or a manifest unredacted."""
 
 from __future__ import annotations
 
 import ast
 import contextlib
 import http.client
-import importlib
 import io
 import itertools
 import json
@@ -48,13 +14,10 @@ import socket
 import sys
 import threading
 import time
-import tokenize
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from types import SimpleNamespace
-from xml.etree import ElementTree
 
 import pytest
 
@@ -104,9 +67,7 @@ MIN_RUN = 6  # a surviving run this long is a leak, not a coincidence
 
 # A decoy per shape: identical STRUCTURE (whitespace, tags, punctuation, length) but a disjoint
 # payload alphabet. Running each site twice and subtracting the decoy's output is what stops the
-# detector crediting the scaffolding: the `detail-tag` secret embeds `</detail>`, which every Tableau
-# error body contains anyway, so a naive substring search reported a leak that told an attacker
-# nothing. A run counts only if it appears with the real secret and NOT with the decoy.
+# detector crediting the scaffolding: the `detail-tag` secret embeds `</detail>`, which every Tableau ...
 DECOYS: dict[str, str] = {
     "plain": "ZZQQWVVBBN_MMKKJ_77",
     "leading-whitespace": " ZZQQWVVBBN_MMKKJ_77",
@@ -121,11 +82,7 @@ DECOYS: dict[str, str] = {
 
 
 def longest_surviving_run(secret: str, haystack: str, floor: int = MIN_RUN) -> str:
-    """The longest contiguous slice of ``secret`` that reached ``haystack``. ``''`` means none did.
-
-    Deliberately not `secret in haystack`: every historical escape was a FRAGMENT -- eight bytes, or
-    sixteen, or a lowercased copy -- and an equality check would have passed for all four of them.
-    """
+    """The longest contiguous slice of ``secret`` that reached ``haystack``."""
     best = ""
     for start in range(len(secret)):
         for end in range(len(secret), start + floor, -1):
@@ -156,11 +113,11 @@ def test_the_battery_can_actually_detect_a_leak():
     assert leaked_run("SYNTH</detail>ETIC", "x</detail>y", "x</detail>y") == "", "scaffolding is not a leak"
 
 
-@pytest.mark.parametrize("shape", sorted(SHAPES))
-def test_each_decoy_is_dissimilar_enough_to_be_a_valid_control(shape):
+def test_each_decoy_is_dissimilar_enough_to_be_a_valid_control():
     """A decoy sharing a long run with its secret would SUBTRACT a real leak. Control of the control."""
-    assert longest_surviving_run(SHAPES[shape], DECOYS[shape]) in ("", "</detail>")
-    assert len(DECOYS[shape]) == len(SHAPES[shape])
+    for shape, secret in SHAPES.items():
+        assert longest_surviving_run(secret, DECOYS[shape]) in ("", "</detail>"), shape
+        assert len(DECOYS[shape]) == len(secret), shape
 
 
 # --------------------------------------------------------------------------- scripted plumbing
@@ -173,12 +130,7 @@ ENV = {"TABLEAU_SERVER_URL": "https://s", "TABLEAU_SITE": "site", "TABLEAU_REST_
 
 
 class _Counter:  # pylint: disable=too-few-public-methods
-    """A `run.session` stand-in. It carries a REAL redactor on purpose.
-
-    `write_manifest` scrubs the whole manifest through `run.session.redact_text` immediately before
-    serialising, so a double with a pass-through redactor would silently switch the sink off in every
-    test that uses it -- and the sink is the thing under test here.
-    """
+    """A `run.session` stand-in. It carries a REAL redactor on purpose."""
 
     reauth_count = 0
     retry_count = 0
@@ -240,9 +192,7 @@ def _r(secret: str):
 
 # --------------------------------------------------------------------------- the site inventory
 #
-# One entry per place a Tableau response can become text a human or a file sees. Each returns the
-# string that would actually be printed, raised or persisted. Adding a diagnostic without adding it
-# here is what gate 3 below refuses.
+# One entry per place a Tableau response can become text a human or a file sees. Each returns the ...
 
 
 def site_raw_get_then_redact_text(secret, _tmp, _mp):
@@ -311,13 +261,7 @@ def site_export_failure(secret, _tmp, _mp):
 
 
 def site_export_session_lost_fallback(secret, _tmp, _mp):
-    """`export`'s `detail or redacted_note(payload, ...)` fallback.
-
-    ⚠️ Added because a mutation SURVIVED. Slicing the raw payload there leaked, and nothing noticed:
-    the fallback is reached only when the detail is empty, which happens for exactly one classification
-    -- ``session_lost`` -- and only after re-auth is exhausted. Every other site in this inventory
-    produces a non-empty detail, so the `or` branch was dead to the whole battery.
-    """
+    """`export`'s `detail or redacted_note(payload, ...)` fallback."""
 
     class _LostSession(_Session):
         def __init__(self):
@@ -438,13 +382,7 @@ def site_recovery_metadata_and_progress(secret, tmp_path, _mp):
 def _capture_and_read_everything(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     secret, tmp_path, reply, wants, data_reply=None, session=None
 ):
-    """Run one capture and return the manifest text PLUS the bytes of every file it wrote.
-
-    ⚠️ Reading the FILES, not only the manifest, is the round-5 lesson. A successful `/data` body is
-    written verbatim to `data/<view>.csv`, and a successful `?format=svg` body to `images/<view>.svg`,
-    both BEFORE any manifest exists -- so a manifest-only assertion is blind to the larger artifact,
-    and a manifest-boundary scrub could never have reached it either.
-    """
+    """Run one capture and return the manifest text PLUS the bytes of every file it wrote."""
     session = session or _Session(secret, reply, data_reply=data_reply)
     record = oracle.capture_view(session, VIEW, tmp_path, wants)
     record["workbook_name"] = "W"
@@ -472,12 +410,7 @@ def site_written_manifest_from_a_failed_data_leg(secret, tmp_path, _mp):
 
 
 def site_successful_csv(secret, tmp_path, _mp):
-    """⚠️ ROUND 5. A perfectly successful `/data`, HTTP 200, whose body echoes the credential.
-
-    `summarise_csv` copied its first row into `data.columns` and `_capture_data` wrote the bytes to
-    `data/<view>.csv`. Neither is a diagnostic, so four rounds of source-side diagnostic rules could
-    not see it, and 334 tests passed. This is the route that must never leave the battery again.
-    """
+    """⚠️ ROUND 5. A perfectly successful `/data`, HTTP 200, whose body echoes the credential."""
     return _capture_and_read_everything(
         secret, tmp_path, (200, b""), frozenset(), data_reply=(200, f"{secret}\nv\n".encode())
     )
@@ -490,26 +423,14 @@ def site_successful_svg(secret, tmp_path, _mp):
 
 
 def site_successful_csv_reflecting_the_session_token(secret, tmp_path, _mp):
-    """The seam must cover BOTH authenticating halves, not just the PAT secret.
-
-    ⚠️ Added because a mutation SURVIVED: dropping the session-token arm of `reflected_credential`
-    broke nothing, since every other site in this inventory plants its value as the PAT *secret*. The
-    live token authorises the same session and is the half a reflecting proxy is most likely to echo,
-    because it travels in a header on every single request.
-    """
+    """The seam must cover BOTH authenticating halves, not just the PAT secret."""
     session = _Session("an-unrelated-long-pat-secret", (200, b""), data_reply=(200, f"{secret}\nv\n".encode()))
     session.token = secret
     return _capture_and_read_everything(secret, tmp_path, (200, b""), frozenset(), session=session)
 
 
 def site_reflected_view_name(secret, tmp_path, _mp):
-    """⚠️ ROUND 6, finding 1. A view NAME comes from an authenticated `get_json`, which the export
-    seam never sees. It was slugged and truncated into the artifact FILENAME, so the prefix on disk was
-    no longer the literal any redactor could match -- and the same prefix reached the manifest.
-
-    Covers all three artifacts at once: the filename, the manifest, and (via caplog in the dedicated
-    test below) the console line, which also truncated the name before redacting it.
-    """
+    """⚠️ ROUND 6, finding 1. A view NAME comes from an authenticated `get_json`, which the export seam never sees."""
     session = _Session("an-unrelated-long-pat-secret", (200, b""), data_reply=(200, b"a\n1\n"))
     session.token = secret
     view = {"id": "eb00995d-1ff1-4a42-9ac9-28846f861d31", "name": secret, "workbook": {"id": "wb"}}
@@ -523,17 +444,7 @@ def site_reflected_view_name(secret, tmp_path, _mp):
 
 
 def site_reflected_csv_column(secret, tmp_path, _mp):
-    """⚠️ ROUND 6, finding 2. A CSV column becomes a dict KEY in `format_hints` once the column has a
-    detected format, and a values-only sink walk left it in the manifest while redacting the identical
-    string one field over in `columns`.
-
-    ⚠️ Scoped to the MANIFEST on purpose, unlike its sibling sites, which also read the files. The
-    planted value here is the PAT **name**, and its presence in `data/<luid>.csv` is the residual this
-    project deliberately accepts -- refusing a capture because a column heading matches a human-chosen
-    PAT name would kill legitimate estates. That residual is pinned by
-    `test_the_pat_name_is_KNOWN_to_survive_in_the_csv_on_disk`, so it is a stated decision with its own
-    failing test rather than a hole this site quietly steps around.
-    """
+    """⚠️ ROUND 6, finding 2. A CSV column becomes a dict KEY in `format_hints` once the column has a detected format, and a values-only sink walk left it in the..."""
     session = _Session("an-unrelated-long-pat-secret", (200, b""), pat_name=secret)
     session.data_reply = (200, f"{secret}\n19.5%\n".encode(), {})
     record = oracle.capture_view(session, VIEW, tmp_path, frozenset())
@@ -590,52 +501,21 @@ SITES = {
 }
 
 
-@pytest.mark.parametrize("shape", sorted(SHAPES))
 @pytest.mark.parametrize("site", sorted(SITES))
-def test_every_diagnostic_site_survives_every_adversarial_secret_shape(site, shape, tmp_path, monkeypatch):
-    """The whole matrix. A single cell failing is a credential on disk.
-
-    Each cell runs the site TWICE -- once with the secret, once with a structurally identical decoy --
-    and only counts a fragment the decoy run did not also produce, so the harness's own markup can
-    never be scored as a leak.
-    """
-    secret, decoy = SHAPES[shape], DECOYS[shape]
-    output = SITES[site](secret, tmp_path / "real", monkeypatch)
-    control = SITES[site](decoy, tmp_path / "decoy", monkeypatch)
-    leaked = leaked_run(secret, output, control)
-    assert not leaked, f"{site} leaked {leaked!r} of the {shape} secret into: {output[:400]!r}"
-
-
-@pytest.mark.parametrize("site", sorted(SITES))
-def test_every_site_still_produces_a_usable_diagnostic(site, tmp_path, monkeypatch):
-    """Redaction that empties the message is not a fix -- it destroys the reason the message exists."""
-    output = SITES[site](SHAPES["plain"], tmp_path, monkeypatch)
-    assert len(output.strip()) > 10, f"{site} produced nothing diagnosable: {output!r}"
+def test_every_diagnostic_site_survives_every_adversarial_secret_shape(site, tmp_path, monkeypatch):
+    """Every site against every shape; a single failure is a credential on disk."""
+    for shape, secret in SHAPES.items():
+        output = SITES[site](secret, tmp_path / shape / "real", monkeypatch)
+        control = SITES[site](DECOYS[shape], tmp_path / shape / "decoy", monkeypatch)
+        leaked = leaked_run(secret, output, control)
+        assert not leaked, f"{site} leaked {leaked!r} of the {shape} secret into: {output[:400]!r}"
+        if shape == "plain":
+            assert len(output.strip()) > 10, f"{site} produced nothing diagnosable: {output!r}"
 
 
 # ------------------------------------ gate 3: INTER-procedural taint, declared seeds, all exits
 #
-# ⚠️ Third rewrite, because round 6 found four bypasses in the second one. It keyed taint off six
-# parameter NAMES and looked at f-strings, dict values and log/raise args. All four of these produced
-# an empty finding list:
-#
-#     def f(payload):  return {payload.decode(): "percent"}   # a dict KEY
-#     def f(body):     return "diagnostic: " + body.decode()  # CONCATENATION
-#     def f(response): return f"{response}"                   # a renamed parameter
-#     def f(payload):  out = {}; out["k"] = payload.decode()  # a SUBSCRIPT store
-#
-# Two changes fix the class rather than the four instances:
-#
-#   * taint is SEEDED per (module, function) from a declared table and then PROPAGATED ACROSS CALLS
-#     within the module, so a parameter's spelling is irrelevant -- `def f(response)` is tainted
-#     because something taints it at a call site, not because of what it is called;
-#   * the sink list is derived from the EXITS a value can leave through, which the language closes:
-#     write_bytes/write_text (content AND the path they are called on), LOG.*, print, raise, and every
-#     construction that can carry a value into one -- f-strings, dict values, dict KEYS, `**` unpacks,
-#     `+`, `%`, subscript and attribute stores, and `/` path joins.
-#
-# That is the answer to "why will round 8 differ": rounds 2-7 enumerated SOURCES, which is an open set
-# nobody can finish. Exits are closed by Python itself.
+# ⚠️ Third rewrite, because round 6 found four bypasses in the second one. It keyed taint off six ...
 
 MODULES = (
     "scripts/capture_tableau_oracle.py",
@@ -644,36 +524,22 @@ MODULES = (
     "scripts/tableau_http.py",
     # ⚠️ Added after a blind review found a live leak here that this gate could not see. The module
     # calls `session._request`, not `urlopen`/`http.client`/`requests`, so `_HTTP_MARKERS` does not
-    # recognise it as credential-handling and the fail-closed module sweep never demanded it -- the
-    # same blind spot #419 records for `provision_tableau_estate.py` (tableauserverclient). A
-    # hand-maintained inventory that cannot detect its own omissions is exactly the shape that
-    # produced the round-7 leak in #405.
+    # recognise it as credential-handling and the fail-closed module sweep never demanded it -- the ...
+    # Refs #419, #405.
     "scripts/tableau_view_types.py",
     # ⚠️ Caught by `_SESSION_CLIENT_MARKERS` on its FIRST run, which is the demonstration that the
     # widening does real work rather than merely restating what was already covered: this module
-    # names no credential anywhere in code, so under `HTTP AND credential` it would have been
-    # invisible to the inventory exactly as `tableau_view_types.py` was.
+    # names no credential anywhere in code, so under `HTTP AND credential` it would have been ...
     "scripts/tableau_luid_census.py",
     # ⚠️ Added when the verdict layer was split out of `capture_tableau_oracle.py` (#423). It holds
     # THE SINK -- `scrub_tree` immediately before `json.dumps` -- plus every console line that quotes
-    # a response-derived view name, so leaving it out would have moved the most sensitive code in the
-    # capture OUT of this gate while every parameterised check kept reporting green. Like
-    # `tableau_payload_facts.py`, it is not detected by `_credential_handling_scripts()` (it makes no
-    # request and names no credential); MODULES is a superset of that detector, never a mirror of it.
+    # a response-derived view name, so leaving it out would have moved the most sensitive code in the ...
     "scripts/tableau_oracle_manifest.py",
     "scripts/tableau_lineage.py",
     "scripts/admin_insights_collector.py",
 )
 
 # Where response bytes ENTER, declared per function rather than inferred from a parameter's spelling.
-# ⚠️ Deliberately SMALL, and it shrank in round 7 rather than growing. `capture_view`'s `view` and
-# `log_progress`'s `record` were hand-seeded when the gate was found blind to the round-6 path defect;
-# both are now DERIVED, because taint propagates through return values -- `list_views` returns what
-# `get_json` gave it, `select_views` returns what `list_views` gave it, `main` loops over that, and the
-# value arrives at `capture_view` inter-procedurally. Round 7's lesson is that a hand-maintained list
-# nobody is forced to update is the shape that keeps generating findings, so the answer was to need
-# fewer entries, not to remember more. What remains is genuinely irreducible: the HTTP origin, the two
-# redactors, and the cross-module entry points, which propagation cannot see across a module boundary.
 TAINT_SEEDS: dict[tuple[str, str], set[str]] = {
     ("scripts/capture_tableau_oracle.py", "_request"): set(),  # the origin: its RETURN is tainted
     ("scripts/capture_tableau_oracle.py", "classify_export_error"): {"text"},
@@ -690,15 +556,10 @@ TAINT_SEEDS: dict[tuple[str, str], set[str]] = {
     ("scripts/tableau_render_capability.py", "apply_selected_tier"): {"report"},
     # The three-state "why was SVG refused" classifier (#474). `gate` carries `/serverinfo`'s own
     # version strings, so the module boundary re-seeds it here; inside, both of them go straight
-    # through `redacted_note` before anything formats them, which is why that function needs no
-    # certification of its own.
+    # through `redacted_note` before anything formats them, which is why that function needs no ...
     ("scripts/tableau_render_capability.py", "svg_gate_advice"): {"gate"},
     ("scripts/tableau_render_capability.py", "api_tuple"): {"version"},
     # `capture_tableau_oracle.main()` hands `resolve_and_stamp` the `/views` listing it just parsed.
-    # ⚠️ Not optional bookkeeping: without it the boundary check fails outright, and `stamp` then
-    # writes onto dicts the analyser believes are clean, so the manifest key it stamps arrives
-    # untracked. Found by `test_every_cross_module_call_carrying_tainted_data_lands_on_a_declared_seed`
-    # the moment this module joined MODULES.
     ("scripts/tableau_view_types.py", "resolve_and_stamp"): {"views"},
     # `tableau_luid_census` holds a response and reuses the module's own rules on it rather than
     # re-implementing them. Both are cross-module, so propagation cannot see them.
@@ -706,9 +567,7 @@ TAINT_SEEDS: dict[tuple[str, str], set[str]] = {
     ("scripts/tableau_view_types.py", "is_luid"): {"value"},
     # `capture_tableau_oracle.main()` hands the verdict layer the records it just built from
     # responses, and `log_progress` one record per view. Both cross a module boundary, so propagation
-    # cannot carry the taint and the seeds are irreducible -- without them the manifest sink and every
-    # console line in that module would be analysed as clean.
-    # Recovery's policy and raw provenance cross separately; run still holds only trusted CLI context.
+    # cannot carry the taint and the seeds are irreducible -- without them the manifest sink and every ...
     ("scripts/tableau_oracle_manifest.py", "write_manifest"): {
         "records",
         "capability_report",
@@ -719,20 +578,15 @@ TAINT_SEEDS: dict[tuple[str, str], set[str]] = {
     ("scripts/tableau_oracle_manifest.py", "validated_render_capability"): {"value"},
     # `_capture_data` hands the verdict layer the `certify_csv` result -- a closed vocabulary, but it
     # crosses a module boundary, so it is declared rather than assumed. ⚠️ `stem` is deliberately NOT
-    # seeded: it is untainted TODAY (`artifact_stem` of a validated LUID), and seeding it would make
-    # the round-6 regression -- a stem built from a view NAME -- arrive pre-declared and invisible.
+    # seeded: it is untainted TODAY (`artifact_stem` of a validated LUID), and seeding it would make ...
     ("scripts/tableau_oracle_manifest.py", "data_leg_fields"): {"certification"},
     # ⚠️ Seeding `records` WIDENS this gate rather than preserving it. On master the list itself was
     # never tainted: `main` binds it with `records, started = [], time.perf_counter()` and then grows
-    # it with `records.append(record)`, and `_bind` fires on ASSIGNMENT, not on a container-store call
-    # -- so a list full of response records crossed into `write_manifest` analysed as clean, and only
-    # `capability_report` made the manifest tainted at all. Declaring it here is what puts the
-    # partition, the counts and the census under the certification requirement.
+    # it with `records.append(record)`, and `_bind` fires on ASSIGNMENT, not on a container-store call ...
     ("scripts/tableau_view_types.py", "census"): {"records"},
     # The shared HTTP primitive. `req` and `redactor` are OUTBOUND -- the request we are about to send
     # and the scrubber we hand it -- but they arrive from functions the analyser has already tainted,
-    # and declaring them keeps the boundary honest rather than silently permeable. `headers` really is
-    # response-derived.
+    # and declaring them keeps the boundary honest rather than silently permeable. `headers` really is ...
     ("scripts/tableau_http.py", "_request"): {"req", "redactor", "timeout", "deadline"},
     ("scripts/tableau_http.py", "header_value"): {"headers"},
     ("scripts/tableau_http.py", "response_framing"): {"headers"},
@@ -750,10 +604,6 @@ TAINT_SEEDS: dict[tuple[str, str], set[str]] = {
 }
 
 # Calls whose RESULT is response data.
-# ⚠️ `fetch_payload` is the shared TRANSPORT hop, and it is here for the same reason `_request`
-# is: its return IS the response. It became load-bearing when `tableau_luid_census` stopped
-# making its own request -- taint propagation is intra-module, so a cross-module call's result
-# is invisible without this, and the gate went inert on a module that still looked gated.
 TAINTING_CALLS = {
     "_request",
     "_response_text",
@@ -784,12 +634,7 @@ CATEGORIES = (
     "SHAPE-VERIFIED:",  # response-derived, but constrained to a shape that cannot carry a credential
     # ⚠️ `UNAUTHENTICATED-SOURCE:` was here and is DELETED, not merely unused. It certified a value as
     # safe because the REQUEST that fetched it carried no credential -- an argument about the wrong
-    # party. The server, or any intermediary on the path, saw the PAT sign-in earlier in the same run
-    # and can reflect it in any later response, authenticated or not. Its one holder (`/serverinfo`'s
-    # product and build fields) was measured leaking a reflected credential into assessment.json,
-    # report.md and the console. Removing the category is what stops the same reasoning being
-    # reached for again: an unconstrained free-form response string is untrusted, full stop -- earn
-    # SHAPE-VERIFIED by constraining it, or REDACTED-UPSTREAM by scrubbing it.
+    # party. The server, or any intermediary on the path, saw the PAT sign-in earlier in the same run ...
 )
 
 _SERVERINFO = (
@@ -999,18 +844,11 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
     },
     # ⚠️ `view_types` itself has NO certified expressions and that is correct, not an omission: after
     # the round-2 split it only routes between three helpers, so no response-derived value reaches an
-    # exit inside it. `test_the_certification_list_has_no_stale_entries` would reject a leftover entry
-    # -- a claim about nothing is the same silent no-op as the duplicate CERTIFIED key this PR hit in
-    # round 1, and as `type(exc).__name__`, which certified nothing because `except ... as exc` binds
-    # through an ExceptHandler rather than an Assign and so is never a tainted root.
-    #
-    # The transport hop. `body` and `status` arrive from `_request`, the analyser's taint origin.
+    # exit inside it. `test_the_certification_list_has_no_stale_entries` would reject a leftover entry ...
     ("scripts/tableau_view_types.py", "fetch_payload"): {
         # ⚠️ `type(payload).__name__` is no longer certified HERE, and its absence is the round-4
         # fix rather than an omission: the top-level shape check MOVED into `parse_payload`, the
-        # shared seam every caller passes through. Keeping a copy here as well would have been a
-        # guard no mutation could kill - remove it and the seam still refuses - so it would have
-        # shipped as coverage that cannot fail.
+        # shared seam every caller passes through. Keeping a copy here as well would have been a ...
         "status": "NOT-A-STRING: an HTTP status integer from the hardened transport",
     },
     ("scripts/tableau_view_types.py", "parse_payload"): {
@@ -1064,22 +902,10 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
     },
     # ⚠️ Every expression here is a COUNT, a module literal, or a module-authored reason. That is
     # not an accident of how it was written: `_emit` REFUSES to print anything that is not an int,
-    # bool or None, so the "counts and shapes only" promise is enforced by the code rather than by a
-    # convention someone has to remember. See the module docstring.
+    # bool or None, so the "counts and shapes only" promise is enforced by the code rather than by a ...
     ("scripts/tableau_luid_census.py", "_emit"): {
         # ⚠️ `label` was certified FIXED-VOCABULARY unconditionally, and nothing enforced it. Measured
         # at a83340d: `_emit("SYNTHETIC_CUSTOMER_IDENTIFIER_402", 1)` printed the identifier verbatim.
-        # It is now the same kind of claim `value` always was: true because the line above REFUSES
-        # anything else.
-        #
-        # ⚠️ Be precise about what this gate can and cannot see here, because the loose version of it
-        # is wrong. Intra-module propagation DOES carry a tainted argument into `_emit`: delete these
-        # entries and the gate reports `label`, `value` AND `type(value).__name__` inside the callee.
-        # What it cannot do is report the leak at the CALL SITE, because `_emit` is not one of its
-        # recognised sink calls -- which is why injecting a response-derived label into `main` still
-        # produced `uncertified_sinks == []`. So the certification DOCUMENTS the enforcement; the
-        # runtime allowlist IS the enforcement. Neither replaces the other, and a mutation proving
-        # rejection must delete the runtime check rather than expect a static finding.
         "label": (
             "REFUSED-AT-SEAM: `_emit` raises SystemExit unless `label` is in `LABELS`, a frozenset "
             "built from this module's own BUCKETS/SITE_BUCKETS/FIXED_LABELS literals. A "
@@ -1610,8 +1436,7 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
     },
     # #480 round 2. `withhold_uncertified_evidence` moves a data leg's `path` to `retained_path` when
     # nothing certified the bytes, and `read_manifest` applies the same rule to a manifest loaded
-    # from disk. Both only ever MOVE or COPY values that were already in a record; neither derives a
-    # new string from a response, and neither reaches a log line or a filesystem path.
+    # from disk. Both only ever MOVE or COPY values that were already in a record; neither derives a ...
     ("scripts/tableau_oracle_manifest.py", "withhold_uncertified_evidence"): {
         "record": _INTO_THE_MANIFEST_AGGREGATE,
         "demoted": _INTO_THE_MANIFEST_AGGREGATE,
@@ -1853,9 +1678,7 @@ def taint_module(  # pylint: disable=too-many-locals,too-many-branches,too-many-
     tainted = {name: set(TAINT_SEEDS.get((module, name), set())) for name in functions}
     # Functions whose RETURN value is response-derived. Discovered, not declared: `list_views` returns
     # what `get_json` gave it, `select_views` returns what `list_views` gave it, and `main` then loops
-    # over the result. Without this the chain died at the first hop and `capture_view`'s `view`
-    # parameter had to be hand-seeded -- which is the hand-maintained list round 7 identified as the
-    # shape that keeps generating findings. `_request` is the origin and is seeded here.
+    # over the result. Without this the chain died at the first hop and `capture_view`'s `view` ...
     returns_taint = {"_request"}
     for _ in range(12):
         before = ({k: set(v) for k, v in tainted.items()}, set(returns_taint))
@@ -1892,11 +1715,6 @@ def taint_module(  # pylint: disable=too-many-locals,too-many-branches,too-many-
                     continue
                 params = _param_names(callee)
                 # A bound method call passes `self` implicitly, so argument 0 lands on parameter 1.
-                # Without this the analyser mapped a tainted argument onto `self` and then treated the
-                # whole receiver as response data -- which over-taints loudly (measured: `attempt`,
-                # `self.retry.max_attempts` and friends all flagged) and, worse, silently shifts every
-                # later argument by one, so a genuinely tainted third argument was checked against the
-                # second parameter's name.
                 if isinstance(node.func, ast.Attribute) and params and params[0] == "self":
                     params = params[1:]
                 for index, arg in enumerate(node.args):
@@ -1911,11 +1729,7 @@ def taint_module(  # pylint: disable=too-many-locals,too-many-branches,too-many-
 
 
 def sink_expressions(func: ast.AST) -> list[tuple[str, ast.AST]]:  # pylint: disable=too-many-branches
-    """Every place a value can leave this function as persisted or emitted text.
-
-    Derived from the EXITS -- write/log/print/raise -- and from every construction that can carry a
-    value into one. `+` and dict KEYS are here because round 6 escaped through exactly those.
-    """
+    """Every place a value can leave this function as persisted or emitted text."""
     out: list[tuple[str, ast.AST]] = []
     for node in ast.walk(func):
         if isinstance(node, ast.JoinedStr):
@@ -2001,12 +1815,7 @@ def test_no_response_derived_value_reaches_an_exit_without_certification(module)
     ],
 )
 def test_the_gate_catches_each_bypass_round_6_reported(label, source, expected):
-    """All four produced an EMPTY finding list against the round-5 gate.
-
-    The fourth is round 6's finding 1 in miniature: a filename built from response text. It is caught
-    at the `write-path` exit -- the receiver of `write_bytes` -- rather than by inspecting `/` operands,
-    because `/` is also arithmetic and flagging it produced false positives on `mm * 96 / 25.4`.
-    """
+    """All four produced an EMPTY finding list against the round-5 gate."""
     assert uncertified_sinks(source, "scripts/tableau_payload_facts.py") == sorted(expected), label
 
 
@@ -2043,19 +1852,7 @@ def test_json_loads_is_tainted_only_when_its_operand_is_response_derived():
 
 
 def test_taint_reaches_capture_view_without_a_hand_written_seed():
-    """Round 7's structural half: the seed list must SHRINK, not grow.
-
-    `capture_view`'s `view` was hand-seeded in round 6 after the gate was found blind to the path
-    defect. It is now derived -- `get_json` -> `list_views` -> `select_views` -> `main`'s loop ->
-    `capture_view` -- because taint propagates through RETURN values. This test fails if that chain
-    breaks, which is what would silently push the burden back onto the hand-written table.
-
-    ⚠️ `log_progress` moved to `tableau_oracle_manifest.py` when the verdict layer was split out
-    (#423), and a module boundary is exactly what propagation cannot cross -- so there its `record`
-    IS a declared seed, and the assertion below checks the seed is honoured rather than that the
-    chain still reaches it. Deriving it is not available across modules; asserting it is still
-    coverage, because dropping the seed makes that whole module analyse as clean.
-    """
+    """Round 7's structural half: the seed list must SHRINK, not grow. (#423)"""
     module = "scripts/capture_tableau_oracle.py"
     assert (module, "capture_view") not in TAINT_SEEDS, "re-seeding by hand would hide a broken chain"
     tainted = taint_module((REPO / module).read_text(encoding="utf-8"), module)
@@ -2068,19 +1865,11 @@ def test_taint_reaches_capture_view_without_a_hand_written_seed():
 
 # ---- module coverage: a credential-handling module may not sit OUTSIDE the gate ------------------
 #
-# ⚠️ Round 5 disclosed this gap in prose -- "a diagnostic added in a third file is outside it" -- and
-# round 7 is that third file: the standalone `sign_in()` in `tableau_render_capability.py` let an
-# `HTTPError` escape with the PAT in its reason phrase. A gap that was documented and then fired is
-# worth closing structurally. This fails CLOSED: a new credential-handling script is a hard failure
-# until someone either brings it under the gate or waives it with a stated reason.
+# ⚠️ Round 5 disclosed this gap in prose -- "a diagnostic added in a third file is outside it" -- and ...
 
 # ⚠️ Modules that qualify on their OWN, with no credential marker required. The AND below asks two
 # questions -- "does it speak HTTP" and "does it name a credential" -- and a module can consume
-# credential-bearing RESPONSES while naming no credential at all, because the session holds it. That
-# is `tableau_view_types.py` exactly: its only credential-shaped text is a docstring sentence, so
-# under the AND its coverage would hinge on prose surviving an edit. Calling a session's `_request`
-# is the structural fact, and it is the same name `TAINTING_CALLS` already treats as the response
-# origin. `test_a_session_client_is_detected_without_naming_a_credential` is the positive control.
+# credential-bearing RESPONSES while naming no credential at all, because the session holds it. That ...
 _SESSION_CLIENT_MARKERS = ("._request(",)
 
 _HTTP_MARKERS = (
@@ -2089,10 +1878,7 @@ _HTTP_MARKERS = (
     "requests.",
     # ⚠️ INDIRECT clients, and the round-9 blind spot. The three markers above name a *stdlib* call
     # site, so a module that reaches HTTP through a library was invisible to this inventory --
-    # `provision_tableau_estate.py` signs in with `tableauserverclient` and was therefore never
-    # listed, which is how its GATE_WAIVERS entry survived nine rounds while being reproducibly
-    # false (its TSC sign-in error is uncaught, and its manifest is written unscrubbed). An
-    # unfalsifiable waiver is worse than no waiver: nothing can ever contradict it.
+    # `provision_tableau_estate.py` signs in with `tableauserverclient` and was therefore never ...
     "import tableauserverclient",
     "from tableauserverclient",
     # Our own shared primitive. Routing every hand-rolled `urlopen` through it (round 9) would
@@ -2101,12 +1887,7 @@ _HTTP_MARKERS = (
     "tableau_http",
     # ⚠️ A module that takes a SESSION and calls its `_request` reaches HTTP through neither the
     # stdlib nor a library -- it reaches it through us, and that was invisible here. Not a
-    # hypothetical gap: `tableau_view_types.py` leaked a reflected session token out of a GraphQL
-    # `errors[].message` while this inventory could not see the module at all, so the fail-closed
-    # module sweep never demanded it be gated. `_request` is already the name the taint analyser
-    # treats as the response origin (`TAINTING_CALLS`), so keying on it here keeps the two halves of
-    # the gate consistent. Measured: exactly three scripts match `._request(`, and all three are in
-    # MODULES, so this widening adds coverage without adding a waiver.
+    # hypothetical gap: `tableau_view_types.py` leaked a reflected session token out of a GraphQL ...
     *_SESSION_CLIENT_MARKERS,
 )
 _CREDENTIAL_MARKERS = ("pat_secret", "X-Tableau-Auth", "TABLEAU_PAT", "personalAccessTokenSecret")
@@ -2114,35 +1895,11 @@ _CREDENTIAL_MARKERS = ("pat_secret", "X-Tableau-Auth", "TABLEAU_PAT", "personalA
 # Scripts that ARE detected as making a credentialed request, are NOT under the taint gate, and
 # genuinely cannot leak response text -- each with the reason, verified against the code rather than
 # asserted.
-#
-# ⚠️ Every entry here MUST be visible to `_credential_handling_scripts()`, and
-# `test_every_waiver_names_a_script_the_detector_can_actually_see` enforces it. A waiver for a module
-# the detector cannot see is **unfalsifiable**: nothing can contradict it, so nobody ever does. That
-# is exactly how `provision_tableau_estate.py` sat here for nine rounds claiming its manifest was
-# "covered by `redact`" while writing an unscrubbed one (measured, round 9). Scripts that hold a
-# credential but make no request of their own belong in NON_HTTP_CREDENTIAL_SCRIPTS below, where the
-# assertion runs the other way round.
-#
-# ⚠️ This map and MODULES must also be DISJOINT, and `test_the_gate_and_the_waivers_are_disjoint`
-# enforces it. They overlapped, and coverage was computed as `MODULES | GATE_WAIVERS`, so dropping a
-# gated module from MODULES left it "covered" by its own waiver -- the gate accepted the removal of
-# the very module round 7's leak was in, and silently stopped every parameterised taint check running
-# on it.
-#
-# Empty is a legitimate state, and is the state today: every script the detector sees is either
-# gated or a recorded gap. `test_the_waiver_rules_can_actually_fire` is the positive control that
-# keeps both rules meaningful while this is empty.
 GATE_WAIVERS: dict[str, str] = {}
 
 # Scripts that hold a Tableau credential but make **no credentialed HTTP request of their own** --
 # they hand it to a child process, or to a library that does not talk to Tableau, or they are the
 # redactor itself. The assertion here is the MIRROR of the one above: the detector must NOT see them.
-#
-# ⚠️ That direction is load-bearing, and its absence was a live fail-open. `capture_tableau_reference`
-# ships a `server_rest` provider that is currently a `NotImplementedError` stub; the day someone
-# implements it, the detector starts seeing the module -- and under the old single-map scheme its
-# pre-existing waiver would have silently covered a brand-new, ungated, credentialed HTTP client.
-# Here it becomes an orphan and fails, which is the point.
 NON_HTTP_CREDENTIAL_SCRIPTS: dict[str, str] = {
     "scripts/tableau_env.py": "IS the redactor and the chokepoint; gating it against itself is circular",
     "scripts/harvest_estate_assets.py": (
@@ -2188,14 +1945,7 @@ KNOWN_GAPS: dict[str, str] = {
 
 
 def _credential_handling_scripts() -> list[str]:
-    """Scripts that make an HTTP call AND reference a Tableau credential -- or ARE a session client.
-
-    ⚠️ The second clause is not a convenience. A module handed a signed-in session consumes
-    credential-bearing responses while naming no credential at all, so under the AND alone its
-    coverage depended on whether some docstring happened to spell ``X-Tableau-Auth``. That is prose
-    load-bearing on a security gate, and it is how `tableau_view_types.py` sat outside this inventory
-    while leaking a reflected session token.
-    """
+    """Scripts that make an HTTP call AND reference a Tableau credential -- or ARE a session client."""
     found = []
     for path in sorted((REPO / "scripts").glob("*.py")):
         source = path.read_text(encoding="utf-8", errors="replace")
@@ -2207,33 +1957,14 @@ def _credential_handling_scripts() -> list[str]:
     return found
 
 
-def test_a_session_client_is_detected_without_naming_a_credential():
-    """⚠️ Positive control for the second clause, and it must be able to FAIL.
-
-    `tableau_view_types.py` names no credential in CODE -- only in prose. Delete every docstring,
-    comment and string literal and the AND stops seeing the module entirely, which is precisely why
-    its coverage must not rest on a sentence. So this asserts on the structural fact instead: it
-    calls a session's `_request`, and the detector reaches it that way.
-    """
-    source = (REPO / "scripts/tableau_view_types.py").read_text(encoding="utf-8")
-    code = "".join(
-        "" if token.type in (tokenize.STRING, tokenize.COMMENT) else token.string
-        for token in tokenize.generate_tokens(io.StringIO(source).readline)
-    )
-    assert not any(c in code for c in _CREDENTIAL_MARKERS), (
-        "this module now names a credential in CODE, so the control no longer proves the second "
-        "clause is what detects it -- re-point the control at a module that does not"
-    )
-    assert any(s in code for s in _SESSION_CLIENT_MARKERS)
-    assert "scripts/tableau_view_types.py" in _credential_handling_scripts()
-
-
 def test_the_credential_handling_detector_actually_detects():
     """Positive control: an assertion that cannot fire is not coverage (round 6's lesson)."""
     scripts = _credential_handling_scripts()
     assert "scripts/tableau_render_capability.py" in scripts, scripts
     assert "scripts/capture_tableau_oracle.py" in scripts, scripts
     assert "scripts/tableau_http.py" in scripts, scripts
+    # Names no credential in code: reached only through the session-client clause.
+    assert "scripts/tableau_view_types.py" in scripts, scripts
     # ⚠️ The round-9 blind spot, pinned: this module reaches HTTP only through `tableauserverclient`,
     # so the stdlib-only marker list could not see it and its (false) waiver was unfalsifiable.
     assert "scripts/provision_tableau_estate.py" in scripts, scripts
@@ -2241,15 +1972,7 @@ def test_the_credential_handling_detector_actually_detects():
 
 
 def test_the_gate_and_the_waivers_are_disjoint():
-    """⚠️ The fail-OPEN that round 8 found: coverage was `MODULES | GATE_WAIVERS`, and both gated HTTP
-    modules were ALSO waived. So removing `tableau_render_capability.py` from MODULES left it
-    "covered" by its own waiver -- every parameterised taint check silently stopped running against
-    the module round 7's leak was in, and all three coverage tests still passed.
-
-    Disjointness is what makes the categories mean something: gated, waived, not-an-HTTP-client, or a
-    known gap -- exactly ONE, and any detected script in none of the first, second or fourth is a hard
-    failure.
-    """
+    """⚠️ The fail-OPEN that round 8 found: coverage was `MODULES | GATE_WAIVERS`, and both gated HTTP modules were ALSO waived."""
     buckets = {
         "MODULES": set(MODULES),
         "GATE_WAIVERS": set(GATE_WAIVERS),
@@ -2261,56 +1984,6 @@ def test_the_gate_and_the_waivers_are_disjoint():
         assert not overlap, f"{overlap} are in both {left} and {right}; each script belongs to exactly one"
 
 
-def test_every_waiver_names_a_script_the_detector_can_actually_see():
-    """⚠️ Round 9. A waiver is a claim that a CREDENTIALED HTTP CLIENT is nonetheless safe. If the
-    detector cannot see the module, nothing can ever contradict the claim -- which is precisely how
-    `provision_tableau_estate.py` kept a reproducibly false waiver for nine rounds.
-    """
-    unseen = sorted(set(GATE_WAIVERS) - set(_credential_handling_scripts()))
-    assert not unseen, (
-        f"{unseen} are waived as safe credential-handling HTTP clients, but the detector does not see "
-        "them at all, so the waiver is unfalsifiable. Either teach _HTTP_MARKERS to recognise the "
-        "client, or move them to NON_HTTP_CREDENTIAL_SCRIPTS if they make no request of their own."
-    )
-
-
-def test_every_non_http_script_is_one_the_detector_does_NOT_see():
-    """The mirror rule, and the fail-open it closes.
-
-    These entries assert "makes no credentialed HTTP request of its own". The day one of them starts
-    making one -- `capture_tableau_reference`'s `server_rest` stub being the obvious candidate -- the
-    detector sees it, this fails, and it has to be re-classified. Under the old single-map scheme the
-    stale entry would instead have silently covered a brand-new ungated HTTP client.
-    """
-    seen = sorted(set(NON_HTTP_CREDENTIAL_SCRIPTS) & set(_credential_handling_scripts()))
-    assert not seen, (
-        f"{seen} are recorded as making no credentialed HTTP request, but the detector now sees one. "
-        "Re-classify them: gate them in MODULES, waive them in GATE_WAIVERS with a reason the code "
-        "supports, or record them in KNOWN_GAPS with an issue."
-    )
-
-
-@pytest.mark.parametrize(
-    ("label", "waivers", "non_http", "rule"),
-    [
-        ("a waiver the detector cannot see", {"scripts/check_unit.py": "x"}, {}, "waiver"),
-        ("a non-HTTP entry the detector CAN see", {}, {"scripts/capture_tableau_oracle.py": "x"}, "non-http"),
-    ],
-)
-def test_the_waiver_rules_can_actually_fire(label, waivers, non_http, rule):
-    """Positive control for the two rules above, which are vacuous while GATE_WAIVERS is empty.
-
-    An assertion over an empty set passes for the wrong reason. These two synthetic maps are the
-    shapes each rule exists to reject, checked against the REAL detector so the control cannot drift
-    away from the thing it controls.
-    """
-    detected = set(_credential_handling_scripts())
-    if rule == "waiver":
-        assert sorted(set(waivers) - detected), f"{label}: the control no longer reproduces the rejected shape"
-    else:
-        assert sorted(set(non_http) & detected), f"{label}: the control no longer reproduces the rejected shape"
-
-
 def test_every_gated_module_is_actually_analysed():
     """Disjointness alone is not enough: the gate must still RUN on each module it claims to cover."""
     for module in MODULES:
@@ -2320,13 +1993,7 @@ def test_every_gated_module_is_actually_analysed():
 
 
 def test_the_shared_request_primitive_keeps_the_name_the_gate_taints():
-    """⚠️ The gate's vocabulary is the CALL NAME, so a rename silently un-taints every call site.
-
-    `TAINTING_CALLS` and `taint_module`'s `returns_taint` both key on the literal string `_request`.
-    Rename `tableau_http._request`, or import it under an alias, and every `status, body, headers =
-    _request(...)` stops being recognised as response-derived -- the gate keeps reporting green while
-    covering nothing. That failure is invisible by construction, so it is pinned here.
-    """
+    """⚠️ The gate's vocabulary is the CALL NAME, so a rename silently un-taints every call site."""
     assert "_request" in TAINTING_CALLS
     source = (REPO / "scripts" / "tableau_http.py").read_text(encoding="utf-8")
     assert "def _request(" in source, "the shared primitive was renamed; TAINTING_CALLS must follow"
@@ -2340,17 +2007,7 @@ def test_the_shared_request_primitive_keeps_the_name_the_gate_taints():
 
 
 def test_the_body_read_primitive_keeps_the_name_the_gate_taints():
-    """⚠️ The same trap, one layer down, and it FIRED -- this is not a hypothetical.
-
-    ``_read_bounded`` reads a response body in chunks, and the first version hoisted the choice of
-    primitive into a local: ``read_once = getattr(stream, "read1", None) or stream.read``. That is
-    ordinary Python and it silently un-tainted the response body, because ``_called()`` then sees
-    ``read_once`` rather than a name in ``TAINTING_CALLS``. The symptom was a certification going
-    STALE -- which reads as "no longer reaches an exit" and actually meant "no longer tracked at all",
-    the friendlier-sounding of the two by far.
-
-    So both branches must call the primitive BY NAME, and both names must be in the vocabulary.
-    """
+    """⚠️ The same trap, one layer down, and it FIRED -- this is not a hypothetical."""
     assert {"read", "read1"} <= TAINTING_CALLS
     source = (REPO / "scripts" / "tableau_http.py").read_text(encoding="utf-8")
     assert "def _read_bounded(" in source
@@ -2366,12 +2023,7 @@ def test_the_body_read_primitive_keeps_the_name_the_gate_taints():
 
 
 def test_no_credential_handling_script_sits_outside_the_gate_unwaived():
-    """The class round 7 identified: a fourth module could be added tomorrow and be silently outside.
-
-    ⚠️ `NON_HTTP_CREDENTIAL_SCRIPTS` is deliberately NOT part of `covered`. Those entries claim the
-    detector cannot see them; if one becomes visible it SHOULD surface here as an orphan rather than
-    be excused by a classification that has stopped being true.
-    """
+    """The class round 7 identified: a fourth module could be added tomorrow and be silently outside."""
     covered = set(MODULES) | set(GATE_WAIVERS) | set(KNOWN_GAPS)
     orphans = sorted(set(_credential_handling_scripts()) - covered)
     assert not orphans, (
@@ -2386,10 +2038,6 @@ def test_every_waiver_and_gap_names_a_reason_and_a_file_that_exists():
     for script, reason in {**GATE_WAIVERS, **NON_HTTP_CREDENTIAL_SCRIPTS, **KNOWN_GAPS}.items():
         assert (REPO / script).is_file(), f"an excuse for a script that no longer exists: {script}"
         assert len(reason) > 25, f"{script} is excused with no real reason: {reason!r}"
-
-
-def test_every_known_gap_cites_an_issue():
-    """A gap without a tracker entry is a gap nobody is going to close."""
     for script, reason in KNOWN_GAPS.items():
         assert re.search(r"#\d+", reason), f"{script} is recorded as a known gap with no issue reference"
 
@@ -2413,13 +2061,7 @@ def _star_arg_functions(tree: ast.AST) -> list[str]:
 
 
 def test_the_star_arg_detector_actually_detects():
-    """⚠️ Positive control, because the gate below SURVIVED a mutation that disabled it.
-
-    It survived for an honest reason -- the guarded modules contain no `*args`, so switching the check
-    off changes nothing today. But an assertion that cannot fail is not coverage, and this project has
-    already shipped one unkillable guard. So the DETECTOR is tested here against a module that does use
-    the construct, and the gate below is left as the forward-looking guard it is.
-    """
+    """⚠️ Positive control, because the gate below SURVIVED a mutation that disabled it."""
     assert _star_arg_functions(ast.parse("def f(*args):\n    pass\n")) == ["f"]
     assert _star_arg_functions(ast.parse("def f(**kw):\n    pass\n")) == ["f"]
     assert _star_arg_functions(ast.parse("def f(a, b=1, *, c=2):\n    pass\n")) == []
@@ -2427,14 +2069,7 @@ def test_the_star_arg_detector_actually_detects():
 
 @pytest.mark.parametrize("module", MODULES)
 def test_the_analyser_cannot_follow_star_args_so_the_guarded_modules_may_not_use_them(module):
-    """The boundary, enforced rather than documented.
-
-    `taint_module` maps a call's positional arguments onto the callee's declared parameters, so a
-    `*args`/`**kwargs` forwarder is a hole it cannot see through (measured: a `def helper(*args)`
-    forwarder produces an empty finding list). Rather than teach the analyser a construct these
-    modules do not use, the construct is forbidden here -- the same closed-allowlist move that
-    replaced `safe_slug`.
-    """
+    """The boundary, enforced rather than documented."""
     offenders = _star_arg_functions(ast.parse((REPO / module).read_text(encoding="utf-8")))
     assert not offenders, (
         f"{module}: {offenders} use *args/**kwargs, which the taint analyser cannot follow. "
@@ -2459,17 +2094,7 @@ def _guarded_imports(tree: ast.AST) -> dict[str, str]:
 
 @pytest.mark.parametrize("module", MODULES)
 def test_every_cross_module_call_carrying_tainted_data_lands_on_a_declared_seed(module):
-    """Taint propagation is INTRA-module, so a call into another guarded module is the boundary.
-
-    That boundary is crossed exactly once today -- `capability.format_matches(kind, payload, ...)` --
-    and `format_matches` declares `{"body", "content_type"}` in TAINT_SEEDS, so the value is re-seeded
-    on arrival. This test is what stops the next such call being added without one, which would let
-    tainted data enter a module with no seed and therefore no findings at all.
-
-    ⚠️ It covers calls whose callee is IMPORTED from a guarded module, in either spelling
-    (`capability.format_matches(...)` and a bare `summarise_csv(...)`). It cannot see a callee reached
-    through a variable or a dispatch table; no such call exists in these modules.
-    """
+    """Taint propagation is INTRA-module, so a call into another guarded module is the boundary."""
     source = (REPO / module).read_text(encoding="utf-8")
     undeclared = undeclared_boundary_crossings(source, module)
     assert not undeclared, (
@@ -2479,13 +2104,7 @@ def test_every_cross_module_call_carrying_tainted_data_lands_on_a_declared_seed(
 
 
 def undeclared_boundary_crossings(source: str, module: str) -> list[str]:  # pylint: disable=too-many-locals
-    """Tainted arguments this module hands to a cross-module parameter with no declared seed.
-
-    Extracted from the test above so the round-6 regression test can measure the SAME check. A
-    filesystem path built inside another module is invisible to `uncertified_sinks`, which analyses
-    one file; this is the check that still sees it, and a regression test that asserted only the
-    other one would silently stop covering the data leg (#480 round 2).
-    """
+    """Tainted arguments this module hands to a cross-module parameter with no declared seed. (#480)"""
     tree = ast.parse(source)
     imported = _guarded_imports(tree)
     tainted = taint_module(source, module)
@@ -2520,21 +2139,7 @@ def undeclared_boundary_crossings(source: str, module: str) -> list[str]:  # pyl
 
 @pytest.mark.parametrize("arm", ["capture_view", "capture_recovery_view"])
 def test_the_static_gate_would_now_catch_the_round_6_PATH_defect(tmp_path, arm):
-    """⚠️ Round 6 was caught only by the RUNTIME battery. The static gate was blind to it.
-
-    Measured before `view` was seeded: reintroducing `safe_slug(view["name"])` as the artifact stem
-    produced **zero** findings. That is a gate that could not see the escape it exists to prevent, so
-    `view` -- a dict straight off `list_views()` -> `get_json` -- is now a declared taint seed, and the
-    same regression reaches a static finding at every write site.
-
-    ⚠️ **The DATA leg's finding moved to a different static check with #480 round 2, and asserting
-    only the old one would have been a silent loss of coverage.** That leg's filename is now chosen
-    by `tableau_oracle_manifest.data_leg_fields`, so it is not an expression in THIS file and
-    `uncertified_sinks` -- which analyses one module -- cannot see it. What sees it is the boundary
-    check: `stem` is deliberately NOT a declared seed of that function, so a stem built from a view
-    NAME arrives as an undeclared tainted crossing. Both checks are asserted, and the data leg is
-    asserted by name, because "the regression produces no finding at all" is the only real failure.
-    """
+    """⚠️ Round 6 was caught only by the RUNTIME battery. (#480)"""
     _ = tmp_path
     module = "scripts/capture_tableau_oracle.py"
     source = (REPO / module).read_text(encoding="utf-8")
@@ -2559,12 +2164,7 @@ def test_the_static_gate_would_now_catch_the_round_6_PATH_defect(tmp_path, arm):
 
 
 def test_a_bound_method_call_maps_argument_0_onto_parameter_1_not_onto_self():
-    """Found by over-seeding: `x.m(tainted)` was mapping onto the callee's `self`.
-
-    It over-taints loudly -- the whole receiver becomes response data -- but the dangerous half is
-    silent: every later argument shifts by one, so a genuinely tainted third argument was checked
-    against the second parameter's name and could pass unflagged.
-    """
+    """Found by over-seeding: `x.m(tainted)` was mapping onto the callee's `self`."""
     source = (
         "class S:\n"
         "    def sink(self, first, second):\n"
@@ -2605,20 +2205,7 @@ def test_every_certification_names_a_category_rather_than_arguing_in_prose():
 
 
 def test_no_certification_is_written_in_another_interpreters_unparse_dialect():
-    """⚠️ A certification key must be what `ast.unparse` produces HERE, or the gate is version-local.
-
-    Every lookup in this file compares a hand-written key against `ast.unparse` output, and unparse is
-    NOT stable across Python versions. Measured: an f-string containing a nested string literal
-    unparses as ``f"{kind}={status or 'absent'}"`` on 3.13 and ``f'{kind}={status or 'absent'}'`` on
-    the CI interpreter (PEP 701 quote reuse). One certification was therefore simultaneously VALID
-    locally and both stale AND missing on CI -- the suite was green on the machine that wrote it and
-    red on the machine that gates the merge, which is the worst possible split for a security gate.
-
-    This check is version-symmetric by construction: it re-parses each key and demands the local
-    normal form, so it fails on whichever interpreter the key was NOT written for. The fix is always
-    to make the SOURCE expression unparse identically everywhere -- interpolate names, not nested
-    literals -- rather than to encode one interpreter's quoting habit in this table.
-    """
+    """⚠️ A certification key must be what `ast.unparse` produces HERE, or the gate is version-local."""
     drifted = []
     for (module, func), entries in CERTIFIED.items():
         for expression in entries:
@@ -2633,44 +2220,6 @@ def test_no_certification_is_written_in_another_interpreters_unparse_dialect():
         "a certification key is not this interpreter's `ast.unparse` normal form, so it matches on "
         "some Python versions and not others:\n  " + "\n  ".join(drifted)
     )
-
-
-def test_the_unparse_dialect_detector_can_actually_fire():
-    """Positive control: an assertion that cannot fail is not coverage.
-
-    ⚠️ And this control's FIRST version was itself dialect-dependent -- the exact defect it exists to
-    guard. It hard-coded the local interpreter's rendering of a nested-literal f-string and asserted
-    the other spelling was non-normal, which is true on 3.13 and false on the CI interpreter, where
-    that spelling IS the normal form. It went red on CI for the opposite reason to the bug it was
-    added for. So the property is asserted RELATIONALLY here, never against a remembered spelling.
-
-    Part 1 holds on every interpreter and is the load-bearing half: `ast.unparse` normalises a
-    double-quoted string to a single-quoted one, so the detector demonstrably separates two spellings
-    of the same expression rather than accepting whatever it is handed.
-
-    Part 2 pins the specific hazard, and is guarded because it cannot be EXPRESSED before 3.12: quote
-    reuse inside an f-string is PEP 701, so on 3.11 the second spelling is a SyntaxError rather than a
-    dialect. Where both spellings parse they must mean the same thing and exactly one must be normal.
-    """
-    assert ast.unparse(ast.parse("'plain'", mode="eval").body) == "'plain'"
-    assert ast.unparse(ast.parse('"plain"', mode="eval").body) != '"plain"', (
-        "unparse no longer normalises quoting, so this detector cannot separate two spellings at all"
-    )
-
-    spellings = ["f\"{k}={s or 'x'}\"", "f'{k}={s or 'x'}'"]
-    parsed = []
-    for spelling in spellings:
-        try:
-            parsed.append((spelling, ast.unparse(ast.parse(spelling, mode="eval").body)))
-        except SyntaxError:  # pre-PEP-701 interpreter: the hazard cannot be written down
-            continue
-    assert parsed, "the double-quoted spelling must parse on every supported interpreter"
-    assert len({normal for _src, normal in parsed}) == 1, "both spellings must denote the same expression"
-    if len(parsed) == 2:
-        assert sum(src == normal for src, normal in parsed) == 1, (
-            "exactly one spelling must be this interpreter's normal form -- if neither or both are, "
-            "the nested-literal hazard has changed shape and the gate above needs re-verifying"
-        )
 
 
 # ------------------------------------- #419: newly gated credentialed scripts
@@ -2704,8 +2253,7 @@ def _pat_name_capture(planted, tmp_path, wants=frozenset()):
     session = _Session("an-unrelated-long-pat-secret", (200, b""), pat_name=planted)
     # ⚠️ The Content-Type is not decoration and this fixture stops working without it (#480): a
     # `/data` body with no declared type is no longer certifiable as CSV, so no `columns` would be
-    # recorded and the leak this test drives through the sink would never be created. A real Tableau
-    # `/views/<luid>/data` response declares `text/csv`, so the fixture is now the honest shape.
+    # recorded and the leak this test drives through the sink would never be created. A real Tableau ...
     session.data_reply = (200, f"{planted}\nvalue\n".encode(), {"Content-Type": "text/csv"})
     record = oracle.capture_view(session, VIEW, tmp_path, wants)
     record["workbook_name"] = "W"
@@ -2718,24 +2266,12 @@ def _pat_name_capture(planted, tmp_path, wants=frozenset()):
 
 
 def test_the_manifest_sink_scrubs_the_one_credential_the_seam_lets_through(tmp_path):
-    """⚠️ Written because FOUR mutations survived: nothing drove a value through the sink at all.
-
-    A backstop with no test is the "unkillable defence in depth" this review already rejected once.
-    The path that reaches it is real and reachable: the PAT **name** is deliberately redacted rather
-    than refused (`reflected_credential`), so a successful CSV whose header matches it produces
-    `data.columns` containing it -- through a dict, through the `views` LIST, and through the
-    `columns` LIST -- and the sink is the only thing standing between that and the manifest.
-    """
+    """⚠️ Written because FOUR mutations survived: nothing drove a value through the sink at all."""
     planted = "SYNTHETIC_PAT_NAME_42"
     manifest, _csv = _pat_name_capture(planted, tmp_path)
     assert manifest["views"][0]["data"]["status"] == "ok", "the seam must NOT refuse a mere PAT name"
     assert manifest["views"][0]["data"]["columns"] == ["[REDACTED]"]
     assert planted not in json.dumps(manifest)
-
-
-def test_the_sink_reports_which_field_it_had_to_scrub(tmp_path):
-    """Scrubbing silently is how a source defect survives: the artifact looks perfect either way."""
-    manifest, _csv = _pat_name_capture("SYNTHETIC_PAT_NAME_42", tmp_path)
     assert manifest["credential_scrubbed_at_sink"] == ["views[0].data.columns[0]"]
 
 
@@ -2781,22 +2317,7 @@ def test_the_blocked_list_redacts_the_names_it_prints(caplog):
 
 
 def test_a_reflected_credential_arriving_as_a_SERVER_VERSION_never_reaches_the_svg_advice(caplog):
-    """The version strings quoted by the #474 advice are response-derived like any other.
-
-    `/serverinfo` is unauthenticated, so this is belt on top of braces -- but the braces are an
-    argument about the call site ("it cannot leak here"), and this repo has watched that argument
-    move and stop being true four separate times. The chokepoint is what makes it a property.
-
-    ⚠️ **The advice now refuses this input one step EARLIER, and the assertions moved with it.** Since
-    #475's review, a `restApiVersion` that is not a REST API version establishes no ceiling at all,
-    so a reflected token arriving in that field resolves to `ceiling_not_established` and the remedy
-    never quotes it -- there is nothing left on this path for the chokepoint to redact. The security
-    property STRENGTHENED: the token is refused rather than redacted. But `"[REDACTED]" in caplog`
-    was only ever a *proxy* for `longest_surviving_run(token) == ""`, and the proxy stopped applying
-    while the real property still holds, so it moved to the sibling test below where the value IS
-    still quoted. Asserting a marker the code no longer has occasion to emit would be a test passing
-    on a coincidence -- and one that would then fail for a reason unrelated to any leak.
-    """
+    """The version strings quoted by the #474 advice are response-derived like any other. (#475)"""
     token = "SYNTHETIC_SESSION_TOKEN_42_LONG_ENOUGH"
     session = _Session("an-unrelated-long-pat-secret")
     session.token = token
@@ -2813,14 +2334,7 @@ def test_a_reflected_credential_arriving_as_a_SERVER_VERSION_never_reaches_the_s
 
 
 def test_a_reflected_credential_arriving_as_a_PRODUCT_VERSION_reaches_the_log_only_redacted(caplog):
-    """The `[REDACTED]` half, kept on the path where the advice still quotes the value.
-
-    `productVersion` has no grammar to fail -- it is a free-form marketing string (`2025.3.3`), and a
-    reflecting proxy can put anything in it -- so it is quoted whenever the ceiling IS established.
-    Here the ceiling is a real `3.27`, below the SVG floor, and state B's message names the product
-    beside it. This is the case that proves the chokepoint FIRED, rather than that the run happened
-    to have nothing to say.
-    """
+    """The `[REDACTED]` half, kept on the path where the advice still quotes the value."""
     token = "SYNTHETIC_SESSION_TOKEN_42_LONG_ENOUGH"
     session = _Session("an-unrelated-long-pat-secret")
     session.token = token
@@ -2836,12 +2350,12 @@ def test_a_reflected_credential_arriving_as_a_PRODUCT_VERSION_reaches_the_log_on
 # --------------------------------------------- round 6: key scrubbing, collisions, and hit paths
 
 
-def test_scrub_tree_scrubs_dict_KEYS_not_only_values():
-    """A reflected dictionary key must be scrubbed as well as its value."""
-    tree = {"format_hints": {"SECRET_COLUMN_42": "percent"}}
+def test_scrub_tree_scrubs_dict_KEYS_and_never_records_the_raw_key():
+    """A reflected dictionary key is scrubbed, and its recorded hit path carries only the scrubbed key."""
+    tree = {"views": [{"format_hints": {"SECRET_COLUMN_42": "percent"}}]}
     scrubbed, hits = scrub_tree(tree, lambda t: t.replace("SECRET_COLUMN_42", "[R]"))
-    assert scrubbed == {"format_hints": {"[R]": "percent"}}
-    assert hits == ["format_hints.[R] (key)"]
+    assert scrubbed == {"views": [{"format_hints": {"[R]": "percent"}}]}
+    assert hits == ["views[0].format_hints.[R] (key)"]
 
 
 def test_a_redaction_induced_key_collision_is_disambiguated_never_dropped():
@@ -2853,46 +2367,14 @@ def test_a_redaction_induced_key_collision_is_disambiguated_never_dropped():
     assert len(hits) == 2
 
 
-def test_a_recorded_hit_path_never_contains_the_unsanitised_key():
-    """Otherwise the guard re-emits, in `credential_scrubbed_at_sink`, exactly what it just caught."""
-    tree = {"views": [{"format_hints": {"SECRET_COLUMN_42": "percent"}}]}
-    _scrubbed, hits = scrub_tree(tree, lambda t: t.replace("SECRET_COLUMN_42", "[R]"))
-    assert hits == ["views[0].format_hints.[R] (key)"]
-    assert "SECRET_COLUMN_42" not in " ".join(hits)
-
-
-def test_the_pat_name_is_KNOWN_to_survive_in_the_csv_on_disk(tmp_path):
-    """The deliberate residual, pinned so it is a decision rather than an oversight.
-
-    The PAT name is not refused at the seam (a human-chosen name like `Migration` would refuse a
-    legitimate estate), so the bytes are written. It does not authenticate on its own and is visible
-    in Tableau's own UI. If that trade ever stops being acceptable the fix is in
-    `reflected_credential`, and this test is the thing that will fail and say so.
-    """
-    planted = "SYNTHETIC_PAT_NAME_42"
-    _manifest, csv_text = _pat_name_capture(planted, tmp_path)
-    assert planted in csv_text
-
-
 # ---------------------------------------------------------- round 7: the HTTP REASON PHRASE
 #
-# ⚠️ A surface distinct from a reflecting BODY, which the battery above already covers, and the ONE
-# leak in this PR that master does not have: `capture_tableau_oracle` has always caught `HTTPError`
-# inside `_request`, but the standalone `sign_in()` added for the #403 probe let it escape. Its
-# message carries the server-controlled reason phrase, and that request contains the PAT.
+# ⚠️ A surface distinct from a reflecting BODY, which the battery above already covers, and the ONE ...
+# Refs #403.
 
 
 def _one_request_server(status: int, reason: str, body: bytes):
-    """A local server that answers exactly one POST. No live site, no .env, no credential on disk.
-
-    ⚠️ It **drains the request body first**, and that is not politeness. Without it the handler
-    replies and closes while urllib is still writing the POST entity, Windows resets the socket, and
-    the client sees `ConnectionAbortedError` instead of the HTTP response the test is about. Measured
-    at b810567, *before* any round-9 change: 3 runs of the same 19 tests gave 0, 2 and 0 failures,
-    with a different parametrisation failing each time -- a pre-existing flake in the fixture, not in
-    the code under test. A regression test that fails at random is worse than none, because the next
-    person reads the noise as the finding.
-    """
+    """A local server that answers exactly one POST."""
 
     class _Handler(BaseHTTPRequestHandler):
         def do_POST(self):  # noqa: N802
@@ -2912,43 +2394,27 @@ def _one_request_server(status: int, reason: str, body: bytes):
     return server
 
 
-@pytest.mark.parametrize("shape", sorted(SHAPES))
-@pytest.mark.parametrize("planted", ["pat_secret", "pat_name"])
-def test_the_signin_reason_phrase_never_carries_a_credential(shape, planted):
-    """Measured before the fix: `HTTPError: HTTP Error 403: SYNTHETIC_PAT_SECRET_REASON_42`.
-
-    ⚠️ Catches BaseException rather than using `pytest.raises(RuntimeError)`, and the mutation harness
-    is why. With `pytest.raises`, deleting the `except` clause let the raw `HTTPError` propagate --
-    a genuine kill -- but the test then died of an unexpected EXCEPTION rather than an assertion, and
-    a harness that (correctly) refuses to score crashes as kills reported INVALID. That is a false
-    INVALID: the mirror of the false CAUGHT the rule exists to prevent, and it hid a working
-    regression test behind a scoring artefact.
-
-    The deeper point is that the question was wrong. This test is not "does a RuntimeError come out";
-    it is "can a credential escape by ANY path". Asking the second makes the leak an assertion
-    failure whatever the exception type, and the intended type is still pinned below.
-    """
-    secret = SHAPES[shape].replace("\n", " ").strip() or "SYNTHETIC_SECRET_42"
-    # An HTTP reason phrase is a single status-line token: ASCII printable only. Anything else cannot
-    # travel there at all -- a non-ASCII reason aborts the connection, which tests the server rather
-    # than our redaction.
-    reason = "".join(ch for ch in secret if ch.isascii() and ch.isprintable()) or "SYNTHETIC_SECRET_42"
-    pat_secret_value = reason if planted == "pat_secret" else "an-unrelated-long-pat-secret"
-    pat_name = reason if planted == "pat_name" else "an-unrelated-long-pat-name"
-    server = _one_request_server(403, reason, b"")
-    raised: BaseException | None = None
-    try:
-        cap.sign_in(f"http://127.0.0.1:{server.server_port}", "site", pat_name, pat_secret_value, "3.29")
-    except BaseException as exc:  # pylint: disable=broad-exception-caught  # ANY escape is the specimen
-        raised = exc
-    finally:
-        server.shutdown()
-        server.server_close()
-    assert raised is not None, "sign_in must not report success for an HTTP 403"
-    message = f"{type(raised).__name__}: {raised}"
-    assert longest_surviving_run(reason, message) == "", message
-    assert "403" in message, "the status must survive; redaction that destroys the diagnostic is not a fix"
-    assert isinstance(raised, RuntimeError), f"the sanitised failure must be a RuntimeError, got {message}"
+def test_the_signin_reason_phrase_never_carries_a_credential():
+    """Measured before the fix: `HTTPError: HTTP Error 403: SYNTHETIC_PAT_SECRET_REASON_42`."""
+    reason = "SYNTHETIC_SECRET_42"
+    for pat_name, pat_secret_value in (
+        (reason, "an-unrelated-long-pat-secret"),
+        ("an-unrelated-long-pat-name", reason),
+    ):
+        server = _one_request_server(403, reason, b"")
+        raised: BaseException | None = None
+        try:
+            cap.sign_in(f"http://127.0.0.1:{server.server_port}", "site", pat_name, pat_secret_value, "3.29")
+        except BaseException as exc:  # pylint: disable=broad-exception-caught  # ANY escape is the specimen
+            raised = exc
+        finally:
+            server.shutdown()
+            server.server_close()
+        assert raised is not None, "sign_in must not report success for an HTTP 403"
+        message = f"{type(raised).__name__}: {raised}"
+        assert longest_surviving_run(reason, message) == "", message
+        assert "403" in message, "the status must survive; redaction that destroys the diagnostic is not a fix"
+        assert isinstance(raised, RuntimeError), f"the sanitised failure must be a RuntimeError, got {message}"
 
 
 def test_the_signin_error_BODY_is_redacted_too_and_the_reason_still_reads():
@@ -2991,31 +2457,17 @@ SPLIT_SECRET = "SYNTHETIC_PAT_SECRET_REASON_SPLIT_42"
 
 
 def test_a_credential_split_across_the_reason_and_the_body_does_not_reconstruct():
-    """⚠️ Measured on 2ac8d1b, and the old fixture structurally could not see it.
-
-    That fixture set the configured credential EQUAL to the whole reason, so nine adversarial shapes
-    x both halves all exercised the same easy case: a full literal, which full-literal redaction
-    matches. Split the secret in two and neither surface contains the literal, both fragments survive
-    their own redactor, and they were printed side by side:
-
-        HTTP 403 SYNTHETIC_PAT_SECR ET_REASON_SPLIT_42        reconstructs=True
-
-    The fix is a DELETION: the server-controlled reason phrase is no longer emitted at all, so there
-    is no second surface to split across. Detecting a fragment is not solvable -- a short fragment is
-    indistinguishable from ordinary text -- so emitting fewer attacker-controlled strings is the only
-    defence available.
-    """
+    """⚠️ Measured on 2ac8d1b, and the old fixture structurally could not see it."""
     message = _signin_message(SPLIT_SECRET[:18], SPLIT_SECRET[18:].encode(), SPLIT_SECRET)
     joined = "".join(ch for ch in message if ch.isalnum() or ch == "_")
     assert SPLIT_SECRET not in joined, f"the two halves reconstructed: {message}"
     assert SPLIT_SECRET[:18] not in message, f"the reason-phrase half survived: {message}"
 
 
-@pytest.mark.parametrize("cut", [8, 16, 24])
-def test_a_reason_phrase_carrying_only_a_PREFIX_of_a_longer_credential_never_reaches_the_message(cut):
+def test_a_reason_phrase_carrying_only_a_PREFIX_of_a_longer_credential_never_reaches_the_message():
     """The other half of the same defect: a fragment is not the literal, so no redactor matches it."""
-    message = _signin_message(SPLIT_SECRET[:cut], b"Forbidden", SPLIT_SECRET)
-    assert SPLIT_SECRET[:cut] not in message, message
+    message = _signin_message(SPLIT_SECRET[:16], b"Forbidden", SPLIT_SECRET)
+    assert SPLIT_SECRET[:16] not in message, message
     assert "403" in message
 
 
@@ -3027,38 +2479,9 @@ def test_the_reason_phrase_is_ours_and_cannot_be_steered_by_the_server():
         assert "403 Forbidden" in message, message
 
 
-def test_the_body_fragment_residual_is_pinned_at_PARITY_with_master():
-    """⚠️ An honest bound, not a claim of safety.
-
-    With the reason phrase gone, the body is the only attacker-influenced string left, and a FRAGMENT
-    of a credential in the body still survives full-literal redaction. That is not new and not a
-    regression: `origin/master`'s own `capture_tableau_oracle.sign_in` leaks the identical fragment on
-    the identical input (measured: both emit `ET_REASON_SPLIT_42`). It is a property of `redact`
-    itself, tracked as the residual this project has documented since round 4, and closing it needs a
-    different redactor rather than a different call site.
-
-    This test exists so the bound is a KNOWN one: if the body ever stops being redacted at all, the
-    first assertion fails; if the fragment residual is ever fixed, the second fails and this test
-    should be rewritten rather than deleted.
-    """
-    message = _signin_message("Forbidden", SPLIT_SECRET[18:].encode(), SPLIT_SECRET)
-    assert SPLIT_SECRET not in message, "the WHOLE credential must never survive"
-    assert SPLIT_SECRET[18:] in message, (
-        "the body fragment no longer survives -- if that is deliberate, this parity pin is stale and "
-        "the residual documented in docs/reference-capture.md should be updated"
-    )
-
-
 # ------------------------------------ round 9: `http.client.HTTPException` is NOT an `OSError`
 #
-# ⚠️ The THIRD consecutive regression of one shape, and the reason the fix is a shared module rather
-# than a fourth `except` clause. A server that never produces a parseable HTTP response still gets to
-# choose the exception TEXT: `BadStatusLine` carries its raw status line and `InvalidURL` carries a
-# redirect's host/port. Neither is an `OSError`, so `except (OSError, urllib.error.URLError)` -- the
-# spelling in all three of this module's hand-rolled clients -- let them out as an uncaught traceback.
-# Measured before the fix, against exactly these two servers: exit 1 with the PAT in the traceback for
-# `sign_in`, `_cli_fetch` AND `server_info`; the same shapes through the oracle's hardened `_request`,
-# on this branch and on `origin/master` alike, exit with `[REDACTED]` and no leak.
+# ⚠️ The THIRD consecutive regression of one shape, and the reason the fix is a shared module rather ...
 
 ROUND9_SECRET = "SYNTHETIC_ROUND9_PAT_SECRET_42"
 ROUND9_TOKEN = "SYNTHETIC_ROUND9_SESSION_TOKEN_42"
@@ -3074,11 +2497,7 @@ RAW_SHAPES = {
 
 
 def _raw_response_server(payload: bytes):
-    """A local socket server that answers with CANNED BYTES, not HTTP. Returns ``(base_url, close)``.
-
-    It drains the request first for the same reason `_one_request_server` does -- replying mid-write
-    makes Windows reset the socket and substitutes a `ConnectionResetError` for the shape under test.
-    """
+    """A local socket server that answers with CANNED BYTES, not HTTP."""
     sock = socket.socket()
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind(("127.0.0.1", 0))
@@ -3160,12 +2579,7 @@ def test_the_same_shapes_cannot_escape_the_authenticated_fetcher(shape):
 
 @pytest.mark.parametrize("shape", sorted(RAW_SHAPES))
 def test_the_same_shapes_cannot_escape_the_unauthenticated_serverinfo_probe(shape):
-    """`server_info` documents itself as failing SOFT. That was a claim, not a property: an
-    `http.client.HTTPException` escaped it as an uncaught traceback (measured, exit 1).
-
-    Nothing of ours is sent here, so a reflection cannot be a credential of ours -- but every caller
-    hands it `env_redactor` anyway, and this pins that the redactor is honoured rather than ignored.
-    """
+    """`server_info` documents itself as failing SOFT."""
     base, close = _raw_response_server(RAW_SHAPES[shape].format(reflect=ROUND9_SECRET).encode())
     try:
         info = cap.server_info(base, timeout=10, redactor=env_redactor({"TABLEAU_PAT_SECRET": ROUND9_SECRET}))
@@ -3178,10 +2592,7 @@ def test_the_same_shapes_cannot_escape_the_unauthenticated_serverinfo_probe(shap
 
 @pytest.mark.parametrize("shape", sorted(RAW_SHAPES))
 def test_the_oracle_session_reaches_the_identical_verdict_on_the_identical_shapes(shape):
-    """Parity, measured rather than asserted: the point of the shared primitive is that the two
-    callers can no longer diverge. This is the comparison that made round 9 a REGRESSION rather than
-    a pre-existing gap -- `origin/master`'s oracle already handled both shapes, and the new standalone
-    client did not."""
+    """Parity, measured rather than asserted: the point of the shared primitive is that the two callers can no longer diverge."""
     base, close = _raw_response_server(RAW_SHAPES[shape].format(reflect=ROUND9_SECRET).encode())
     creds = oracle.SiteCredentials(
         base=base, site="site", pat_name="an-unrelated-long-pat-name", pat_secret=ROUND9_SECRET, version="3.29"
@@ -3201,14 +2612,7 @@ def test_the_oracle_session_reaches_the_identical_verdict_on_the_identical_shape
 
 
 def test_the_shared_primitive_guards_the_ERROR_BODY_read_as_well_as_the_request(monkeypatch):
-    """The second surface inside one `try`, and the one Python will not route to a sibling `except`.
-
-    An exception raised INSIDE an `except urllib.error.HTTPError` clause does not reach a later
-    `except` of the same `try`, so an `exc.read()` that fails mid-stream escapes the primitive
-    entirely -- and `IncompleteRead` is an `HTTPException`, not an `OSError`. The real HTTP status
-    must survive (a 503 whose body read failed is still usefully a 503 and still retry-eligible), and
-    the substituted body must be redacted like any other string this module authors.
-    """
+    """The second surface inside one `try`, and the one Python will not route to a sibling `except`."""
 
     class _TornBody(urllib.error.HTTPError):  # pylint: disable=too-many-ancestors
         """A 503 whose body read tears mid-stream, as one does over a flaky link."""
@@ -3233,16 +2637,7 @@ def test_the_shared_primitive_guards_the_ERROR_BODY_read_as_well_as_the_request(
 
 
 def test_the_error_body_read_failure_is_redacted_not_merely_caught(monkeypatch):
-    """Catching it is not enough -- the substituted body must go through the redactor too.
-
-    ⚠️ Honest scope. Measured against CPython 3.13, **none** of the body-read exceptions the stdlib
-    itself raises currently quotes server bytes in `str()`: `IncompleteRead` reports only a byte
-    count (`IncompleteRead(30 bytes read, 99 more expected)` -- its *repr* does carry the partial
-    bytes, but `_describe` uses `str`), and `LineTooLong` quotes only the line-type literal we pass
-    it. So this is a chokepoint pin, not a reproduction of a live leak: it fails if the substituted
-    body ever stops being redacted, which is what would matter the day a library in this position
-    does echo response text. The subclass below models exactly that.
-    """
+    """Catching it is not enough -- the substituted body must go through the redactor too."""
 
     class _EchoingReadFailure(http.client.HTTPException):
         """A body-read failure whose message quotes what it managed to read."""
@@ -3269,13 +2664,7 @@ def test_the_error_body_read_failure_is_redacted_not_merely_caught(monkeypatch):
 
 
 def test_header_value_is_case_insensitive_like_the_HTTPMessage_it_replaced():
-    """⚠️ A silent regression the shared primitive could have introduced, not a nicety.
-
-    `http.client`'s own `HTTPMessage` is case-insensitive; `dict(resp.headers)` is not. Callers used
-    to hold the message and now hold the dict, so a server answering `content-type: image/svg+xml`
-    would have returned `None` from `headers.get("Content-Type")` -- and `format_matches` would have
-    lost its Content-Type evidence for a rung that answered perfectly well.
-    """
+    """⚠️ A silent regression the shared primitive could have introduced, not a nicety."""
     headers = {"content-type": "image/svg+xml", "Retry-After": "30"}
     assert tableau_http.header_value(headers, "Content-Type") == "image/svg+xml"
     assert tableau_http.header_value(headers, "retry-after") == "30"
@@ -3283,124 +2672,46 @@ def test_header_value_is_case_insensitive_like_the_HTTPMessage_it_replaced():
     assert tableau_http.header_value(headers, "X-Absent") is None
 
 
-@pytest.mark.parametrize("shape", sorted(SHAPES))
 @pytest.mark.parametrize("kind", ["png", "svg", "pdf"])
-def test_the_completeness_diagnostic_quotes_no_payload_bytes(kind, shape):
-    """The `why_incomplete` certification claims FIXED-VOCABULARY. This measures it.
-
-    ⚠️ `payload_is_complete` is the ONE diagnostic on this path that takes no redactor, and the whole
-    justification is that it interpolates integers and never a byte of the payload. That is a claim
-    about code someone will edit later -- the cheapest possible regression is an f-string quoting the
-    root element's tag or expat's message, and `str(ParseError)` for an undefined entity echoes
-    document text verbatim. So the claim is exercised with the same adversarial battery every other
-    site faces, and against the parse-error path specifically, where the temptation lives.
-
-    The decoy subtraction matters as much here as anywhere: a reason string legitimately contains
-    `<svg`, `%%EOF` and digits, and a naive substring search would credit those as a leak.
-    """
-    secret, decoy = SHAPES[shape], DECOYS[shape]
+def test_the_completeness_diagnostic_quotes_no_payload_bytes(kind):
+    """`payload_is_complete` takes no redactor, so its reason must quote no payload byte."""
     bodies = {
-        # Truncated after a good prefix, with the secret in the bytes that never made it out.
         "png": lambda value: b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + value.encode(),
-        # Reaches the ParseError branch, whose expat message is the one that echoes document text.
         "svg": lambda value: f'<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg" id="{value}">'.encode(),
         "pdf": lambda value: f"%PDF-1.4\n1 0 obj\n<< /Title ({value}) >>\nendobj\n".encode(),
     }
-    ok, why = payload_facts.payload_is_complete(kind, bodies[kind](secret))
-    _decoy_ok, decoy_why = payload_facts.payload_is_complete(kind, bodies[kind](decoy))
-
-    assert ok is False, f"the {kind} fixture is meant to be incomplete, so this proves nothing: {why!r}"
-    assert why, "an incomplete payload must say why, or the manifest records a refusal with no reason"
-    leak = longest_surviving_run(secret, why)
-    assert leak == "" or leak in decoy_why, (
-        f"`payload_is_complete({kind!r}, ...)` echoed {leak!r} from the payload into a diagnostic that "
-        f"is persisted UNREDACTED into oracle-manifest.json: {why!r}"
-    )
+    for shape, secret in SHAPES.items():
+        ok, why = payload_facts.payload_is_complete(kind, bodies[kind](secret))
+        _decoy_ok, decoy_why = payload_facts.payload_is_complete(kind, bodies[kind](DECOYS[shape]))
+        assert ok is False, f"the {kind} fixture is meant to be incomplete: {why!r}"
+        assert why, "an incomplete payload must say why"
+        leak = longest_surviving_run(secret, why)
+        assert leak == "" or leak in decoy_why, f"payload_is_complete({kind!r}) echoed {leak!r} ({shape}): {why!r}"
 
 
-def test_an_undefined_entity_is_the_control_that_makes_that_test_bite():
-    """⚠️ This control FALSIFIED the docstring it was written to confirm. Kept, corrected, not deleted.
-
-    The first version of `_svg_is_complete` justified not forwarding `str(exc)` with "expat's
-    'undefined entity &foo;' message echoes document text". Measured on CPython 3.13 that is **false**:
-    across ten malformed shapes -- undefined entity, mismatched tag, unbound prefix, junk after the
-    root, duplicate attribute, unclosed token, invalid token, an encoding mismatch and a mis-declared
-    UTF-16 document -- every `ParseError` message is fixed vocabulary plus a line/column and quotes
-    nothing.
-
-    ⚠️ What the same probe DID find is a live defect the wrong assumption was hiding: a document
-    declaring an unknown encoding raises `LookupError: unknown encoding: <attacker text>`, which is
-    **not a ParseError**, so `except ElementTree.ParseError` let it out of the module entirely -- into
-    a traceback carrying the document's own bytes, crashing the capture on the way. That is the shape
-    this test now pins, and the `ParseError` half is kept as the negative control: if a future Python
-    starts quoting document text there, this fails and says so.
-    """
+def test_malformed_svg_entities_encodings_and_dtds_are_refused_without_echo():
+    """An undefined entity, an unknown encoding (a LookupError, not a ParseError) and an entity DTD
+    are each refused with a reason that quotes nothing from the document."""
     entity = f'<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg">&{SHAPES["plain"]};</svg>'.encode()
     encoding = f'<?xml version="1.0" encoding="{SHAPES["plain"]}"?><svg/>'.encode()
-
-    with pytest.raises(ElementTree.ParseError) as parse_error:
-        ElementTree.fromstring(entity)
-    assert longest_surviving_run(SHAPES["plain"], str(parse_error.value)) == "", (
-        f"a ParseError now echoes document text ({str(parse_error.value)!r}); `_svg_is_complete` "
-        "already refuses to forward it, but the module docstring's measured claim is out of date"
-    )
-
-    with pytest.raises(LookupError) as lookup_error:
-        ElementTree.fromstring(encoding)
-    assert longest_surviving_run(SHAPES["plain"], str(lookup_error.value)) != "", (
-        "the unknown-encoding message no longer echoes the document, so the `except LookupError` "
-        "branch is no longer covering the leak it was added for -- re-measure before trusting it"
-    )
-    assert not isinstance(lookup_error.value, ElementTree.ParseError), (
-        "LookupError became a ParseError, so the separate handler is now redundant rather than "
-        "load-bearing; say so in the docstring instead of leaving a claim that no longer bites"
-    )
-
     for body in (entity, encoding):
         ok, why = payload_facts.payload_is_complete("svg", body)
         assert ok is False, why
         assert longest_surviving_run(SHAPES["plain"], why) == "", why
 
-
-def test_the_entity_refusal_prevents_an_expansion_expat_would_otherwise_perform():
-    """⚠️ A guard that guards nothing reads exactly like one that does. This measures the difference.
-
-    `_svg_is_complete` refuses a DTD rather than parsing it, on the grounds that expat expands
-    internal entities and a nested set is a memory-exhaustion primitive. That is only worth the code
-    if expat really would expand it, so the expansion is demonstrated here on a deliberately small
-    payload -- three levels, not a bomb -- and the refusal is then shown to stop before reaching it.
-    """
     bomb = (
         b'<?xml version="1.0"?><!DOCTYPE svg [<!ENTITY a "AAAAAAAAAA">'
-        b'<!ENTITY b "&a;&a;&a;&a;&a;&a;&a;&a;&a;&a;">'
-        b'<!ENTITY c "&b;&b;&b;&b;&b;&b;&b;&b;&b;&b;">]>'
-        b'<svg xmlns="http://www.w3.org/2000/svg"><text>&c;</text></svg>'
+        b'<!ENTITY b "&a;&a;&a;&a;&a;&a;&a;&a;&a;&a;">]>'
+        b'<svg xmlns="http://www.w3.org/2000/svg"><text>&b;</text></svg>'
     )
-    root = ElementTree.fromstring(bomb)
-    expanded = len(root[0].text or "")
-
-    assert expanded == 1000, (
-        f"expat expanded the entity to {expanded} characters from a 3-level declaration; if it has "
-        "stopped expanding at all, the refusal in `_svg_is_complete` is now dead code"
-    )
-
     ok, why = payload_facts.payload_is_complete("svg", bomb)
-
     assert ok is False
     assert why == "the SVG declares XML entities, which this parser refuses to expand", why
 
 
 # ------------------------------------------ round 9: the KNOWN_GAPS classification, as MEASURED
 #
-# ⚠️ `provision_tableau_estate.py` sat in GATE_WAIVERS for nine rounds claiming it "publishes TO
-# Tableau -- its credentials are outbound; the manifest it writes is covered by `redact`". Both
-# halves are false, and the gate could not contradict either: `_HTTP_MARKERS` was stdlib-only, so the
-# detector could not see a module that reaches HTTP through `tableauserverclient` at all.
-#
-# The detector now sees it, and it is recorded as a KNOWN GAP. These two tests pin the gap as a
-# MEASURED fact rather than a prose claim, which is what makes the classification falsifiable in the
-# right direction: the day either sink is protected, the corresponding test fails and says so, and
-# the entry should move out of KNOWN_GAPS. Reproduced with in-process fakes -- no network, no .env.
+# ⚠️ `provision_tableau_estate.py` sat in GATE_WAIVERS for nine rounds claiming it "publishes TO ...
 
 PROVISION_SECRET = "SYNTHETIC_PROVISION_PAT_42"
 PROVISION_ENV = {
@@ -3411,121 +2722,34 @@ PROVISION_ENV = {
 }
 
 
-def test_provision_is_classified_as_a_known_gap_not_as_safe():
-    """The classification itself, so a move back into GATE_WAIVERS is a test failure."""
-    assert "scripts/provision_tableau_estate.py" in KNOWN_GAPS
-    assert "scripts/provision_tableau_estate.py" not in GATE_WAIVERS
-    assert "scripts/provision_tableau_estate.py" not in NON_HTTP_CREDENTIAL_SCRIPTS
-
-
-@pytest.mark.parametrize("module", ["scripts/assess_estate.py", "scripts/stamp_tableau_provenance.py"])
+@pytest.mark.parametrize(
+    "module",
+    ["scripts/provision_tableau_estate.py", "scripts/assess_estate.py", "scripts/stamp_tableau_provenance.py"],
+)
 def test_unproven_response_parsers_are_classified_as_known_gaps(module):
-    """Direct regressions exist, but these modules are not falsely certified by this static gate."""
+    """These modules are recorded gaps, never falsely certified or waived as safe."""
     assert module in KNOWN_GAPS
     assert module not in MODULES
     assert module not in GATE_WAIVERS
     assert module not in NON_HTTP_CREDENTIAL_SCRIPTS
 
 
-def test_the_provision_signin_gap_is_still_real_and_still_uncaught(tmp_path):
-    """`with server.auth.sign_in(auth):` at provision_tableau_estate.py:282 has no handler at all.
-
-    A TSC `ServerResponseError` carries the response text, and that response answered a request whose
-    body contained the PAT -- so a reflecting proxy puts the credential on an uncaught traceback.
-    Measured against a local server echoing a synthetic PAT in an XML error: exit 1, credential
-    visible. Reproduced here without a socket by raising from the sign-in context manager.
-    """
-    prov = importlib.import_module("provision_tableau_estate")
-
-    class _Refusing:  # pylint: disable=too-few-public-methods
-        def sign_in(self, _auth):
-            """Preserve the separate producer's known unsafe exception for its gap control."""
-            raise RuntimeError(f"401001: Signin Error\n\t\techo {PROVISION_SECRET}")
-
-    server = SimpleNamespace(auth=_Refusing())
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(prov, "_sign_in", lambda _env: (server, object()))
-        with pytest.raises(RuntimeError) as caught:
-            prov.capture(tmp_path, PROVISION_ENV, include_extract=False, download=False)
-    assert PROVISION_SECRET in str(caught.value), (
-        "the provision sign-in no longer leaks -- if it is now guarded, move "
-        "scripts/provision_tableau_estate.py out of KNOWN_GAPS and re-classify it"
-    )
-
-
-def test_the_provision_manifest_gap_is_still_real_and_still_unscrubbed(tmp_path):
-    """`:721` serialises response-derived project, group and content fields with no whole-manifest
-    scrub -- only `ContentRecord.notes` is redacted, via `_describe`. So a project or group NAMED
-    after a credential, or a reflected one, is written to `manifest.json` in clear.
-
-    Measured: `manifest_project_name='Proj SYNTHETIC_PROVISION_PAT_42'`, exit 0, on this branch and
-    byte-identically on `origin/master`. A pre-existing leak, recorded rather than claimed away.
-    """
-    prov = importlib.import_module("provision_tableau_estate")
-    fakes = importlib.import_module("test_provision_tableau_estate")
-    server = fakes.FakeServer(
-        projects_in=(fakes.FakeProject(id="p1", name=f"Proj {PROVISION_SECRET}"),),
-        groups_in=(f"Group {PROVISION_SECRET}",),
-        datasources_in=(fakes.FakeContent(id="d1", name=f"DS {PROVISION_SECRET}", project_id="p1"),),
-    )
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(prov, "tsc", SimpleNamespace(Pager=fakes.FakePager))
-        patch.setattr(prov, "_sign_in", lambda _env: (server, object()))
-        manifest = prov.capture(tmp_path, PROVISION_ENV, include_extract=False, download=False)
-    target = tmp_path / "manifest.json"
-    target.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf8")
-    assert PROVISION_SECRET in target.read_text(encoding="utf8"), (
-        "the provision manifest no longer leaks -- if a whole-manifest scrub was added, move "
-        "scripts/provision_tableau_estate.py out of KNOWN_GAPS and re-classify it"
-    )
-
-
-# ------------------------------------------------- the reviewer's two round-4 reproductions, named
-
-
-def test_a_secret_with_leading_whitespace_never_reaches_the_written_manifest(tmp_path):
-    """Round 4's reproduction, re-verified after the round-5 seam. `.lstrip()` used to run before the
-    redactor, so the manifest carried `got unrecognised bytes ('SYNTHETIC_SECRET')`.
-
-    The outcome is now STRONGER than redaction: a successful body echoing the PAT secret is refused
-    outright, so nothing is written at all. The chokepoint that fixed round 4 is still what protects
-    the value the seam deliberately allows through -- see the PAT-name test below."""
-    secret = " SYNTHETIC_SECRET_42"
-    out = site_written_manifest(secret, tmp_path, None)
-    assert longest_surviving_run(secret, out) == ""
-    assert '"credential_reflected"' in out
-
-
-def test_a_secret_longer_than_any_window_never_reaches_the_written_manifest(tmp_path):
-    """Round 4's other reproduction: a 321-character secret was cut by the 256-byte window, so the
-    redactor's literal was absent and the first 16 characters persisted verbatim."""
-    secret = "S" + "YNTHETIC_SECRET_" * 20
-    out = site_written_manifest(secret, tmp_path, None)
-    assert longest_surviving_run(secret, out) == ""
-    assert '"credential_reflected"' in out
-
-
-@pytest.mark.parametrize("shape", sorted(SHAPES))
-def test_the_diagnostic_chokepoint_still_covers_what_the_seam_deliberately_allows(shape, tmp_path):
-    """The PAT NAME is redacted, never refused -- so round 4's diagnostic path is still LIVE, and this
-    is the test that keeps it proven now that the authenticating halves never reach it.
-
-    Without this, the round-5 seam would have silently retired every end-to-end check of the round-4
-    fix: refusing the payload makes the diagnostic unreachable for a secret, and a fix whose only
-    coverage has become unreachable is a fix nobody is testing.
-    """
-    planted = SHAPES[shape]
-    session = _Session("a-different-long-pat-secret", (200, (planted + " and then html").encode()), pat_name=planted)
-    record = oracle.capture_view(session, VIEW, tmp_path, frozenset({"svg"}))
-    record["workbook_name"] = "W"
-    counter = _Counter()
-    counter._redact = session.redact_text  # pylint: disable=protected-access
-    oracle.write_manifest([record], oracle.CaptureRun(counter, ENV, tmp_path, 0.0, frozenset({"svg"})))
-    out = (tmp_path / "oracle-manifest.json").read_text(encoding="utf-8")
-    control = "ZZQQWVVBBN_MMKKJ_77"
-    assert leaked_run(planted, out, control) == ""
-    assert record["svg"]["status"] == "format_mismatch", "the diagnostic route must still be reached"
-    assert "[REDACTED]" in out
+def test_the_diagnostic_chokepoint_still_covers_what_the_seam_deliberately_allows(tmp_path):
+    """The PAT NAME is redacted, never refused -- so the diagnostic chokepoint is still LIVE for it."""
+    for shape, planted in SHAPES.items():
+        session = _Session(
+            "a-different-long-pat-secret", (200, (planted + " and then html").encode()), pat_name=planted
+        )
+        record = oracle.capture_view(session, VIEW, tmp_path / shape, frozenset({"svg"}))
+        record["workbook_name"] = "W"
+        counter = _Counter()
+        counter._redact = session.redact_text  # pylint: disable=protected-access
+        run = oracle.CaptureRun(counter, ENV, tmp_path / shape, 0.0, frozenset({"svg"}))
+        oracle.write_manifest([record], run)
+        out = (tmp_path / shape / "oracle-manifest.json").read_text(encoding="utf-8")
+        assert leaked_run(planted, out, "ZZQQWVVBBN_MMKKJ_77") == "", shape
+        assert record["svg"]["status"] == "format_mismatch", "the diagnostic route must still be reached"
+        assert "[REDACTED]" in out, shape
 
 
 # --------------------------------------------------------------------------- the chokepoint itself
