@@ -828,6 +828,18 @@ class _GraphqlLeak(FakeTableau):
         return payload
 
 
+def test_a_graphql_200_error_body_is_scrubbed_before_it_is_recorded(monkeypatch, no_sleep):
+    """A 200 with an `errors` array is recorded via ``_record`` WITHOUT travelling through
+    ``_scrub`` - so its text must be scrubbed at the call site, or the PAT lands in the artifacts."""
+    site = _site(_GraphqlLeak(), monkeypatch, max_attempts=1)
+    _data, errors = assess_estate._pass2_structure(site)
+    assert errors and errors[0]["listing"] == "structure"
+    recorded = errors[0]["error"]
+    assert ENV["TABLEAU_PAT_SECRET"] not in recorded
+    assert "[REDACTED]" in recorded
+    assert no_sleep == []
+
+
 def test_estate_db_records_whether_the_run_was_degraded(tmp_path):
     """`estate.db` is read programmatically by harvest/deploy, which never open `assessment.json`. Refs #196."""
     raw = _raw_fixture([_error("workbooks", assess_estate.PRIMARY)])

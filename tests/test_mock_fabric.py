@@ -435,3 +435,10 @@ def test_a_forbidden_workspace_answers_403_not_404(service, tok):
     service.forbidden_workspaces.add(service.workspace_id)
     status, _headers, _body = service.call("GET", f"{API}/workspaces/{service.workspace_id}", tok)
     assert status == 403
+
+
+def test_the_request_log_records_what_was_actually_sent(service, tok):
+    """Inspection surface, not fidelity - but the tests below lean on it, so it is pinned here."""
+    create(service, tok, model_body("Sales"))
+    methods = [method for method, _url, _body in service.requests]
+    assert "POST" in methods

@@ -13,7 +13,7 @@ python -m pytest tests/test_mock_fabric.py tests/test_mock_tableau.py tests/test
 | [`tests/mocks/fabric.py`](../tests/mocks/fabric.py) | in-process Fabric REST fake, substituted at `deploy_estate._request` |
 | [`tests/mocks/tableau.py`](../tests/mocks/tableau.py) | Tableau REST + GraphQL Metadata fake, served over a loopback socket |
 | [`tests/mocks/estate.py`](../tests/mocks/estate.py) | a synthetic estate built from this repo's real fixture workbooks, plus a stand-in for the deterministic engine |
-| [`tests/test_mock_fabric.py`](../tests/test_mock_fabric.py) | 30 fidelity self-tests for the Fabric fake |
+| [`tests/test_mock_fabric.py`](../tests/test_mock_fabric.py) | 31 fidelity self-tests for the Fabric fake |
 | [`tests/test_mock_tableau.py`](../tests/test_mock_tableau.py) | fidelity self-tests for the Tableau fake, including its narrow REST authority subset |
 | [`tests/test_e2e_offline.py`](../tests/test_e2e_offline.py) | 18 joined end-to-end tests (marked `slow`) |
 
