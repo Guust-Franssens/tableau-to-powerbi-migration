@@ -119,7 +119,7 @@ def test_bridge_readiness_refuses_invalid_busy_retry_metadata(delay: object) -> 
 
 @pytest.mark.parametrize(
     "change",
-    ["top_error", "wrong_field", "path", "duplicate", "instance_error"],
+    ["top_error", "wrong_field", "path", "relative", "duplicate", "instance_error"],
 )
 def test_bridge_readiness_requires_both_positive_fields_and_exact_pid_file(change: str) -> None:
     payload = _ready_bridge()
@@ -146,6 +146,7 @@ def test_bridge_readiness_requires_both_positive_fields_and_exact_pid_file(chang
     "field,value",
     [
         ("retryable", False),
+        ("retryable", 1),
         ("code", "CREDENTIAL_REQUIRED"),
         ("message", "unknown error"),
     ],
@@ -397,7 +398,7 @@ def test_ui_refresh_preflight_precedes_binding_baseline_and_refresh(
     assert actions_seen == ["Refresh", "canaries", *([] if no_save else ["Save"])]
 
 
-@pytest.mark.parametrize("dirty", [1])
+@pytest.mark.parametrize("dirty", [1, None])
 def test_ui_refresh_requires_strict_false_initially(ui_refresh_route, dirty: object) -> None:
     controls, events, actions_seen, bridge_operations = ui_refresh_route
     instance = controls["initial"]
@@ -411,7 +412,7 @@ def test_ui_refresh_requires_strict_false_initially(ui_refresh_route, dirty: obj
     assert actions_seen == [], "Refresh/Save must be withheld when clean state is not proven"
 
 
-@pytest.mark.parametrize("path", [None])
+@pytest.mark.parametrize("path", ["model.pbip", None])
 def test_ui_refresh_refuses_unestablished_initial_absolute_path(ui_refresh_route, path: object) -> None:
     controls, events, actions_seen, _bridge_operations = ui_refresh_route
     controls["initial"]["currentFilePath"] = path
@@ -1719,7 +1720,9 @@ def test_native_identity_hot_path_without_windows(case: str) -> None:
     [
         ("occluded", [901, 789], "occluded_by_desktop_window"),
         ("provider_occluded", [905, 789], "occluded_by_desktop_window"),
+        ("not_over_centre", [904, 789], None),
         ("foreign", [902, 789], None),
+        ("hidden", [903, 789], None),
         ("root_missing", [902], "occlusion_walk_incomplete"),
     ],
 )

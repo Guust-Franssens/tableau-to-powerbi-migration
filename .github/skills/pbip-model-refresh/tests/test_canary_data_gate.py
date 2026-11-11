@@ -153,6 +153,15 @@ def test_main_maps_the_tables_flag_to_the_canary_list(monkeypatch) -> None:
     assert seen == {"port": 52001, "tables": ["A", "B"]}
 
 
+def test_main_maps_the_legacy_single_table_flag(monkeypatch) -> None:
+    """`--table X` (legacy) becomes a one-name canary list, so old callers keep a model verdict."""
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(probe_desktop_query, "discover_port", lambda pid: 52001)
+    monkeypatch.setattr(probe_desktop_query, "probe", lambda port, tables: seen.update(tables=tables) or 0)
+    assert probe_desktop_query.main(["--pid", "111", "--table", "Orders"]) == 0
+    assert seen["tables"] == ["Orders"]
+
+
 # --- refresh_pbip_model.row_counts: the refresh's own data check --------------------------------
 
 
@@ -199,6 +208,12 @@ def test_canaries_do_not_rescue_a_narrowed_refresh(capsys) -> None:
     assert "REFRESH: DATA_OK" not in out
 
 
+def test_verify_only_with_tables_is_still_data_ok(capsys) -> None:
+    """`--verify-only` never refreshes, so `--tables` narrowed nothing and the model verdict stands."""
+    out = _verdict(["--pid", "1", "--tables", "Orders", "--verify-only"], [("Orders", 5)], False, capsys)
+    assert "REFRESH: DATA_OK" in out
+
+
 def test_an_empty_canary_still_beats_every_other_verdict(capsys) -> None:
     """NO_DATA outranks the scope downgrade: an empty table is the loudest fact in the run."""
     out = _verdict(
@@ -218,10 +233,11 @@ def _bound_connection(monkeypatch, conn):
 @pytest.mark.parametrize(
     "epoch,after_identity,at_observation",
     [
+        (100.062, 100.062, 100.078),
         (100.062, 220.063, 220.063),
         (100.062, 220.061, 220.063),
     ],
-    ids=["expired", "expired-at-handoff"],
+    ids=["next-handoff-tick", "expired", "expired-at-handoff"],
 )
 def test_healthy_binding_survives_unexpired_deadline_roundtrip(
     monkeypatch: pytest.MonkeyPatch, epoch: float, after_identity: float, at_observation: float
@@ -296,8 +312,8 @@ def test_bound_queries_supply_the_callers_exact_process_start_to_every_observati
 
 @pytest.mark.parametrize(
     "canaries",
-    [[True], "Orders", ["Orders", "orders"]],
-    ids=["bool-name", "string", "duplicate"],
+    [[" "], [True], "Orders", ["Orders", "orders"]],
+    ids=["blank-name", "bool-name", "string", "duplicate"],
 )
 def test_observations_require_nonempty_explicit_unique_canaries(monkeypatch, canaries):
     conn = _Conn([("Parameters", False)], {"Parameters": 1})
@@ -308,7 +324,7 @@ def test_observations_require_nonempty_explicit_unique_canaries(monkeypatch, can
     assert conn.queries == before, "canary-set guard must precede opening/querying a new connection"
 
 
-@pytest.mark.parametrize("count", [False])
+@pytest.mark.parametrize("count", [False, -1])
 def test_observation_counts_are_not_coerced(monkeypatch, count):
     conn = _Conn([("Orders", False)], {})
     bound = _bound_connection(monkeypatch, conn)

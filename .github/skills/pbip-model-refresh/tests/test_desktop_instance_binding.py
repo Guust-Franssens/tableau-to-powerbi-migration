@@ -661,6 +661,21 @@ def test_a_user_table_named_like_the_auto_date_prefix_stays_in_the_disk_fingerpr
     assert tmdl_tables(cache.parent.parent) == {"Orders", "LocalDateTableSales", "DateTableTemplateArchive"}
 
 
+def test_same_model_accepts_an_exact_case_insensitive_match(monkeypatch, tmp_path: Path) -> None:
+    """The model that OWNS the cache matches the TMDL table-for-table, case-insensitively."""
+    cache = _model_folder(tmp_path, "MyMigration", ["Orders", "Date Table"])
+    monkeypatch.setattr(refresh_pbip_model, "_live_tables", lambda port: {"orders", "date table"})
+    monkeypatch.setattr(
+        refresh_pbip_model,
+        "_live_columns_measures",
+        lambda port: ({("orders", "X"), ("date table", "X")}, set()),
+        raising=False,
+    )
+    ok, message = same_model(52001, cache)
+    assert ok, message
+    assert "exact match" in message
+
+
 def test_same_model_refuses_a_superset_schema(monkeypatch, tmp_path: Path) -> None:
     """A sibling holding ALL your tables PLUS more is a different model, not a lagging TMDL (#114)."""
     cache = _model_folder(tmp_path, "MyMigration", ["Orders", "Date Table"])
@@ -1092,6 +1107,29 @@ def test_a_mismatched_port_aborts_before_any_read_or_write(monkeypatch, tmp_path
     assert exit_code == 2
     assert "59999" in out and "52001" in out, "the error must name both the given and the discovered port"
     assert "does not match" in out
+
+
+def test_a_matching_port_is_accepted(monkeypatch, tmp_path: Path, capsys) -> None:
+    """An explicit `--port` that EQUALS the pid-derived port is fine - the guard blocks only mismatch."""
+    cache = _model_folder(tmp_path, "MyMigration", ["Orders"])
+    _stub_bridge(monkeypatch, [{"pid": 111, "currentFilePath": str(tmp_path / "MyMigration.pbip")}])
+    monkeypatch.setattr(refresh_pbip_model, "discover_port", lambda pid: 52001)
+    _stub_live_to_match_disk(monkeypatch, cache)
+    monkeypatch.setattr(refresh_pbip_model, "refresh", lambda port, tables, timeout: (True, "refreshed"))
+    monkeypatch.setattr(refresh_pbip_model, "row_counts", lambda port, tables: ([("Orders", 5)], False))
+
+    def fake_image_save(port: int, cache_path: Path, model_dir=None):
+        del port, model_dir
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_bytes(b"cache")
+        return True, "persisted"
+
+    monkeypatch.setattr(refresh_pbip_model, "image_save", fake_image_save)
+
+    exit_code = refresh_pbip_model.main(["--pid", "111", "--canaries", "Orders", "--port", "52001"])
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "REFRESH: DATA_OK + PERSISTED" in out
 
 
 def test_an_implicit_probe_downgrades_to_table_ok_but_still_persists(monkeypatch, tmp_path: Path, capsys) -> None:

@@ -1133,6 +1133,26 @@ def test_o23_structural_stop_withholds_canaries_and_save(monkeypatch, capsys) ->
 # --------------------------------------------------------------------------------------------------
 
 
+def test_a_failed_persist_preserves_the_definition_mtime(tmp_path: Path) -> None:
+    """Rollback restores database.tmdl's mtime too, or Desktop discards the still-good cache."""
+    cache = _model(tmp_path, compat=1604)
+    model_dir = cache.parent.parent
+    database_tmdl = model_dir / "definition" / "database.tmdl"
+    cache.parent.mkdir(parents=True)
+    cache.write_bytes(_valid_abf_bytes())
+
+    old = time.time() - 600
+    for path in (database_tmdl, *(model_dir / "definition" / "tables").glob("*.tmdl")):
+        os.utime(path, (old, old))
+    before_bytes = database_tmdl.read_bytes()
+    before_mtime = database_tmdl.stat().st_mtime_ns
+
+    ok, _message = refresh_pbip_model._persist_image(cache, model_dir, 1702, lambda _staging: None)
+    assert ok is False
+    assert database_tmdl.read_bytes() == before_bytes, "bytes must be restored exactly"
+    assert database_tmdl.stat().st_mtime_ns == before_mtime, "the mtime must be restored too"
+
+
 def _native_imagesave(monkeypatch, cache, *, identity=None, content=None):
     """Native doubles only: retain the real persistence transaction, validators and rechecks."""
     bound = BoundDesktop(

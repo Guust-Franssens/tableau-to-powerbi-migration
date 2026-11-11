@@ -944,6 +944,7 @@ def test_retired_wire_states_fold_to_unknown_never_clean(retired: str) -> None:
 @pytest.mark.parametrize(
     "raw,expected",
     [
+        ("x" * 300, "x" * 80 + "..."),
         (None, ""),
     ],
 )
