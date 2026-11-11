@@ -23,6 +23,7 @@ import run_status as rs  # noqa: E402  # pylint: disable=wrong-import-position
 import assessment_report  # noqa: E402  # pylint: disable=wrong-import-position
 import assess_estate  # noqa: E402  # pylint: disable=wrong-import-position
 import stamp_tableau_provenance as prov  # noqa: E402  # pylint: disable=wrong-import-position
+import unit_ids  # noqa: E402  # pylint: disable=wrong-import-position
 from bundle_corpus import is_reparse_entry  # noqa: E402  # pylint: disable=wrong-import-position
 
 
@@ -1320,3 +1321,148 @@ def test_unprintable_location_paths_are_withheld_from_the_copyable_line(tmp_path
     assert "\x1b" not in human and "\u202e" not in human
     assert sum(line.startswith("NEXT ACTION") for line in human.splitlines()) == 0
     assert _human_payload(human) == status
+
+
+def test_next_is_one_exact_command_or_a_named_agent_step(tmp_path: Path) -> None:
+    run = _run(tmp_path)
+    _report(run)
+    _package(run / "packages" / "Book")
+    payload, _code = rs.build_status(str(run))
+    action = payload["next_action"]
+    assert (action["kind"], action["owner"], action["gate"]) == ("command", "set_data_folder.py", "data_binding")
+    assert action["command"] == f'python scripts/set_data_folder.py --package "{run / "packages" / "Book"}"'
+    assert (payload["units"][0]["stage"], payload["units"][0]["working_package"]) == (
+        "packaged",
+        "packages/Book/fabric",
+    )
+
+    converted = _run(tmp_path / "converted")
+    _report(converted)
+    (converted / "bundle" / "pbip" / "Book").mkdir(parents=True)
+    payload, _code = rs.build_status(str(converted))
+    action = payload["next_action"]
+    assert (action["kind"], action["command"], action["owner"], action["gate"]) == (
+        "agent",
+        None,
+        "tableau-migrator",
+        "not_packaged",
+    ), "a converted but unpackaged unit names the agent step, not START_READY"
+    assert (payload["units"][0]["stage"], payload["units"][0]["working_package"]) == ("converted", "not-started")
+
+
+def _path_failure(run: Path, front_door: dict | None) -> None:
+    record = json.loads((run / "run.json").read_text(encoding="utf-8"))
+    record["scope"] = {"selection": {"project": "Finance", "workbook": None}}
+    record["attribution"] = {"driver": "copilot", "session_id": "session-843"}
+    if front_door is not None:
+        record["front_door"] = front_door
+    _write_json(run / "run.json", record)
+    _report(run)
+    _write_json(
+        run / "bundle" / "phase-timings.json",
+        {"phases": [{"phase": "path_ceiling", "status": "failed", "exit_code": 10, "elapsed_sec": 1}]},
+    )
+
+
+def test_path_ceiling_failure_offers_the_front_door_rerun(tmp_path: Path) -> None:
+    import start_migration  # pylint: disable=import-outside-toplevel
+
+    run = _run(tmp_path)
+    env, decision = tmp_path / "customer.env", tmp_path / "storage.json"
+    _path_failure(run, {"env": str(env), "storage_decision": str(decision)})
+    payload, _code = rs.build_status(str(run))
+    action = payload["next_action"]
+    assert (action["kind"], action["owner"], action["gate"]) == ("command", "run_estate.py", "path_ceiling")
+    for part in (str(env), "--project", "Finance", "--storage-decision", str(decision), "--session-id", "session-843"):
+        assert part in action["command"], part
+    assert f"--runs-parent {start_migration.SHORT_RUNS_PARENT}" in action["command"]
+    rerun = payload["path_budget"]["rerun"]
+    assert (rerun["command"], rerun["authoritative"]) == (action["command"], True)
+
+    legacy = _run(tmp_path / "legacy")
+    _path_failure(legacy, None)
+    payload, _code = rs.build_status(str(legacy))
+    rerun = payload["path_budget"]["rerun"]
+    default_env = str(start_migration.build_parser().get_default("env"))
+    assert payload["next_action"]["command"] == rerun["command"] and default_env in rerun["command"]
+    assert "--storage-decision" not in rerun["command"]
+    assert (rerun["authoritative"], rerun["reason"]) == (False, "env_and_storage_decision_not_recorded")
+    assert "check both" in rerun["note"]
+
+
+def _bridge(run: Path, occurrences: list[dict], issues: list | None = None) -> bytes:
+    manifest = {
+        "scope_bridge": {
+            "version": 1,
+            "denominator_status": "established",
+            "issues": issues or [],
+            "counts": {"workbooks": len(occurrences), "required_datasources": 0, "bogus": "x"},
+            "occurrences": occurrences,
+        }
+    }
+    _write_json(run / "bundle" / "input_manifest.json", manifest)
+    data = (run / "bundle" / "input_manifest.json").read_bytes()
+    _write_json(run / "bundle" / rs.ENGINE_RECEIPT, {"input_manifest_sha256": hashlib.sha256(data).hexdigest()})
+    return data
+
+
+def _occurrence(name: str, index: int | None) -> dict:
+    match = None if index is None else {"report_collection": "workbooks", "report_index": index}
+    status = "unresolved" if index is None else "established"
+    return {"kind": "workbook", "display": {"name": name}, "status": status, "match": match}
+
+
+@pytest.mark.parametrize("indexed", [False, True])
+def test_scope_bridge_shows_original_names_and_not_started_units(tmp_path: Path, indexed: bool) -> None:
+    run = _run(tmp_path)
+    _report(run, ("sales_overview_2", "u0001"))
+    _package(run / "packages" / "sales_overview_2", unit="sales_overview_2")
+    (run / "bundle" / "pbip" / "u0001").mkdir(parents=True)
+    _bridge(run, [_occurrence("Sales Overview", 0), _occurrence("Margins", 1), _occurrence("Forecast", None)])
+    if indexed:
+        unit_ids.allocate_unit_ids(
+            run, [unit_ids.UnitRequest(key="assets/margins.twbx", kind="workbook", name="Margins")]
+        )
+    payload, _code = rs.build_status(str(run))
+    rows = {(row["id"], row["name"], row["stage"], row["working_package"]) for row in payload["units"]}
+    assert rows == {
+        (None, "Sales Overview", "packaged", "packages/sales_overview_2/fabric"),
+        ("u0001" if indexed else None, "Margins", "converted", "not-started"),
+        (None, "Forecast", "not_started", "not-started"),
+    }, "names come from the bridge; the package still associates by engine identity"
+    assert payload["scope_denominator"] == {
+        "status": "established",
+        "counts": {"workbooks": 3, "required_datasources": 0},
+    }
+
+
+def test_unsealed_scope_bridge_is_not_used(tmp_path: Path) -> None:
+    run = _run(tmp_path)
+    _report(run, ("sales_overview_2",))
+    data = _bridge(run, [_occurrence("Sales Overview", 0), _occurrence("Forecast", None)])
+    (run / "bundle" / "input_manifest.json").write_bytes(data.replace(b"Sales Overview", b"Sales 0verview"))
+    payload, _code = rs.build_status(str(run))
+    assert [(row["name"], row["stage"]) for row in payload["units"]] == [("sales_overview_2", "reported")]
+    assert payload["scope_denominator"] is None
+    assert [(row["code"], row["reason"]) for row in payload["findings"]] == [
+        ("SCOPE_BRIDGE_UNSEALED", "names_not_used")
+    ]
+
+
+def test_path_budget_measures_live_paths_and_offers_rerun_when_over(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = _run(tmp_path)
+    _report(run)
+    _package(run / "packages" / "Book")
+    payload, _code = rs.build_status(str(run))
+    budget = payload["path_budget"]
+    longest = len(str(run / "packages" / "Book" / "package-manifest.json"))
+    assert budget["file"]["longest"] == longest and budget["file"]["path"] == "packages/Book/package-manifest.json"
+    assert budget["file"]["remaining"] == rs.ceiling.FILE_CEILING - longest
+    assert (budget["unknown"], budget["root_kind"], budget["rerun"]) == (0, "external", None)
+
+    monkeypatch.setattr(rs.ceiling, "FILE_CEILING", longest - 5)
+    payload, _code = rs.build_status(str(run))
+    assert payload["path_budget"]["file"]["remaining"] == -5
+    assert (payload["path_budget"]["rerun"] or {}).get("command"), "an over-budget run names the front door rerun"

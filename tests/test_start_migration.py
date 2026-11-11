@@ -861,6 +861,8 @@ def test_site_run_streams_children_allocates_under_toolkit_and_has_honest_handof
     }
     assert manifest["assessment_scope"] == "site"
     assert manifest["attribution"] == {"driver": "operator"}
+    default_env = frontdoor.build_parser().parse_args([]).env.expanduser().resolve()
+    assert manifest.get("front_door") == {"env": str(default_env), "storage_decision": None}
     assert "stages" not in manifest and "preparation" not in manifest
     assert "BUNDLE + REFERENCES CAPTURED" in out
     assert f"BUNDLE {run / 'bundle'} (present)" in out

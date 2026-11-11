@@ -36,6 +36,7 @@ from tableau_env import diagnose_env, engine_child_env, require, resolve_env  # 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = Path(__file__).resolve()
 HEARTBEAT_SECONDS = 15.0
+SHORT_RUNS_PARENT = Path("C:/t2p")
 FRONT_DOOR_ARTIFACTS = (
     "run.json",
     "assessment/estate_survey.json",
@@ -748,6 +749,10 @@ def main(
         },
         "assessment_scope": "site",
         "attribution": attribution,
+        "front_door": {
+            "env": str(env_path),
+            "storage_decision": str(args.storage_decision.expanduser().resolve()) if args.storage_decision else None,
+        },
     }
     if assessing:
         metadata["intent"] = "assessment"
@@ -1049,11 +1054,10 @@ def main(
                     "PATH CEILING: engine phase cannot be established; retained output is not classified.", flush=True
                 )
                 invalid = True
-            short_root = Path("C:/t2p")
             print(
                 "Workbook folders already use compact unit IDs where eligible, so this refusal names a long "
                 "datasource or residual source name. Fallback only: rerun in a new run (old run retained): "
-                + _front_door_command(args, env_path, short_root),
+                + _front_door_command(args, env_path, SHORT_RUNS_PARENT),
                 flush=True,
             )
             finish(result, 5, "FAILED")
