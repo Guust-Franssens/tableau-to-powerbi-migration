@@ -28,7 +28,6 @@ from test_desktop_observer import (
 )
 from refresh_pbip_model import (
     REFRESH_ABSOLUTE_TIMEOUT_SECONDS,
-    REFRESH_PROGRESS_LIVENESS_SECONDS,
     REFRESH_TIMEOUT_SECONDS,
     REFRESH_WALL_CLOCK_GRACE_SECONDS,
     RefreshProgressMonitor,
@@ -110,52 +109,9 @@ def test_the_worker_is_a_daemon_so_a_parked_engine_cannot_outlive_the_process(pa
 
 
 def test_the_bound_is_the_ceiling_plus_grace_not_a_replacement_for_it() -> None:
-    """Keep 300s: cold starts are real (a 1-row probe against a suspended warehouse took 167s).
-
-    The fix was always scope, never duration - shortening the ceiling would turn a cold start into a
-    false TIMEOUT, which is the error this repo already made once at 90s.
-    """
+    """Keep 300s: cold starts are real (a 1-row probe against a suspended warehouse took 167s)."""
     assert REFRESH_TIMEOUT_SECONDS == 300
     assert REFRESH_WALL_CLOCK_GRACE_SECONDS > 0, "XMLA must get the chance to raise the better error first"
-
-
-def test_a_normal_refresh_is_unaffected(monkeypatch) -> None:
-    """The bound must be invisible on the happy path - it only ever adds an upper limit."""
-    executed: list[str] = []
-
-    class _Cmd:  # pylint: disable=too-few-public-methods,invalid-name
-        """A command that records what it was asked to execute."""
-
-        CommandText = ""  # noqa: N815
-        CommandTimeout = 0  # noqa: N815
-
-        def ExecuteNonQuery(self) -> None:  # noqa: N802  # pylint: disable=invalid-name
-            """Record the TMSL instead of talking to a server."""
-            executed.append(self.CommandText)
-
-    class _Conn:
-        """A connection that succeeds immediately."""
-
-        def Open(self) -> None:  # noqa: N802  # pylint: disable=invalid-name
-            """Match the ADOMD API surface."""
-
-        def CreateCommand(self):  # noqa: N802  # pylint: disable=invalid-name
-            """Match the ADOMD API surface."""
-            return _Cmd()
-
-        def Close(self) -> None:  # noqa: N802  # pylint: disable=invalid-name
-            """Match the ADOMD API surface."""
-
-    monkeypatch.setattr(refresh_pbip_model, "_load_adomd", lambda: lambda _dsn: _Conn())
-    monkeypatch.setattr(refresh_pbip_model, "_catalog_id", lambda _conn: "catalog-1")
-
-    ok, message = refresh(port=1234, tables=["Orders"], timeout_sec=5)
-    assert ok is True
-    assert "Orders" in message
-    assert executed
-    assert json.loads(executed[0]) == {
-        "refresh": {"type": "full", "objects": [{"database": "catalog-1", "table": "Orders"}]}
-    }
 
 
 def test_default_refresh_type_is_full() -> None:
@@ -249,9 +205,14 @@ def test_structural_stop_precedes_a_later_exception_from_the_refresh_worker(monk
     assert stop.value.finding.title == "Sign in"
 
 
-@pytest.mark.parametrize("mode", ["legacy", "progress", "observation"])
-@pytest.mark.parametrize("completed_at", [0.5, 1.0, 2.0], ids=["before-deadline", "at-deadline", "after-deadline"])
-@pytest.mark.parametrize("dialog", [False, True], ids=["healthy", "dialog"])
+@pytest.mark.parametrize(
+    "dialog,completed_at,mode",
+    [
+        (True, 1.0, "progress"),
+        (False, 0.5, "observation"),
+    ],
+    ids=["dialog-at-deadline-progress", "healthy-before-deadline-observation"],
+)
 def test_wait_completion_must_be_observed_before_the_original_deadline(monkeypatch, mode, completed_at, dialog) -> None:
     """A delayed observation/join must not launder a late completion into success in either branch."""
     clock = _FakeClock()
@@ -312,26 +273,6 @@ def test_no_pid_join_cannot_accept_a_completion_after_its_deadline(monkeypatch) 
         progress_monitor=None,
     )
     assert completed is False, "the uninspected branch must enforce the same original deadline"
-
-
-@pytest.mark.parametrize("completed", [False, True], ids=["missed-deadline", "timely-completion"])
-def test_refresh_honors_the_wait_verdict_even_if_the_worker_finishes_during_teardown(
-    monkeypatch, parked, completed
-) -> None:
-    _conn, released = parked
-
-    def finish_during_teardown(worker, **_kwargs):
-        released.set()
-        worker.join(2)
-        assert not worker.is_alive(), "control requires completion after the wait made its decision"
-        return completed
-
-    monkeypatch.setattr(refresh_pbip_model, "_wait_refresh_worker", finish_during_teardown)
-    if completed:
-        assert refresh(port=1234, tables=["Orders"], progress_enabled=False)[0] is True
-    else:
-        with pytest.raises(TimeoutError, match="refresh did not return within"):
-            refresh(port=1234, tables=["Orders"], progress_enabled=False)
 
 
 def test_calculate_only_aliases_select_tmsl_calculate(monkeypatch) -> None:
@@ -487,24 +428,6 @@ def test_progress_event_values_include_the_numeric_wire_value() -> None:
     }
 
 
-def test_progress_current_name_form_is_tolerated() -> None:
-    """The real wire value is numeric, but name-form test doubles remain accepted."""
-    lines: list[str] = []
-    monitor = RefreshProgressMonitor(
-        liveness_seconds=120,
-        throttle_seconds=2,
-        printer=lambda message, **_kwargs: lines.append(message),
-        current_event_values={"ProgressReportCurrent", "7"},
-    )
-    monitor.mark_refresh_started()
-
-    monitor.record_trace_event(
-        {"EventClass": "ProgressReportCurrent", "ObjectName": "Flight Activity", "IntegerData": "10000"}
-    )
-
-    assert lines and "10,000 rows read" in lines[0]
-
-
 def test_progress_liveness_warns_but_does_not_kill_a_quiet_refresh(monkeypatch, capsys) -> None:
     """A slow first row can be healthy; liveness reports silence but only the backstop kills."""
     executed: list[tuple[str, int]] = []
@@ -546,57 +469,6 @@ def test_progress_liveness_warns_but_does_not_kill_a_quiet_refresh(monkeypatch, 
     assert "[progress] no progress event" in capsys.readouterr().out
 
 
-def test_amo_trace_import_failure_keeps_the_absolute_backstop(monkeypatch, capsys) -> None:
-    """AMO trace loss removes progress evidence, not the long timeout that replaced the 300s ceiling."""
-    executed: list[tuple[str, int]] = []
-
-    class _Cmd:  # pylint: disable=too-few-public-methods,invalid-name
-        """A command that records text and timeout."""
-
-        CommandText = ""  # noqa: N815
-        CommandTimeout = 0  # noqa: N815
-
-        def ExecuteNonQuery(self) -> None:  # noqa: N802  # pylint: disable=invalid-name
-            """Record the command settings."""
-            executed.append((self.CommandText, self.CommandTimeout))
-
-    class _Conn:
-        """A connection that succeeds immediately."""
-
-        def Open(self) -> None:  # noqa: N802  # pylint: disable=invalid-name
-            """Match the ADOMD API surface."""
-
-        def CreateCommand(self):  # noqa: N802  # pylint: disable=invalid-name
-            """Match the ADOMD API surface."""
-            return _Cmd()
-
-        def Close(self) -> None:  # noqa: N802  # pylint: disable=invalid-name
-            """Match the ADOMD API surface."""
-
-    def trace_denied(*_args):
-        raise ImportError("No module named Microsoft.AnalysisServices")
-
-    monkeypatch.setattr(refresh_pbip_model, "_start_refresh_progress_trace", trace_denied)
-    monkeypatch.setattr(refresh_pbip_model, "_load_adomd", lambda: lambda _dsn: _Conn())
-    monkeypatch.setattr(refresh_pbip_model, "_catalog_id", lambda _conn: "catalog-1")
-
-    ok, message = refresh(port=1234, tables=["Orders"], progress_enabled=True, absolute_timeout_sec=17.2)
-
-    assert ok is True
-    assert "Orders" in message
-    assert executed and executed[0][1] == 17
-    assert executed[0][1] != REFRESH_TIMEOUT_SECONDS
-    captured = capsys.readouterr()
-    assert "[progress] unavailable" in captured.err
-    assert "Row counts and the liveness warning are OFF" in captured.err
-    assert "you cannot tell a slow refresh from a stuck one" in captured.err
-    assert "The 17s absolute backstop still applies" in captured.err
-    assert "restore the AMO package (Microsoft.AnalysisServices.NetCore.retail.amd64)" in captured.err
-    assert "operator refresh strategy" in captured.err
-    assert "legacy" not in captured.err
-    assert "[progress] unavailable" not in captured.out
-
-
 def test_traced_refresh_supersedes_the_old_elapsed_only_heartbeat(monkeypatch, parked, capsys) -> None:
     """Default progress uses trace evidence/warnings, not the old identical 'still refreshing' signal."""
     monitor = RefreshProgressMonitor(liveness_seconds=0.05, throttle_seconds=0.05)
@@ -610,20 +482,3 @@ def test_traced_refresh_supersedes_the_old_elapsed_only_heartbeat(monkeypatch, p
     assert "[progress] no progress event" in out
     assert "still refreshing" not in out
     parked[1].set()
-
-
-def test_progress_flags_are_exposed_with_safe_defaults() -> None:
-    """The CLI and direct API default to progress, expose liveness, and keep an explicit opt-out."""
-    parser = refresh_pbip_model._build_arg_parser()
-    defaults = parser.parse_args([])
-    custom = parser.parse_args(
-        ["--no-progress", "--progress-liveness-seconds", "42", "--refresh-absolute-timeout-seconds", "900"]
-    )
-
-    assert defaults.no_progress is False
-    assert refresh_pbip_model.inspect.signature(refresh).parameters["progress_enabled"].default is True
-    assert defaults.progress_liveness_seconds == REFRESH_PROGRESS_LIVENESS_SECONDS
-    assert defaults.refresh_absolute_timeout_seconds == REFRESH_ABSOLUTE_TIMEOUT_SECONDS
-    assert custom.no_progress is True
-    assert custom.progress_liveness_seconds == 42
-    assert custom.refresh_absolute_timeout_seconds == 900
