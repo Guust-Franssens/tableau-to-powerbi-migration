@@ -49,22 +49,20 @@ def _legacy_declarations(path: Path) -> list[dict[str, Any]]:
     return [entry for entry in declarations if isinstance(entry, dict)] if isinstance(declarations, list) else []
 
 
-def _record_filename(record: dict[str, Any], stem_key: str) -> str:
-    """Unique, stable-enough name for one append-only record writer."""
-    run_id = _SAFE_STEM.sub("_", str(record.get("run_id") or "run"))[:60]
-    stem = _SAFE_STEM.sub("_", str(record.get(stem_key) or stem_key))[-80:]
+def _record_filename() -> str:
+    """Compact chronological name; attribution remains in the record payload."""
     recorded = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-    return f"{recorded}-{os.getpid()}-{run_id}-{stem}-{uuid.uuid4().hex}.json"
+    return f"{recorded}-{uuid.uuid4().hex[:16]}.json"
 
 
-def _append_record(directory: Path, record: dict[str, Any], stem_key: str) -> Path:
+def _append_record(directory: Path, record: dict[str, Any]) -> Path:
     """Persist one record without reading or rewriting sibling records in ``directory``."""
     directory.mkdir(parents=True, exist_ok=True)
     payload = dict(record)
     payload.setdefault("version", 1)
     payload.setdefault("recorded_at", datetime.now(timezone.utc).isoformat(timespec="seconds"))
-    final_path = directory / _record_filename(payload, stem_key)
-    staging_path = final_path.with_name(final_path.name + f".{uuid.uuid4().hex}.tmp")
+    final_path = directory / _record_filename()
+    staging_path = final_path.with_name(final_path.name + f".{uuid.uuid4().hex[:8]}.tmp")
     try:
         staging_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
         os.replace(staging_path, final_path)
@@ -76,7 +74,7 @@ def _append_record(directory: Path, record: dict[str, Any], stem_key: str) -> Pa
 
 def append_generated_edit_declaration(bundle: Path, declaration: dict[str, Any]) -> Path:
     """Persist one declaration without reading or rewriting sibling declarations."""
-    return _append_record(bundle / GENERATED_EDIT_DECLARATIONS_DIR, declaration, "target")
+    return _append_record(bundle / GENERATED_EDIT_DECLARATIONS_DIR, declaration)
 
 
 def _directory_records(path: Path) -> list[dict[str, Any]]:

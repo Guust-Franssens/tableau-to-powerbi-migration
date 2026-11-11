@@ -27,7 +27,8 @@ Migration-start preflight is **plain**; no tooling upgrades mid-migration.
    Numeric scope has **no default**; the other defaults and modes follow the runbook.
 3. **Issue each unit's current v2 brief before packaging** at
    `<absolute-run>\assessment\briefs\<exact-unit>\migration-brief.md`, using the front door's printed
-   bundle/handover/reference paths. The front door creates no brief draft or `dispatch.md`.
+   bundle/handover/reference paths. For compact-ID runs, `<exact-unit>` is the printed unit ID and the
+   brief's front-matter `unit` must match it. The front door creates no brief draft or `dispatch.md`.
 4. **Dispatch `@tableau-migrator` per unit via the task/subagent tool**, providers first.
    Pass existing bundle, exact run/unit, brief and working paths; no rerun into that bundle.
    The migrator prepares, then uses validator triage, model/report builders and independent sign-off.

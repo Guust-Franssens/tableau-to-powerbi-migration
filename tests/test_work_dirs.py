@@ -200,12 +200,12 @@ def test_deliverables_property_never_clobbers_existing_customer_output(tmp_path:
 
 
 def test_other_six_canonical_subdirs_are_unaffected_by_the_lazy_deliverables_change(tmp_path: Path) -> None:
-    """Negative control for issue #481: every canonical subdir OTHER than `deliverables/` must
-    still be created eagerly by `allocate_run`, exactly as before."""
+    """Negative control for issue #481: every canonical subdir OTHER than the lazy `deliverables/`
+    and `engine-input/` (#836) must still be created eagerly by `allocate_run`, exactly as before."""
     run = allocate_run("acme", repo_root=tmp_path)
 
     eager = [name for name in CANONICAL_SUBDIRS if name not in LAZY_SUBDIRS]
-    assert set(eager) == set(CANONICAL_SUBDIRS) - {"deliverables"}
+    assert set(eager) == set(CANONICAL_SUBDIRS) - {"deliverables", "engine-input"}
     for name in eager:
         assert run.subdir(name).is_dir(), f"canonical subdir {name!r} must still be created eagerly"
 

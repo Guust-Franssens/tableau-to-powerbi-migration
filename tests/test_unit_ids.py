@@ -105,6 +105,54 @@ def test_an_identical_retry_repairs_an_interrupted_readme_publication(tmp_path: 
     assert "Sales Renamed" in readme and readme == unit_ids.render_units_readme(run.name, index["units"])
 
 
+def test_unchanged_index_is_not_replaced_but_readme_is_regenerated(tmp_path: Path, monkeypatch) -> None:
+    """An identical re-allocation leaves a held index alone and still regenerates the README (U1, K11)."""
+    run = _run(tmp_path, "same")
+    request = UnitRequest("assets/book.twbx", "workbook", "Sales", legacy_folder="Sales")
+    unit_ids.allocate_unit_ids(run, [request])
+    index = run / unit_ids.INDEX_FILE_NAME
+    before = index.read_bytes()
+    (run / unit_ids.README_FILE_NAME).unlink()
+    write = unit_ids._atomic_write_text  # pylint: disable=protected-access
+
+    def refuse_index(target: Path, text: str) -> None:
+        if target.name == unit_ids.INDEX_FILE_NAME:
+            raise PermissionError("simulated reader holding index open")
+        write(target, text)
+
+    monkeypatch.setattr(unit_ids, "_atomic_write_text", refuse_index)
+    entries = unit_ids.allocate_unit_ids(run, [request])
+
+    assert entries[0]["legacy_folder"] == "Sales"
+    assert index.read_bytes() == before
+    assert (run / unit_ids.README_FILE_NAME).is_file()
+
+
+def test_an_empty_allocation_on_a_run_without_an_index_writes_nothing(tmp_path: Path) -> None:
+    """Allocating nothing on a run without an index leaves the runs root byte-identical (U2)."""
+    run = _run(tmp_path, "empty")
+    before = _snapshot(tmp_path / "_runs")
+
+    assert unit_ids.allocate_unit_ids(run, []) == []
+    assert _snapshot(tmp_path / "_runs") == before
+    assert not unit_ids.reservations_root(tmp_path / "_runs").exists()
+
+
+def test_index_v1_remains_readable_and_v2_keeps_legacy_folder(tmp_path: Path) -> None:
+    """The reader accepts schema 1 and 2; schema 2 carries ``legacy_folder`` (plan section 7)."""
+    run = _run(tmp_path, "versions")
+    unit_ids.allocate_unit_ids(run, [UnitRequest("assets/book.twbx", "workbook", "Sales", legacy_folder="Sales")])
+    index_path = run / unit_ids.INDEX_FILE_NAME
+    version_two = json.loads(index_path.read_text(encoding="utf-8"))
+    assert version_two["schema_version"] == 2
+    assert unit_ids.read_unit_index(run)[0]["legacy_folder"] == "Sales"
+
+    legacy = {**version_two, "schema_version": 1}
+    legacy["units"] = [{key: value for key, value in legacy["units"][0].items() if key != "legacy_folder"}]
+    index_path.write_text(json.dumps(legacy), encoding="utf-8")
+    assert unit_ids.read_unit_index(run)[0]["id"] == "u0001"
+
+
 def test_an_index_entry_owned_by_another_run_is_refused_before_anything_is_written(tmp_path: Path) -> None:
     first, second = _run(tmp_path, "first"), _run(tmp_path, "second")
     request = UnitRequest("k", "workbook", "W")
@@ -267,7 +315,7 @@ def _duplicate_run_key(run: Path, _root: Path) -> None:
 @pytest.mark.parametrize(
     ("tamper", "reason"),
     [
-        (_tamper_index(lambda index: index.update(schema_version=2)), "index_invalid"),
+        (_tamper_index(lambda index: index.update(schema_version=3)), "index_invalid"),
         (_tamper_index(lambda index: index.update(run="999-x")), "index_run_mismatch"),
         (_tamper_index(lambda index: index["units"][1].update(id="u0001")), "index_invalid"),
         (_tamper_index(lambda index: index["units"][1].update(key="k1")), "index_invalid"),

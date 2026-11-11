@@ -30,6 +30,9 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import run_estate  # noqa: E402  # pylint: disable=wrong-import-position
+import engine_input_staging  # noqa: E402  # pylint: disable=wrong-import-position
+import check_migration_progress  # noqa: E402  # pylint: disable=wrong-import-position
+import unit_ids  # noqa: E402  # pylint: disable=wrong-import-position
 from check_path_ceiling import DIR_CEILING, FILE_CEILING, utf16_len  # noqa: E402
 from check_reference_readiness import engine_page_id  # noqa: E402
 from host_paths import discloses_host_location  # noqa: E402
@@ -1021,6 +1024,35 @@ def test_scope_bridge_engine_input_packaged_and_bare(
         assert hashlib.sha256(landing.read_bytes()).hexdigest() != row["match"]["sha256"]
 
 
+def test_scope_bridge_matches_a_sweep_row_under_assets_to_its_staged_hard_link(tmp_path: Path) -> None:
+    """The engine reads `engine-input/` links; the harvester recorded the `assets/` originals (C12)."""
+    case = _scope_case(tmp_path)
+    staged_root = tmp_path / "engine-input"
+    staged_root.mkdir()
+    links: dict[str, str] = {}
+    for number, asset in enumerate(case.manifest["assets"], start=1):
+        original = Path(asset["staged_input_path"])
+        name = f"u{number:04d}{original.suffix}" if asset["kind"] == "workbook" else original.name
+        os.link(original, staged_root / name)
+        links[str(original)] = asset["staged_input_path"] = str(staged_root / name)
+    for collection in ("workbooks", "datasources"):
+        for row in case.report[collection]:
+            row["source_id"] = links[row["source_id"]]
+    _persist_scope_inputs(case)
+    captured = run_estate.capture_scope_inputs(case.survey_path, case.source)
+    _emit_scope_output(case)
+
+    run_estate.write_scope_bridge(case.bundle, case.report, captured)
+    assert _read_scope_bridge(case)["status"] == "cannot_establish", "the assets root cannot see staged links"
+    run_estate.write_scope_bridge(case.bundle, case.report, captured, staged_root)
+    bridge = _read_scope_bridge(case)
+
+    assert bridge["status"] == bridge["denominator_status"] == "established"
+    matches = [row["match"] for row in bridge["occurrences"]]
+    assert all(Path(match["source_id"]).parent == staged_root for match in matches)
+    assert all(Path(row["engine_input"]["path"]).parent == case.source.resolve() for row in case.sweep)
+
+
 def test_scope_bridge_engine_input_missing_is_not_legacy_authority(tmp_path: Path) -> None:
     case = _scope_case(tmp_path)
     del case.sweep[0]["engine_input"]
@@ -1956,6 +1988,25 @@ def test_slice_only_needs_no_engine_at_all(tmp_path: Path, monkeypatch) -> None:
     assert (out / "handover" / "Alpha.json").is_file()
 
 
+def test_slice_only_with_input_skips_the_pre_conversion_projection(tmp_path: Path, monkeypatch) -> None:
+    """``--slice-only --input`` has no engine, so only the post-output gate may judge the path ceiling."""
+    out = tmp_path / "bundle"
+    source = tmp_path / "in"
+    source.mkdir()
+    _write(out / "report.json", json.dumps(_report(workbooks=[_workbook("Alpha", "AlphaModel")])))
+    stamped: list[Path] = []
+    monkeypatch.setattr(
+        run_estate,
+        "stamp_inputs",
+        lambda _input, out_dir, *_timeout: (
+            stamped.append(out_dir) or run_estate.ProvenanceStampResult(True, "local_only", "fixture")
+        ),
+    )
+    assert run_estate.main(["--slice-only", "--input", str(source), "--output", str(out)]) == run_estate.EXIT_OK
+    assert stamped == [out]
+    assert json.loads((out / run_estate.PATH_CEILING_REPORT).read_text(encoding="utf-8"))["status"] == "ok"
+
+
 # ---------------------------------------------------------------------------
 # issue #230: --slice-only skipped the generated-artifact baseline entirely
 # ---------------------------------------------------------------------------
@@ -2446,6 +2497,566 @@ if __name__ == "__main__":
         encoding="utf-8",
     )
     return root
+
+
+def _id_staging_engine(root: Path) -> Path:
+    """Engine-side selection fixture that matches LocalFilesSource's packaged-twin preference."""
+    engine = _versioned_engine(root, "2.371.0")
+    scripts = engine / "skills" / "tableau-migration" / "scripts"
+    (scripts / "migrate_estate.py").write_text(
+        """
+import os
+import re
+import argparse
+from pathlib import Path
+
+class LocalFilesSource:
+    def __init__(self, root):
+        self.root = Path(root)
+
+    def _selected(self, extensions, prefer_packaged):
+        paths = sorted(path for path in self.root.rglob("*") if path.is_file() and path.suffix.lower() in extensions)
+        chosen = {}
+        for path in paths:
+            key = (str(path.parent).casefold(), path.stem.casefold())
+            packaged = path.suffix.lower() in {".twbx", ".tdsx"}
+            previous = chosen.get(key)
+            if previous is None or (prefer_packaged and packaged) or (not prefer_packaged and not packaged):
+                chosen[key] = path
+        return sorted(chosen.values())
+
+    def list_datasources(self):
+        return self._selected({".tds", ".tdsx"}, False)
+
+    def list_workbooks(self):
+        return self._selected({".twb", ".twbx"}, True)
+
+    def asset_name(self, asset_id):
+        stem = Path(asset_id).stem
+        return re.sub(r"^[0-9a-fA-F-]{36}_", "", stem)
+
+def _safe_folder(name, used):
+    base = re.sub(r'[<>:"/\\\\|?*\\x00-\\x1f]', "_", name).strip().rstrip(".") or "datasource"
+    candidate = base
+    number = 2
+    while candidate.casefold() in used:
+        candidate = f"{base}_{number}"
+        number += 1
+    used.add(candidate.casefold())
+    return candidate
+
+def _fs_safe(name, default="model"):
+    return re.sub(r'[<>:"/\\\\|?*\\x00-\\x1f]', "_", name).strip().rstrip(".") or default
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-i", required=True)
+    parser.add_argument("-o", required=True)
+    parser.parse_args()
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    return engine
+
+
+def _id_bundle_engine(calls: list[Path], *, consolidated: bool):
+    run_number = 0
+
+    def fake(_engine: Path, src: Path, dest: Path, _dax: Path | None) -> tuple[int, str]:
+        nonlocal run_number
+        run_number += 1
+        calls.append(src)
+        shutil.rmtree(dest / "pbip", ignore_errors=True)
+        shutil.rmtree(dest / "reports", ignore_errors=True)
+        rows = []
+        datasource_rows = []
+        for path in sorted(src.rglob("*")):
+            if not path.is_file():
+                continue
+            if path.suffix.lower() in {".tds", ".tdsx"}:
+                datasource_rows.append({"name": path.stem, "source_id": str(path.resolve())})
+                continue
+            if path.suffix.lower() not in {".twb", ".twbx"}:
+                continue
+            match = re.search(r"(u[0-9]{4,})$", path.stem)
+            assert match, f"staged workbook name has no unit ID: {path.name}"
+            unit_id = match.group(1)
+            rows.append(
+                {
+                    "name": unit_id,
+                    "source_id": str(path.resolve()),
+                    "consolidated_datasources": ["Orders"] if consolidated else [],
+                }
+            )
+            report_platform = {"metadata": {"displayName": unit_id}}
+            model_platform = {"metadata": {"displayName": unit_id}}
+            report_folder = dest / "pbip" / unit_id / f"{unit_id}.Report"
+            model_folder = dest / "pbip" / unit_id / f"{unit_id}.SemanticModel"
+            # The real engine writes CRLF on every platform; the restore must keep it.
+            crlf_platform = json.dumps(report_platform, indent=2).replace("\n", "\r\n").encode()
+            _write(report_folder / ".platform").write_bytes(crlf_platform)
+            _write(
+                report_folder / "definition.pbir",
+                json.dumps({"datasetReference": {"byPath": {"path": f"../{unit_id}.SemanticModel"}}}),
+            )
+            _write(report_folder / "definition" / "report.json", '{"pages":[]}')
+            _write(report_folder / run_estate._PBIR_VISUAL_TAIL, "{}")  # pylint: disable=protected-access
+            _write(model_folder / ".platform", json.dumps(model_platform, indent=2))
+            _write(model_folder / "definition.pbism", "{}")
+            _write(dest / "pbip" / unit_id / f"{unit_id}.pbip", "{}")
+            _write(dest / "reports" / f"{unit_id}.Report" / ".platform", json.dumps(report_platform, indent=2))
+        report = _report(rows)
+        report["datasources"] = datasource_rows
+        _write(dest / "report.json", json.dumps(report))
+        _write(dest / "input_manifest.json", json.dumps({"inputs": [], "run_id": f"run-{run_number}"}))
+        return 0, ""
+
+    return fake
+
+
+def _ordinary_depth_run(tmp_path: Path, slug: str) -> Path:
+    """Allocate a run whose bundle path is 95 UTF-16 units: the plan's ordinary depth."""
+    target = 95
+    tail = utf16_len(os.sep.join(["", "_runs", f"001-{slug}", "bundle"]))
+    pad = target - utf16_len(str(tmp_path.resolve())) - tail - 1
+    if pad < 1:
+        pytest.skip(f"tmp_path is too deep to pad a bundle to {target} units")
+    run = Path(_work_dirs_allocate(slug, "--repo-root", tmp_path.resolve() / ("p" * pad))["root"])
+    assert utf16_len(str((run / "bundle").resolve())) == target
+    return run
+
+
+def _tree_bytes(root: Path) -> dict[str, bytes]:
+    return {path.relative_to(root).as_posix(): path.read_bytes() for path in sorted(root.rglob("*")) if path.is_file()}
+
+
+def _prepare_id_run_gates(monkeypatch) -> None:
+    _without_pbir_validator(monkeypatch)
+    monkeypatch.setattr(run_estate, "stamp_inputs", lambda *_args: run_estate.ProvenanceStampResult(True, "ok", "ok"))
+    monkeypatch.setattr(run_estate, "check_definition_of_done", lambda _report: (True, "pass"))
+    monkeypatch.setattr(run_estate, "find_approval_collisions", lambda _report: {})
+    monkeypatch.setattr(run_estate, "check_blank_placeholders", lambda _path: {"status": "OK"})
+    monkeypatch.setattr(run_estate, "check_empty_models", lambda _path: {"status": "OK"})
+    monkeypatch.setattr(run_estate, "slice_handovers", lambda _report, _output: [])
+    monkeypatch.setattr(run_estate, "print_summary", lambda *_args: None)
+    monkeypatch.setattr(run_estate, "render_empty_model", lambda _report: "")
+    monkeypatch.setattr(run_estate, "render_blank_placeholders", lambda _report: "")
+
+
+@pytest.mark.parametrize(
+    ("suffix", "with_luid", "consolidated"),
+    [(".twb", False, False), (".twbx", True, True)],
+    ids=["standalone-single-source", "packaged-consolidated"],
+)
+def test_fresh_allocator_bundle_stages_workbook_ids_and_restores_only_supported_display_names(
+    tmp_path: Path, monkeypatch, suffix: str, with_luid: bool, consolidated: bool
+) -> None:
+    """A long workbook runs under ``u0001`` and gets its declared display names back (T3, T4)."""
+    # pylint: disable=too-many-locals,too-many-statements
+    _prepare_id_run_gates(monkeypatch)
+    run = _ordinary_depth_run(tmp_path, "t4")
+    bundle = run / "bundle"
+    assets = run / "assets"
+    luid = "11111111-2222-3333-4444-555555555555"
+    name = "Sales " + "x" * 66
+    assert run_estate.project_estate_path_ceiling(bundle, [name])["status"] == "over_ceiling"
+    stem = f"{luid}_{name}" if with_luid else name
+    source = assets / f"{stem}{suffix}"
+    if suffix == ".twbx":
+        source.parent.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(source, "w") as archive:
+            archive.writestr("workbook.twb", "<workbook />")
+        (assets / f"{stem}.twb").write_text("<workbook />", encoding="utf-8")
+    else:
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text("<workbook />", encoding="utf-8")
+    engine = _id_staging_engine(tmp_path / "engine")
+    calls: list[Path] = []
+    model_name = name if consolidated else "u0001"
+    emitted = _id_bundle_engine(calls, consolidated=consolidated)
+    pristine: dict[str, bytes] = {}
+
+    def engine_then_snapshot(*engine_args) -> tuple[int, str]:
+        result = emitted(*engine_args)
+        pristine.clear()
+        pristine.update(_tree_bytes(engine_args[2] / "reports"))
+        return result
+
+    monkeypatch.setattr(run_estate, "run_engine", engine_then_snapshot)
+    replace = engine_input_staging.os.replace
+    temp_paths: list[Path] = []
+
+    def capture_replace(source_path, target_path):
+        source = Path(source_path)
+        if source.name.endswith(".tmp"):
+            temp_paths.append(source)
+        replace(source_path, target_path)
+
+    monkeypatch.setattr(engine_input_staging.os, "replace", capture_replace)
+    args = _landing_argv(engine, assets, run / "bundle")
+
+    assert run_estate.main(args) == run_estate.EXIT_OK
+
+    index = json.loads((run / "unit-index.json").read_text(encoding="utf-8"))
+    entry = index["units"][0]
+    assert entry["id"] == "u0001"
+    assert entry["legacy_folder"] == name
+    assert entry["artifacts"] == {
+        "project_file": "bundle/pbip/u0001/u0001.pbip",
+        "report": "bundle/pbip/u0001/u0001.Report",
+        "semantic_model": "bundle/pbip/u0001/u0001.SemanticModel",
+    }
+    staged = run / "engine-input"
+    staged_files = [path for path in staged.rglob("*") if path.is_file()]
+    assert len(staged_files) == 1
+    assert os.path.samefile(source, staged_files[0])
+    assert staged_files[0].name == (f"{luid}_u0001.twbx" if with_luid else "u0001.twb")
+    report_platform = run / "bundle" / "pbip" / "u0001" / "u0001.Report" / ".platform"
+    assert json.loads(report_platform.read_text(encoding="utf-8"))["metadata"]["displayName"] == name
+    restored = report_platform.read_bytes()
+    assert b"\r\n" in restored and restored.count(b"\n") == restored.count(b"\r\n")
+    model_platform = run / "bundle" / "pbip" / "u0001" / "u0001.SemanticModel" / ".platform"
+    assert json.loads(model_platform.read_text(encoding="utf-8"))["metadata"]["displayName"] == model_name
+    pristine_platform = run / "bundle" / "reports" / "u0001.Report" / ".platform"
+    assert json.loads(pristine_platform.read_text(encoding="utf-8"))["metadata"]["displayName"] == "u0001"
+    pbir = run / "bundle" / "pbip" / "u0001" / "u0001.Report" / "definition.pbir"
+    assert (
+        json.loads(pbir.read_text(encoding="utf-8"))["datasetReference"]["byPath"]["path"] == "../u0001.SemanticModel"
+    )
+    declarations = engine_input_staging.declarations.load_generated_edit_declarations(bundle)
+    assert len(declarations) == (2 if consolidated else 1)
+    assert all(len(path.name) == 44 for path in (bundle / "_build" / "generated-edit-declarations").glob("*.json"))
+    manifest = json.loads((bundle / "input_manifest.json").read_text(encoding="utf-8"))
+    assert len(manifest["generated_artifacts"]["run_id"]) == 32
+    assert temp_paths
+    assert all(utf16_len(str(path)) <= FILE_CEILING for path in temp_paths)
+    assert pristine and _tree_bytes(bundle / "reports") == pristine
+    tamper_state, tamper_notes = check_migration_progress.tamper_check(bundle)
+    assert tamper_state == "DECLARED_DRIFT", tamper_notes
+    assert calls == [staged]
+    pbip_before = _tree_bytes(bundle / "pbip")
+    report = json.loads((bundle / "report.json").read_text(encoding="utf-8"))
+    engine_input_staging.restore_display_names(bundle, report, unit_ids.read_unit_index(run), engine)
+    assert _tree_bytes(bundle / "pbip") == pbip_before, "a second restore must be a no-op"
+    assert len(engine_input_staging.declarations.load_generated_edit_declarations(bundle)) == len(declarations)
+
+    if consolidated:
+        assert run_estate.main(args) == run_estate.EXIT_OK
+        assert calls == [staged, staged]
+        assert len(list((run.parent / ".unit-id-reservations").iterdir())) == 1
+        assert len(engine_input_staging.declarations.load_generated_edit_declarations(run / "bundle")) == 4
+        report_platform = run / "bundle" / "pbip" / "u0001" / "u0001.Report" / ".platform"
+        platform = json.loads(report_platform.read_text(encoding="utf-8"))
+        platform["metadata"]["displayName"] = "manual edit"
+        report_platform.write_text(json.dumps(platform, indent=2), encoding="utf-8")
+        assert run_estate.main(args) == run_estate.EXIT_BUNDLE_REWRITE
+        assert calls == [staged, staged]
+
+
+@pytest.mark.parametrize("tamper", ["unrelated_artifact", "wrong_script", "deleted_index"])
+def test_rewrite_barrier_does_not_exempt_other_or_unindexed_edits(tmp_path: Path, monkeypatch, tamper: str) -> None:
+    """The barrier exempts only this run's declared restore of an indexed unit (T5)."""
+    _prepare_id_run_gates(monkeypatch)
+    allocated = _work_dirs_allocate(f"unit-id-barrier-{tamper}", "--repo-root", tmp_path)
+    run = Path(allocated["root"])
+    assets = run / "assets"
+    source = assets / "Sales.twb"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text("<workbook />", encoding="utf-8")
+    engine = _id_staging_engine(tmp_path / "engine")
+    staged_inputs: list[Path] = []
+    monkeypatch.setattr(run_estate, "run_engine", _id_bundle_engine(staged_inputs, consolidated=False))
+    args = _landing_argv(engine, assets, run / "bundle")
+    assert run_estate.main(args) == run_estate.EXIT_OK
+    bundle = run / "bundle"
+
+    if tamper == "unrelated_artifact":
+        report = bundle / "pbip" / "u0001" / "u0001.Report" / "definition" / "report.json"
+        report.write_text('{"pages":["changed"]}', encoding="utf-8")
+    elif tamper == "wrong_script":
+        declaration = next((bundle / "_build" / "generated-edit-declarations").glob("*.json"))
+        record = json.loads(declaration.read_text(encoding="utf-8"))
+        record["script_identity"] = "another-script"
+        declaration.write_text(json.dumps(record), encoding="utf-8")
+    else:
+        (run / unit_ids.INDEX_FILE_NAME).unlink()
+
+    assert run_estate.main(args) == run_estate.EXIT_BUNDLE_REWRITE
+    assert staged_inputs == [run / "engine-input"]
+
+
+def test_staging_mirrors_selected_twin_and_datasource_without_renaming_it(tmp_path: Path, monkeypatch) -> None:
+    """Only engine-selected workbooks are renamed; twins are omitted, other files keep names (T1)."""
+    # pylint: disable=too-many-locals
+    _prepare_id_run_gates(monkeypatch)
+    allocated = _work_dirs_allocate("unit-id-mirror", "--repo-root", tmp_path)
+    run = Path(allocated["root"])
+    assets = run / "assets"
+    luid = "11111111-2222-3333-4444-555555555555"
+    packaged = assets / f"{luid}_Packaged Workbook.twbx"
+    local_twin = assets / f"{luid}_Packaged Workbook.twb"
+    second_workbook = assets / "Standalone.twb"
+    datasource = assets / "S.tds"
+    sibling = assets / "notes.txt"
+    for path in (packaged, local_twin, second_workbook, datasource, sibling):
+        path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(packaged, "w") as archive:
+        archive.writestr("workbook.twb", "<workbook />")
+    local_twin.write_text("<workbook />", encoding="utf-8")
+    second_workbook.write_text("<workbook />", encoding="utf-8")
+    datasource.write_text("<datasource />", encoding="utf-8")
+    sibling.write_text("sibling", encoding="utf-8")
+    engine = _id_staging_engine(tmp_path / "engine")
+    staged_inputs: list[Path] = []
+    monkeypatch.setattr(run_estate, "run_engine", _id_bundle_engine(staged_inputs, consolidated=False))
+
+    assert run_estate.main(_landing_argv(engine, assets, run / "bundle")) == run_estate.EXIT_OK
+
+    staged = run / "engine-input"
+    expected = {
+        f"{luid}_u0001.twbx": packaged,
+        "u0002.twb": second_workbook,
+        "S.tds": datasource,
+        "notes.txt": sibling,
+    }
+    actual = {path.name: path for path in staged.rglob("*") if path.is_file()}
+    assert actual.keys() == expected.keys()
+    assert all(os.path.samefile(actual[name], original) for name, original in expected.items())
+    assert not (staged / local_twin.name).exists()
+    enumerated = run_estate._engine_unit_records(engine, staged)  # pylint: disable=protected-access
+    assert enumerated is not None
+    assert [(row["kind"], row["name"]) for row in enumerated] == [
+        ("datasource", "S"),
+        ("workbook", "u0001"),
+        ("workbook", "u0002"),
+    ]
+    assert staged_inputs == [staged]
+
+
+def test_hard_link_refusal_leaves_no_reservation_and_retry_reconciles(tmp_path: Path, monkeypatch) -> None:
+    """A failed link probe reserves nothing; a failed link keeps its ID and a retry reconciles (T2, O8)."""
+    _prepare_id_run_gates(monkeypatch)
+    allocated = _work_dirs_allocate("unit-id-link-retry", "--repo-root", tmp_path)
+    run = Path(allocated["root"])
+    assets = run / "assets"
+    source = assets / "Sales.twb"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text("<workbook />", encoding="utf-8")
+    engine = _id_staging_engine(tmp_path / "engine")
+    staged_inputs: list[Path] = []
+    monkeypatch.setattr(run_estate, "run_engine", _id_bundle_engine(staged_inputs, consolidated=False))
+    real_link = os.link
+    probe_attempts = 0
+
+    def fail_probe(src, dst, *args, **kwargs):
+        nonlocal probe_attempts
+        if ".link-probe-" in str(dst):
+            probe_attempts += 1
+            raise OSError("injected link denial")
+        return real_link(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(engine_input_staging.os, "link", fail_probe)
+    assert run_estate.main(_landing_argv(engine, assets, run / "bundle")) == run_estate.EXIT_UNIT_IDS
+    assert probe_attempts == 1
+    assert not (run / unit_ids.INDEX_FILE_NAME).exists()
+    assert not (run.parent / ".unit-id-reservations").exists()
+    assert not list((run / "engine-input").iterdir())
+    assert not staged_inputs
+
+    def fail_staged_link(src, dst, *args, **kwargs):
+        if str(dst).endswith(".tmp"):
+            raise OSError("injected staged-link denial")
+        return real_link(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(engine_input_staging.os, "link", fail_staged_link)
+    assert run_estate.main(_landing_argv(engine, assets, run / "bundle")) == run_estate.EXIT_UNIT_IDS
+    index = json.loads((run / unit_ids.INDEX_FILE_NAME).read_text(encoding="utf-8"))
+    assert index["units"][0]["id"] == "u0001"
+    assert len(list((run.parent / ".unit-id-reservations").iterdir())) == 1
+    assert not list((run / "engine-input").rglob("*.tmp"))
+    assert not staged_inputs
+
+    monkeypatch.setattr(engine_input_staging.os, "link", real_link)
+    assert run_estate.main(_landing_argv(engine, assets, run / "bundle")) == run_estate.EXIT_OK
+    assert json.loads((run / unit_ids.INDEX_FILE_NAME).read_text(encoding="utf-8"))["units"][0]["id"] == "u0001"
+    assert len(list((run.parent / ".unit-id-reservations").iterdir())) == 1
+    assert staged_inputs == [run / "engine-input"]
+
+
+def test_engine_mutating_shared_staged_input_is_refused_after_conversion(tmp_path: Path, monkeypatch) -> None:
+    """Hard links share bytes, so an engine write to its input is detected after conversion (plan 3.3 step 9)."""
+    _prepare_id_run_gates(monkeypatch)
+    allocated = _work_dirs_allocate("unit-id-mutated-source", "--repo-root", tmp_path)
+    run = Path(allocated["root"])
+    assets = run / "assets"
+    source = assets / "Sales.twb"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text("<workbook />", encoding="utf-8")
+    engine = _id_staging_engine(tmp_path / "engine")
+    calls: list[Path] = []
+    emitted = _id_bundle_engine(calls, consolidated=False)
+
+    def mutating_engine(engine_path, source_path, output_path, dax):
+        selected = next(path for path in source_path.rglob("*") if path.suffix.lower() == ".twb")
+        selected.write_text("<changed />", encoding="utf-8")
+        return emitted(engine_path, source_path, output_path, dax)
+
+    monkeypatch.setattr(run_estate, "run_engine", mutating_engine)
+
+    assert run_estate.main(_landing_argv(engine, assets, run / "bundle")) == run_estate.EXIT_UNIT_IDS
+
+    assert calls == [run / "engine-input"]
+    assert source.read_text(encoding="utf-8") == "<changed />"
+
+
+def test_preexisting_engine_output_without_index_stays_legacy(tmp_path: Path, monkeypatch) -> None:
+    """Existing engine output without an index keeps the legacy layout and reserves nothing (T3)."""
+    _prepare_id_run_gates(monkeypatch)
+    allocated = _work_dirs_allocate("unit-id-legacy-output", "--repo-root", tmp_path)
+    run = Path(allocated["root"])
+    assets = run / "assets"
+    source = assets / "Sales.twb"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text("<workbook />", encoding="utf-8")
+    (run / "bundle" / "report.json").write_text("{}", encoding="utf-8")
+    engine = _id_staging_engine(tmp_path / "engine")
+    calls: list[Path] = []
+
+    def legacy_engine(engine_path, source_path, output_path, dax):
+        calls.append(source_path)
+        return _bundle_engine()(engine_path, source_path, output_path, dax)
+
+    monkeypatch.setattr(run_estate, "run_engine", legacy_engine)
+    args = _landing_argv(engine, assets, run / "bundle") + [
+        "--accept-bundle-rewrite",
+        "--accept-engine-version-change",
+    ]
+
+    assert run_estate.main(args) == run_estate.EXIT_OK
+
+    assert calls == [assets]
+    assert not (run / unit_ids.INDEX_FILE_NAME).exists()
+    assert not (run / "engine-input").exists()
+    assert not (run.parent / ".unit-id-reservations").exists()
+
+
+def test_ordinary_depth_long_datasource_still_refuses_before_any_reservation(tmp_path: Path, monkeypatch) -> None:
+    """Workbook IDs fit at about 95 units; a 72-character datasource folder still does not (T7)."""
+    _prepare_id_run_gates(monkeypatch)
+    run = _ordinary_depth_run(tmp_path, "t7")
+    assets = run / "assets"
+    _write(assets / ("W" * 72 + ".twb"), "<workbook />")
+    datasource = _write(assets / ("D" * 72 + ".tds"), "<datasource />")
+    engine = _id_staging_engine(tmp_path / "engine")
+    calls: list[Path] = []
+    monkeypatch.setattr(run_estate, "run_engine", _id_bundle_engine(calls, consolidated=False))
+    args = _landing_argv(engine, assets, run / "bundle")
+
+    assert run_estate.main(args) == run_estate.EXIT_PATH_CEILING
+    assert not calls
+    assert not (run / unit_ids.INDEX_FILE_NAME).exists()
+    assert not (run.parent / ".unit-id-reservations").exists()
+    assert not (run / "engine-input").exists()
+
+    datasource.unlink()
+    assert run_estate.main(args) == run_estate.EXIT_OK, "the same long workbook fits under its unit ID"
+    assert calls == [run / "engine-input"]
+    assert (run / "bundle" / "pbip" / "u0001").is_dir()
+
+
+def _single_workbook_id_run(tmp_path: Path, monkeypatch, slug: str) -> tuple[Path, Path, list[Path]]:
+    """An allocated run with one ``assets/Sales.twb`` and the fake ID engine wired in."""
+    _prepare_id_run_gates(monkeypatch)
+    run = Path(_work_dirs_allocate(slug, "--repo-root", tmp_path)["root"])
+    _write(run / "assets" / "Sales.twb", "<workbook />")
+    calls: list[Path] = []
+    monkeypatch.setattr(run_estate, "run_engine", _id_bundle_engine(calls, consolidated=False))
+    return run, _id_staging_engine(tmp_path / "engine"), calls
+
+
+def test_relative_input_and_output_inside_the_run_record_artifacts_and_rerun(tmp_path: Path, monkeypatch) -> None:
+    """Relative paths from inside the run resolve once, so the index is written and a rerun passes (#849 F1)."""
+    run, engine, calls = _single_workbook_id_run(tmp_path, monkeypatch, "unit-id-relative")
+    monkeypatch.chdir(run)
+    args = _landing_argv(engine, Path("assets"), Path("bundle"))
+
+    assert run_estate.main(args) == run_estate.EXIT_OK
+    assert unit_ids.read_unit_index(run)[0]["artifacts"]["report"] == "bundle/pbip/u0001/u0001.Report"
+    assert run_estate.main(args) == run_estate.EXIT_OK
+    assert calls == [run / "engine-input"] * 2
+
+
+def test_old_run_restore_declaration_does_not_exempt_a_new_engine_run(tmp_path: Path, monkeypatch) -> None:
+    """Only the CURRENT run_id's restore is exempt; an earlier run's identical record is not (T5, M14)."""
+    run, engine, _calls = _single_workbook_id_run(tmp_path, monkeypatch, "unit-id-stale-run")
+    bundle = run / "bundle"
+    args = _landing_argv(engine, run / "assets", bundle)
+    assert run_estate.main(args) == run_estate.EXIT_OK
+    assert run_estate.main(args) == run_estate.EXIT_OK
+    current = engine_input_staging.generated_run_id(bundle)
+    records = list((bundle / "_build" / "generated-edit-declarations").glob("*.json"))
+    run_ids = {path: json.loads(path.read_text(encoding="utf-8"))["run_id"] for path in records}
+    assert sorted(run_id == current for run_id in run_ids.values()) == [False, True]
+    for path, run_id in run_ids.items():
+        if run_id == current:
+            path.unlink()
+
+    assert run_estate.main(args) == run_estate.EXIT_BUNDLE_REWRITE
+
+
+def test_invalid_unit_index_refuses_instead_of_falling_back_to_legacy(tmp_path: Path, monkeypatch) -> None:
+    """A run holding a corrupt unit-index.json exits 12 before the engine (M32)."""
+    run, engine, calls = _single_workbook_id_run(tmp_path, monkeypatch, "unit-id-corrupt-index")
+    monkeypatch.setattr(run_estate, "run_engine", lambda _engine, src, *_rest: (calls.append(src), (1, ""))[1])
+    (run / unit_ids.INDEX_FILE_NAME).write_text("{not json", encoding="utf-8")
+
+    assert run_estate.main(_landing_argv(engine, run / "assets", run / "bundle")) == run_estate.EXIT_UNIT_IDS
+    assert not calls
+
+
+def test_restaging_removes_stale_engine_input_entries(tmp_path: Path, monkeypatch) -> None:
+    """A previous staging's leftovers do not survive into the next engine input (O8, M29)."""
+    run, engine, calls = _single_workbook_id_run(tmp_path, monkeypatch, "unit-id-stale-stage")
+    stale = _write(run / "engine-input" / "old" / "stale.txt", "left over")
+
+    assert run_estate.main(_landing_argv(engine, run / "assets", run / "bundle")) == run_estate.EXIT_OK
+    assert calls == [run / "engine-input"]
+    assert not stale.exists()
+
+
+def test_main_hands_the_staged_root_to_the_scope_bridge(tmp_path: Path, monkeypatch) -> None:
+    """Through ``main``, the bridge matches each sweep row under assets/ to its engine-input link (C12, M07)."""
+    _prepare_id_run_gates(monkeypatch)
+    run = Path(_work_dirs_allocate("unit-id-scope", "--repo-root", tmp_path)["root"])
+    case = _scope_case(run)
+    _persist_scope_inputs(case)
+    emitted = _id_bundle_engine([], consolidated=False)
+
+    def engine_with_manifest(engine_path: Path, src: Path, dest: Path, dax: Path | None) -> tuple[int, str]:
+        result = emitted(engine_path, src, dest, dax)
+        manifest = json.loads((dest / "input_manifest.json").read_text(encoding="utf-8"))
+        manifest["source_kind"] = "LocalFilesSource"
+        manifest["assets"] = [
+            {
+                "kind": "workbook" if path.suffix == ".twb" else "datasource",
+                "staged_input_path": str(path),
+                "size_bytes": path.stat().st_size,
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            }
+            for path in sorted(src.iterdir())
+        ]
+        _write(dest / "input_manifest.json", json.dumps(manifest))
+        return result
+
+    monkeypatch.setattr(run_estate, "run_engine", engine_with_manifest)
+    engine = _id_staging_engine(tmp_path / "engine")
+    args = _landing_argv(engine, case.source, case.bundle, "--scope-survey", str(case.survey_path))
+
+    assert run_estate.main(args) == run_estate.EXIT_OK
+    bridge = _read_scope_bridge(case)
+    assert bridge["status"] == "established", bridge
+    assert all(Path(row["match"]["source_id"]).parent == run / "engine-input" for row in bridge["occurrences"])
 
 
 def _bundle_engine(calls: list[Path] | None = None):

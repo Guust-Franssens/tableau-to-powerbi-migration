@@ -15,6 +15,7 @@ import shutil
 import sqlite3
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -55,6 +56,69 @@ def _options(**kwargs) -> argparse.Namespace:
         "skip_empty_models": False,
     }
     return argparse.Namespace(**{**defaults, **kwargs})
+
+
+def test_indexed_unit_keeps_id_key_uses_legacy_fabric_name_and_preserves_empty_withholding(tmp_path: Path) -> None:
+    """An indexed ``u0001`` deploys under its legacy name; ID-keyed skips and placement still apply (T8)."""
+    # pylint: disable=protected-access
+    bundle = _bundle(tmp_path, {"u0001": True, "Orders": False})
+    run = bundle.parent
+    entry = {
+        "id": "u0001",
+        "key": "assets/sales.twbx",
+        "source": {
+            "kind": "workbook",
+            "name": "Legacy Sales",
+            "luid": None,
+            "site_luid": None,
+            "project_luid": None,
+            "project_name": None,
+        },
+        "legacy_folder": "Legacy Sales",
+        "artifacts": {"project_file": None, "semantic_model": None, "report": None},
+    }
+    (run / "unit-index.json").write_text(
+        json.dumps({"schema_version": 2, "run": run.name, "units": [entry]}), encoding="utf-8"
+    )
+    pbir = bundle / "pbip" / "u0001" / "u0001.Report" / "definition.pbir"
+    pbir_before = pbir.read_bytes()
+    (bundle / de.EMPTY_MODEL_REPORT).write_text(
+        json.dumps(
+            {
+                "models": [
+                    {
+                        "status": "EMPTY",
+                        "model_path": "pbip/u0001/u0001.SemanticModel",
+                        "findings": [],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    pairs = de.discover(bundle)
+    assert [(name, model.name, report.name if report else None) for name, model, report in pairs] == [
+        ("Orders", "Orders", None),
+        ("u0001", "Legacy Sales", "Legacy Sales"),
+    ]
+    unit_id, model, report = pairs[1]
+    de._plan_items(SimpleNamespace(source="estate"), pairs, {de._slug("Legacy Sales"): "folder-id"})
+    assert model.folder_id == report.folder_id == "folder-id"
+    assert pairs[0][1].folder_id is None
+    assert de._planned_keys(pairs) == [
+        ("Orders", de.MODEL_TYPE),
+        ("Legacy Sales", de.MODEL_TYPE),
+        ("Legacy Sales", de.REPORT_TYPE),
+    ]
+    assert pbir.read_bytes() == pbir_before
+
+    kept, withheld, refusal = de._plan_units(bundle, _options(skip_empty_models=True, skip=[]))
+    assert not refusal and [row[0] for row in withheld] == [unit_id]
+    assert [name for name, _model, _report in kept] == ["Orders"]
+    kept, withheld, refusal = de._plan_units(bundle, _options(skip=["Legacy Sales"]))
+    assert not refusal and [row[0] for row in withheld] == [unit_id]
+    assert [name for name, _model, _report in kept] == ["Orders"]
 
 
 # --------------------------------------------------------------------------- configuration

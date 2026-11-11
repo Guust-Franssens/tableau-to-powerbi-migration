@@ -636,6 +636,14 @@ def _summary(  # pylint: disable=too-many-arguments,too-many-locals
     ):
         state = "present" if present else "absent"
         print(f"{label} {path} ({state})", flush=True)
+    units = run / "UNITS.md"
+    if units.is_file():
+        print(f"UNITS {units}", flush=True)
+        print(
+            "Unit IDs: `python scripts/t2p.py units list --runs-parent "
+            f"{run.parent.parent}`; issue the brief under the exact unit ID.",
+            flush=True,
+        )
     print(
         "2. Give the exact handover and reference paths to the root dispatcher for an issued brief and "
         "@tableau-migrator handoff; package/cohort readiness remains separate.",
@@ -1043,7 +1051,17 @@ def main(
                 invalid = True
             short_root = Path("C:/t2p")
             print(
-                "Rerun in a new run (old run retained): " + _front_door_command(args, env_path, short_root),
+                "Workbook folders already use compact unit IDs where eligible, so this refusal names a long "
+                "datasource or residual source name. Fallback only: rerun in a new run (old run retained): "
+                + _front_door_command(args, env_path, short_root),
+                flush=True,
+            )
+            finish(result, 5, "FAILED")
+            failed = True
+        elif result.code == 12:
+            print(
+                "UNIT IDS: staging or index evidence was refused; the bundle is retained. "
+                "Resolve the named cause, then retry this run; hard-link failures never fall back to copying.",
                 flush=True,
             )
             finish(result, 5, "FAILED")

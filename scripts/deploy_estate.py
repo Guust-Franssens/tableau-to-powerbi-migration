@@ -127,6 +127,8 @@ from urllib.parse import quote
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
+import unit_ids  # noqa: E402  # pylint: disable=wrong-import-position
+
 LOG = logging.getLogger("deploy_estate")
 
 API = "https://api.fabric.microsoft.com/v1"
@@ -488,6 +490,11 @@ def discover(bundle: Path) -> list[tuple[str, Item, Item | None]]:
     pbip = bundle / "pbip"
     if not pbip.is_dir():
         raise SystemExit(f"no pbip/ folder in {bundle} - was this bundle produced by run_estate.py?")
+    try:
+        entries = unit_ids.read_unit_index(bundle.parent)
+    except unit_ids.UnitIndexInvalid as exc:
+        raise SystemExit(f"cannot trust unit-index.json for {bundle} ({exc.reason}); refusing to deploy IDs") from exc
+    by_id = {entry["id"]: entry for entry in entries or []}
     found: list[tuple[str, Item, Item | None]] = []
     for folder in sorted(p for p in pbip.iterdir() if p.is_dir()):
         models = sorted(folder.glob("*.SemanticModel"))
@@ -507,8 +514,15 @@ def discover(bundle: Path) -> list[tuple[str, Item, Item | None]]:
                 model_path.name,
                 extra.name,
             )
-        model = Item(folder.name, MODEL_TYPE, model_path)
-        report = Item(folder.name, REPORT_TYPE, reports[0]) if reports else None
+        entry = by_id.get(folder.name)
+        if entry is not None and not entry.get("legacy_folder"):
+            raise SystemExit(
+                f"unit {folder.name} has no legacy_folder in {bundle.parent / unit_ids.INDEX_FILE_NAME}; "
+                "refusing to guess a Fabric item name"
+            )
+        item_name = entry["legacy_folder"] if entry is not None else folder.name
+        model = Item(item_name, MODEL_TYPE, model_path)
+        report = Item(item_name, REPORT_TYPE, reports[0]) if reports else None
         found.append((folder.name, model, report))
     return found
 
@@ -571,7 +585,12 @@ def _did_you_mean(name: str, units: set[str]) -> str:
     return f" (did you mean {', '.join(repr(match) for match in close)}?)" if close else ""
 
 
-def resolve_skips(bundle: Path, units: set[str], options: argparse.Namespace) -> tuple[dict[str, str], str]:
+def resolve_skips(
+    bundle: Path,
+    units: set[str],
+    options: argparse.Namespace,
+    aliases: dict[str, str] | None = None,
+) -> tuple[dict[str, str], str]:
     """Which units this run deliberately withholds, and why. Returns (unit -> why, refusal)."""
     skips: dict[str, str] = {}
     if getattr(options, "skip_empty_models", False):
@@ -586,7 +605,10 @@ def resolve_skips(bundle: Path, units: set[str], options: argparse.Namespace) ->
                 # bundle (the hand-rolled quarantine this flag replaces), or it scanned a different
                 # bundle. There is nothing to withhold, so say it once and carry on.
                 LOG.warning("%s is reported EMPTY but has no folder in this bundle's pbip/ - nothing to skip", unit)
-    named = list(getattr(options, "skip", None) or [])
+    named = [
+        supplied if supplied in units else (aliases or {}).get(supplied, supplied)
+        for supplied in list(getattr(options, "skip", None) or [])
+    ]
     unknown = [name for name in named if name not in units]
     if unknown:
         # Refusing beats warning: a mistyped --skip deploys the very unit the operator meant to hold
@@ -1629,15 +1651,16 @@ def _print_plan(
 ) -> int:
     """Report what would be created, where it would land, and the item count that carries the cost."""
     LOG.info("--dry-run: nothing will be created. Plan:")
-    for name, _model, report in pairs:
-        where = "/".join(placement.get(_slug(name), [])) or "(workspace root)"
-        LOG.info("  %-40s %-28s %s", name, where, "model + report" if report else "model only")
+    for name, model, report in pairs:
+        where = "/".join(placement.get(_slug(model.name), [])) or "(workspace root)"
+        label = f"{model.name} [unit {name}]" if model.name != name else name
+        LOG.info("  %-40s %-28s %s", label, where, "model + report" if report else "model only")
     if placement:
         LOG.info(
             "%d folder(s) would be created to mirror the Tableau project tree.",
             len({tuple(p) for p in placement.values()}),
         )
-    unplaced = [name for name, _m, _r in pairs if _slug(name) not in placement]
+    unplaced = [name for name, model, _r in pairs if _slug(model.name) not in placement]
     if unplaced:
         LOG.info("%d workbook(s) have no known Tableau project and would land at the root.", len(unplaced))
     LOG.info(
@@ -1673,10 +1696,10 @@ def _refusals(target: Target, pairs: list[tuple[str, Item, Item | None]]) -> dic
 
 def _plan_items(target: Target, pairs: list[tuple[str, Item, Item | None]], folders: dict[str, str]) -> None:
     """Stamp placement and estate identity onto every planned item before anything is checked."""
-    for name, model, report in pairs:
+    for _unit, model, report in pairs:
         for item in (model, report):
             if item is not None:
-                item.folder_id = folders.get(_slug(name))
+                item.folder_id = folders.get(_slug(model.name))
                 item.source = target.source
 
 
@@ -1704,7 +1727,7 @@ def _run_all(
     for name, model, report in pairs:
         if name in blocked:
             continue
-        model.folder_id = folders.get(_slug(name))
+        model.folder_id = folders.get(_slug(model.name))
         model_id, failure = _deploy_model(target, name, model)
         if failure:
             failures.append(failure)
@@ -1721,7 +1744,7 @@ def _run_all(
             continue
         offline = 0
         if report:
-            report.folder_id = folders.get(_slug(name))
+            report.folder_id = folders.get(_slug(model.name))
             report_failure = _deploy_report(target, name, model, report, model_id)
             if report_failure:
                 failures.append(report_failure)
@@ -1866,7 +1889,9 @@ def _execute(  # pylint: disable=too-many-arguments  # `pairs` is passed IN, see
 def _plan_units(bundle: Path, options: argparse.Namespace) -> tuple[list[Pair], list[tuple[str, int, str]], str]:
     """Discover the bundle's units and apply the operator's skips. (deploy these, withheld, refusal)."""
     discovered = discover(bundle)
-    skips, refusal = resolve_skips(bundle, {name for name, _model, _report in discovered}, options)
+    # Engine folder names are unique per bundle, so each legacy name maps to exactly one unit ID.
+    aliases = {model.name: unit_id for unit_id, model, _report in discovered if unit_id != model.name}
+    skips, refusal = resolve_skips(bundle, {name for name, _model, _report in discovered}, options, aliases)
     if refusal:
         return [], [], refusal
     pairs, withheld = withhold(discovered, skips)
@@ -1878,8 +1903,8 @@ def _plan_units(bundle: Path, options: argparse.Namespace) -> tuple[list[Pair], 
 
 def _planned_keys(pairs: list[Pair]) -> list[tuple[str, str]]:
     """Every (name, type) this run would deploy, so preflight can tell new items from existing ones."""
-    keys = [(name, MODEL_TYPE) for name, _model, _report in pairs]
-    return keys + [(name, REPORT_TYPE) for name, _model, report in pairs if report]
+    keys = [(model.name, MODEL_TYPE) for _unit, model, _report in pairs]
+    return keys + [(report.name, REPORT_TYPE) for _unit, _model, report in pairs if report]
 
 
 def deploy(bundle: Path, workspace: str, tok: Any, options: argparse.Namespace) -> int:
