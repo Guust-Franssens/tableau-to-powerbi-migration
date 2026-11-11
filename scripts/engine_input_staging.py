@@ -284,7 +284,10 @@ def _restore_one(
     if current_name != unit_id:
         raise EngineInputStagingError(f"unexpected displayName in {relative}; refusing to overwrite it")
     platform["metadata"]["displayName"] = display_name
-    unit_ids._atomic_write_text(path, json.dumps(platform, indent=2))  # pylint: disable=protected-access
+    text = json.dumps(platform, indent=2)
+    if b"\r\n" in original:
+        text = text.replace("\n", "\r\n")
+    unit_ids._atomic_write_text(path, text)  # pylint: disable=protected-access
     declarations.append_generated_edit_declaration(
         bundle,
         {

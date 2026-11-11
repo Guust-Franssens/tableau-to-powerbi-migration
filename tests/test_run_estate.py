@@ -2593,7 +2593,9 @@ def _id_bundle_engine(calls: list[Path], *, consolidated: bool):
             model_platform = {"metadata": {"displayName": unit_id}}
             report_folder = dest / "pbip" / unit_id / f"{unit_id}.Report"
             model_folder = dest / "pbip" / unit_id / f"{unit_id}.SemanticModel"
-            _write(report_folder / ".platform", json.dumps(report_platform, indent=2))
+            # The real engine writes CRLF on every platform; the restore must keep it.
+            crlf_platform = json.dumps(report_platform, indent=2).replace("\n", "\r\n").encode()
+            _write(report_folder / ".platform").write_bytes(crlf_platform)
             _write(
                 report_folder / "definition.pbir",
                 json.dumps({"datasetReference": {"byPath": {"path": f"../{unit_id}.SemanticModel"}}}),
@@ -2712,6 +2714,8 @@ def test_fresh_allocator_bundle_stages_workbook_ids_and_restores_only_supported_
     assert staged_files[0].name == (f"{luid}_u0001.twbx" if with_luid else "u0001.twb")
     report_platform = run / "bundle" / "pbip" / "u0001" / "u0001.Report" / ".platform"
     assert json.loads(report_platform.read_text(encoding="utf-8"))["metadata"]["displayName"] == name
+    restored = report_platform.read_bytes()
+    assert b"\r\n" in restored and restored.count(b"\n") == restored.count(b"\r\n")
     model_platform = run / "bundle" / "pbip" / "u0001" / "u0001.SemanticModel" / ".platform"
     assert json.loads(model_platform.read_text(encoding="utf-8"))["metadata"]["displayName"] == model_name
     pristine_platform = run / "bundle" / "reports" / "u0001.Report" / ".platform"
