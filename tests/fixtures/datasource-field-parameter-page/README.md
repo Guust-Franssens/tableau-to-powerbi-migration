@@ -5,6 +5,10 @@ PBIP path-ceiling projection can give datasource units a visual-free envelope."*
 false, and a projection built on it would be **fail-open** — it would pass a tree Power BI Desktop
 cannot open.
 
+Issue #836 now uses that shell only as a pre-conversion **lower bound**: `check_emitted_path_ceiling`
+measures the tree the engine wrote and is the verdict, so a datasource like this one that breaches the
+ceiling is still refused, after conversion instead of before.
+
 ## The measurement
 
 Run 409's pre-conversion refusal (`run_estate.project_estate_path_ceiling`, file 275 / dir 263 at a

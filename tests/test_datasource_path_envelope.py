@@ -20,6 +20,12 @@ still over 259 / 247). The tree fitted only because that datasource carried no f
 which is **data**-dependent, not **kind**-dependent. Do not let "carry the unit kind" be sold as the
 fix for the over-refusal.
 
+Production (issue #836) projects a datasource unit as its shell report BEFORE conversion, as a lower
+bound and not a verdict: `check_emitted_path_ceiling` measures the tree the engine really wrote, so a
+swap-shaped datasource is not made to fit, its refusal just moves from the projection to that gate
+(`test_an_over_ceiling_emitted_tree_refuses_before_any_consumer_sees_it` in `tests/test_run_estate.py`
+pins the gate itself).
+
 Assertion families, with deliberately different lifetimes (the shape
 `tests/test_issue_424_chart_type_pin.py` established):
 
@@ -561,6 +567,9 @@ def test_a_visual_free_datasource_envelope_would_be_fail_open(engine_bundle) -> 
     A datasource envelope modelled on the thin shell understates the SWAP datasource's own emitted
     path. Fail-open is the direction that ships a tree Power BI Desktop refuses, so this is the
     assertion that kills the over-broad remedy.
+
+    This is arithmetic over measured engine output and never calls production: production uses the
+    shell only as a lower bound, and the emitted-tree gate (see the module docstring) is the verdict.
     """
     swap = engine_bundle["shapes"][SWAP_UNIT]["deepest_tail_len"]
     thin_envelope = ENVELOPE_TAIL[THIN_UNIT]
@@ -585,8 +594,8 @@ def test_a_visual_free_datasource_envelope_would_be_fail_open(engine_bundle) -> 
 def test_the_projector_is_blind_to_unit_kind_and_over_projects_this_datasource(engine_bundle) -> None:
     """The classification defect, stated against the production function and real emitted paths.
 
-    `project_estate_path_ceiling` takes only NAMES, so it cannot tell a datasource from a workbook
-    and assigns both the workbook worst case.
+    Called with NAMES only (no `datasource_units`, issue #836), `project_estate_path_ceiling` cannot
+    tell a datasource from a workbook and assigns both the workbook worst case.
 
     ⚠️ The gap is real but it is NOT the whole of run 409's over-refusal: with the *sound*
     datasource envelope this fixture measures (`pageSelfService` + a 24-unit visual) that unit still

@@ -75,8 +75,9 @@ things a conversation cannot be trusted to remember every time:
 
 8. **The pre-engine path projection is fail-open, so the EMITTED tree is measured too (issue #564).**
    `preflight_estate_path_ceiling` projects the canonical PBIR visual tail onto names knowable before
-   conversion; the path that actually breaches on the committed issue-194 repro is an uncapped
-   SEMANTIC-MODEL table filename, which no pre-conversion projection here models. A bundle could
+   conversion (a datasource unit onto its shell report, a lower bound); the path that actually
+   breaches on the committed issue-194 repro is an uncapped SEMANTIC-MODEL table filename, which no
+   pre-conversion projection here models. A bundle could
    therefore pass the projection and still be one Power BI Desktop refuses to open, with every
    signal green. `check_emitted_path_ceiling` measures what the engine really wrote - through
    `check_path_ceiling.scan`, the same walker and the same measured 259/247 ceilings every other
@@ -416,6 +417,9 @@ _PBIR_PAGE_ID = "p" * _PBIR_MAX_PAGE_ID_UTF16
 _PBIR_VISUAL_ID = "v" * (_PBIR_MAX_VISUAL_ID_UTF16 + _PBIR_IDENTIFIER_SAFETY_MARGIN)
 _PBIR_VISUAL_FILE = "visual" + ".json"
 _PBIR_VISUAL_TAIL = f"definition/pages/{_PBIR_PAGE_ID}/visuals/{_PBIR_VISUAL_ID}/{_PBIR_VISUAL_FILE}"
+# A datasource unit is projected before conversion as its shell report (`page1`), a lower bound on its real
+# report path; `check_emitted_path_ceiling` decides anything longer (a swap page, a long table name).
+_PBIR_DATASOURCE_SHELL_TAIL = "definition/pages/page1/page.json"
 
 
 _ENGINE_SOURCE_SUFFIXES = {".twb": ".twb", ".twbx": ".twb", ".tds": ".tds", ".tdsx": ".tds"}
@@ -513,6 +517,11 @@ def _engine_unit_names(engine: Path, input_dir: Path) -> list[str] | None:
     return [record["legacy_folder"] for record in records] if records is not None else None
 
 
+def _datasource_units(records: list[dict[str, Any]] | None) -> frozenset[str]:
+    """Folder names of the datasource units among engine records; empty when the kinds are unknown."""
+    return frozenset(record["legacy_folder"] for record in records or () if record["kind"] == "datasource")
+
+
 def _owning_run_dir(args: argparse.Namespace) -> tuple[Path | None, str]:
     """The intact run whose `bundle/` is `--output` and which contains `--input`, else the legacy reason."""
     if args.slice_only:
@@ -570,11 +579,15 @@ def _provisional_unit_names(
     return names
 
 
-def project_estate_path_ceiling(output_root: Path, unit_names: list[str] | None) -> dict:
+def project_estate_path_ceiling(
+    output_root: Path, unit_names: list[str] | None, datasource_units: frozenset[str] = frozenset()
+) -> dict:
     """Project the canonical PBIP visual path before the engine writes any output.
 
     The fixed page/visual identifiers define the minimum canonical PBIR safety envelope; the estate's
     longest source name and actual output root are the variable inputs available at this stage.
+    Units in `datasource_units` are projected as their shell report instead (see
+    `_PBIR_DATASOURCE_SHELL_TAIL`).
     """
     output_root = output_root.resolve()
     if not unit_names:
@@ -594,20 +607,23 @@ def project_estate_path_ceiling(output_root: Path, unit_names: list[str] | None)
             "output_root": str(output_root),
         }
     for unit in projected_names:
+        tail = _PBIR_DATASOURCE_SHELL_TAIL if unit in datasource_units else _PBIR_VISUAL_TAIL
         report = f"{unit}.Report"
         report_root = output_root / "pbip" / unit / report
-        directory = report_root / _PBIR_VISUAL_TAIL.rsplit("/", 1)[0]
-        file_path = report_root / _PBIR_VISUAL_TAIL
+        directory = report_root / tail.rsplit("/", 1)[0]
+        file_path = report_root / tail
         records.extend(
             (
                 {
                     "kind": "directory",
+                    "unit": unit,
                     "path": str(directory),
                     "length": utf16_len(str(directory)),
                     "ceiling": DIR_CEILING,
                 },
                 {
                     "kind": "file",
+                    "unit": unit,
                     "path": str(file_path),
                     "length": utf16_len(str(file_path)),
                     "ceiling": FILE_CEILING,
@@ -644,8 +660,13 @@ def preflight_estate_path_ceiling(
     output_root: Path,
     engine: Path | None = None,
     unit_names: list[str] | None = None,
+    datasource_units: frozenset[str] = frozenset(),
 ) -> tuple[bool, str]:
-    """Refuse an estate whose canonical downstream PBIP skeleton exceeds Desktop's ceilings."""
+    """Refuse an estate whose canonical downstream PBIP skeleton exceeds Desktop's ceilings.
+
+    Explicit `unit_names` bring their own `datasource_units`; names read from the engine carry the
+    unit kinds the engine reports for the same selection.
+    """
     try:
         candidates = _input_candidates(input_dir)
         names = (
@@ -653,7 +674,9 @@ def preflight_estate_path_ceiling(
             if unit_names is not None
             else (_engine_unit_names(engine, input_dir) if engine and candidates else None)
         )
-        projection = project_estate_path_ceiling(output_root, names)
+        if unit_names is None and names is not None:
+            datasource_units = _datasource_units(_engine_unit_records(engine, input_dir))
+        projection = project_estate_path_ceiling(output_root, names, datasource_units)
     except (OSError, RuntimeError, UnicodeEncodeError, ValueError) as exc:
         return False, (f"CANNOT ASSESS downstream PBIP path length ({type(exc).__name__}: {exc}). {_SHORT_ROOT_HINT}")
     if projection["status"] == "cannot_establish":
@@ -661,17 +684,22 @@ def preflight_estate_path_ceiling(
             "CANNOT ASSESS downstream PBIP path length: the input estate has no usable unit/workbook "
             f"name. {_SHORT_ROOT_HINT}"
         )
+    worst = max(projection["paths"], key=lambda record: record["length"] - record["ceiling"])
     if projection["status"] == "over_ceiling":
-        worst = max(projection["offenders"], key=lambda record: record["length"] - record["ceiling"])
         return False, (
             f"PATH CEILING: projected {worst['kind']} is {worst['length']} UTF-16 units "
-            f"(ceiling {worst['ceiling']}) for unit {projection['longest_unit']!r}. "
+            f"(ceiling {worst['ceiling']}) for unit {worst['unit']!r}. "
             "LongPathsEnabled and \\\\?\\ prefixes do not make Power BI Desktop accept these paths. "
             f"{_SHORT_ROOT_HINT}"
         )
+    lower_bound = (
+        " Datasource units are projected as a lower bound; the emitted tree is measured after conversion."
+        if datasource_units
+        else ""
+    )
     return True, (
-        f"PATH CEILING: projected canonical PBIP visual path fits ({projection['longest_unit']!r}); "
-        "this is the pre-conversion safety envelope."
+        f"PATH CEILING: projected canonical PBIP visual path fits ({worst['unit']!r}); "
+        f"this is the pre-conversion safety envelope.{lower_bound}"
     )
 
 
@@ -2783,8 +2811,9 @@ def record_engine_output(out_dir: Path, report: dict | None, phases: list[dict],
 # The post-engine path-ceiling gate (issue #564)
 #
 # The pre-engine projection above (`preflight_estate_path_ceiling`) is a PROJECTION: it composes the
-# canonical PBIR visual tail onto unit names it can know BEFORE conversion. That is genuinely all it
-# can see, and it is fail-open by construction - measured on the committed issue-194 repro, the path
+# canonical PBIR visual tail onto unit names it can know BEFORE conversion (a datasource unit onto its
+# shell report, a lower bound that this gate then measures for real). That is genuinely
+# all it can see, and it is fail-open by construction - measured on the committed issue-194 repro, the path
 # that actually breaches is a SEMANTIC-MODEL table file
 # (`<unit>.SemanticModel/definition/tables/<uncapped table name>`), which no pre-conversion
 # projection in this repo models. So an estate could pass the projection, emit a tree Power BI
@@ -3840,7 +3869,11 @@ def _unit_id_selection(
         return EXIT_OK, run_dir, entries, records
     if args.input:
         path_ok, path_detail = preflight_estate_path_ceiling(
-            args.input, args.output, engine, _provisional_unit_names(run_dir, entries, records)
+            args.input,
+            args.output,
+            engine,
+            _provisional_unit_names(run_dir, entries, records),
+            _datasource_units(records),
         )
         print(path_detail)
         if not path_ok:
@@ -3873,7 +3906,11 @@ def stage_engine_input(
         print(f"ESTATE: UNIT_IDS - {exc}", file=sys.stderr)
         return None, EXIT_UNIT_IDS
     path_ok, path_detail = preflight_estate_path_ceiling(
-        engine_input, args.output, engine, [record["legacy_folder"] for record in staged_engine_records]
+        engine_input,
+        args.output,
+        engine,
+        [record["legacy_folder"] for record in staged_engine_records],
+        _datasource_units(staged_engine_records),
     )
     print(path_detail)
     if not path_ok:
