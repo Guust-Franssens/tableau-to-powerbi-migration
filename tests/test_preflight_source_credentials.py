@@ -1,8 +1,4 @@
-"""`classify_source` must stay a thin translation of `connection_target.powerbi_target`.
-
-A second, deny-list opinion once cleared live extracts (Snowflake/Databricks `.hyper`) and unknown
-classes such as `azure_sqldb` as credential-free, silently disarming the gate.
-"""
+"""`classify_source` must stay a thin translation of `connection_target.powerbi_target`."""
 
 from __future__ import annotations
 

@@ -1,9 +1,4 @@
-"""Exercise the published reactive signing recovery, not an automatic bootstrap (#610).
-
-Only generated files and child-process policies are used. Group Policy, AppLocker and WDAC are
-not changed or emulated; managed-policy routing is a documentation contract.
-Run: pytest -q tests/test_preflight_signing_policy.py --basetemp _preflight_signing_tests
-"""
+"""Exercise the published reactive signing recovery, not an automatic bootstrap (#610)."""
 
 import ctypes
 import json

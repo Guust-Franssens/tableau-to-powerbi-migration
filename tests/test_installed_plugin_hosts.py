@@ -1,9 +1,4 @@
-"""Synthetic host parity controls for #727, never read an operator profile.
-
-Registry transcription: VS Code 1.144.0, commit 2c33b50b16c472efe58357d1d2a8a5414bc23fbf,
-src/vs/workbench/contrib/chat/test/common/plugins/fileBackedInstalledPluginsStore.test.ts
-lines 166-172 and 282-311. The latter preserves literal spaces, # and %20 on relocation.
-"""
+"""Synthetic host parity controls for #727, never read an operator profile."""
 
 from __future__ import annotations
 
@@ -537,10 +532,7 @@ def test_process_json_entrypoints(profile: dict[str, str]) -> None:
 
 
 def _preflight(environment: dict[str, str], *, python: str = "present") -> dict:
-    """Execute only production plugin wiring, no full preflight or external operations.
-
-    `python` is "present", "absent" (not on PATH) or "silent" (on PATH, but engine_source.py prints nothing).
-    """
+    """Execute only production plugin wiring, no full preflight or external operations."""
     source = (ROOT / "scripts/preflight.ps1").read_text(encoding="utf-8")
     engine_block = source[source.index("$engineStatus = $null") : source.index("# --- Engine receipt drift")]
     plugin_block = source[source.index("# --- Skill plugins ---") : source.index("# Recommended means")]

@@ -1,9 +1,4 @@
-"""Tests for the customer-text tracing harness (`scripts/trace_customer_text.py`).
-
-`inject` must reach the channels that matter without corrupting the workbook; `trace` must find a
-sentinel wherever it landed (including file and folder names) and name the channels that reached
-nothing. Committed fixtures are copied into `tmp_path` first, so a broken `inject` cannot overwrite them.
-"""
+"""Tests for the customer-text tracing harness (`scripts/trace_customer_text.py`)."""
 
 from __future__ import annotations
 

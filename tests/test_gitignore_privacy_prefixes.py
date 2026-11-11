@@ -1,9 +1,4 @@
-"""The `workshop-`/`engagement-`/`customer-` slug prefixes keep a customer unit untracked (#378).
-
-The rules must fire at the slug position of the depth-2 user trees, and nowhere deeper: a deliverable
-named after a "Customer ..." workbook stays tracked. Judged by `git check-ignore --no-index`, which
-ignores the index so an already-tracked path cannot mask a rule.
-"""
+"""The `workshop-`/`engagement-`/`customer-` slug prefixes keep a customer unit untracked (#378)."""
 
 import subprocess
 from pathlib import Path

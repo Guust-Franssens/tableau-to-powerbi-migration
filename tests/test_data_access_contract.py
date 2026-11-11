@@ -1,9 +1,4 @@
-"""Phase-1 data-access projection contract after the credential-gate ledger was retired.
-
-The projection is computed from package facts and the brief alone. A live source is admitted as
-`live_unproven` (dispatchable, never validated); real-data proof is owed at sign-off by check_unit's
-`data-evidence` row. Stored legacy documents (`live_data_ok`, human-authorized model-only) still parse.
-"""
+"""Phase-1 data-access projection contract after the credential-gate ledger was retired."""
 
 from __future__ import annotations
 

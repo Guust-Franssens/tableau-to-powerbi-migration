@@ -1,10 +1,4 @@
-"""
-purpose: Regression tests for the untrusted-content scanner. A .twb is customer-supplied input whose
-         strings are copied verbatim into migration-spec.json and then read into an LLM agent's
-         context - a text-injection channel that went completely unexamined until a battle-test run
-         pushed five vectors through the parser and got zero limitations back.
-usage:   pytest -q
-"""
+"""purpose: Regression tests for the untrusted-content scanner."""
 
 from __future__ import annotations
 

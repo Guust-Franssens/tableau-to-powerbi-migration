@@ -1,8 +1,4 @@
-r"""Contract tests for the `subst` Desktop-open fallback documented for issue #566.
-
-The permission (open an over-ceiling PBIP through `subst`) and its boundary (the physical path stays
-canonical and gated) must both stay on the page; the retired absolute prohibition must not.
-"""
+r"""Contract tests for the `subst` Desktop-open fallback documented for issue #566."""
 
 from __future__ import annotations
 
@@ -90,20 +86,12 @@ def test_the_documents_carry_the_whole_contract_as_committed() -> None:
 
 @pytest.mark.parametrize("doc", [AGENTS_MD, DRY_RUN_OPERATOR_MD])
 def test_the_retired_absolute_prohibition_is_gone_from_the_contract_documents(doc: Path) -> None:
-    """The correction replaces the old rule; it does not sit beside it.
-
-    Measured shape of the failure this prevents: two rules on one page, one absolute and one
-    conditional, and the absolute one is shorter and older.
-    """
+    """The correction replaces the old rule; it does not sit beside it."""
     assert RETIRED_PROHIBITION not in _normalized(doc)
 
 
 def test_the_retired_prohibition_survives_only_as_a_quoted_correction() -> None:
-    """The evidence page keeps the old wording ON PURPOSE - labelled as corrected, with its scope.
-
-    An unexplained disappearance would let the same unmeasured rule be re-derived later, which is
-    exactly how #566 came to exist.
-    """
+    """The evidence page keeps the old wording ON PURPOSE - labelled as corrected, with its scope. (#566)"""
     text = _normalized(WINDOWS_PATH_LIMITS_MD)
     assert RETIRED_PROHIBITION in text
     assert "This section corrects an earlier unconditional prohibition." in text
@@ -117,10 +105,7 @@ def test_the_root_routes_alias_recovery_to_the_canonical_path_limits() -> None:
 
 @pytest.mark.parametrize("doc", [DRY_RUN_OPERATOR_MD, OPERATOR_RUNBOOK_MD])
 def test_every_document_that_permits_the_alias_also_states_its_boundary(doc: Path) -> None:
-    """Fail-open control: no document may grant the permission without the limit beside it.
-
-    Judged on the same page rather than across the set, because a subagent receives ONE file.
-    """
+    """Fail-open control: no document may grant the permission without the limit beside it."""
     text = _normalized(doc)
     if "`subst`" not in text:
         pytest.fail(f"{doc.name} no longer mentions the fallback at all")
@@ -154,13 +139,7 @@ def test_the_evidence_page_cites_a_committed_fixture_and_guard_test() -> None:
 
 
 def test_the_physical_path_stays_the_authoritative_artifact_identity() -> None:
-    """Invariant 1 of #566, guarded on its own so a deletion NAMES the identity rule.
-
-    Deliberately different sentences from the phrase table above. A statement whose only guard is a
-    shared table fails as "some contract lost a phrase", which does not tell a reviewer that the
-    canonical-identity rule is what went missing - and identity is the half an alias erodes most
-    easily, because the bridge reports the alias spelling straight back at you.
-    """
+    """Invariant 1 of #566, guarded on its own so a deletion NAMES the identity rule."""
     text = _normalized(WINDOWS_PATH_LIMITS_MD)
     assert "The canonical physical path — and every hash taken over it — remains authoritative" in text, (
         "the canonical-identity rule is gone from the evidence page"
@@ -171,12 +150,7 @@ def test_the_physical_path_stays_the_authoritative_artifact_identity() -> None:
 
 
 def test_an_alias_open_never_makes_an_over_ceiling_tree_clean() -> None:
-    """Invariant 2 of #566, guarded on its own so a deletion NAMES the shippability rule.
-
-    This is the fail-open direction: the permission is what an operator remembers, and the sentence
-    that stops a green Desktop window from becoming a green receipt is the one worth its own
-    assertion rather than a share of a table.
-    """
+    """Invariant 2 of #566, guarded on its own so a deletion NAMES the shippability rule."""
     text = _normalized(WINDOWS_PATH_LIMITS_MD)
     assert "a physically over-ceiling tree stays non-clean" in text, (
         "the page no longer says an over-ceiling tree stays non-clean when an alias opens it"
@@ -187,25 +161,14 @@ def test_an_alias_open_never_makes_an_over_ceiling_tree_clean() -> None:
 
 
 def test_the_ceiling_gate_still_scans_the_resolved_target() -> None:
-    """Independent oracle for the load-bearing sentence: the gate's own source, not the prose.
-
-    `docs/windows-path-limits.md` tells an operator that handing `check_path_ceiling.py` an alias
-    spelling does not shorten what it measures. That is only true while the CLI scans
-    `target.resolve()`; if it ever scanned the spelling it was given, the documented boundary would
-    silently become false and the alias WOULD look like a way to pass the gate.
-    """
+    """Independent oracle for the load-bearing sentence: the gate's own source, not the prose."""
     source = " ".join((REPO_ROOT / "scripts" / "check_path_ceiling.py").read_text(encoding="utf-8").split())
     assert "scan( target.resolve()," in source or "scan(target.resolve()," in source
 
 
 @pytest.mark.skipif(os.name != "nt", reason="`subst` is Windows-only")
 def test_resolving_a_substituted_drive_returns_the_physical_path() -> None:
-    """The measurement the page cites, re-run: `resolve()` sees through `subst`.
-
-    This is the difference between "the gate resolves its argument" (true, above) and "resolving is
-    enough" (the claim that matters). Both halves are needed: a resolver that returned the alias
-    spelling would satisfy the source check and still leave the artifact judged as if it were short.
-    """
+    """The measurement the page cites, re-run: `resolve()` sees through `subst`."""
     letter = next((candidate for candidate in "ZYXWVUT" if not Path(f"{candidate}:\\").exists()), None)
     if letter is None:
         pytest.skip("no free drive letter available for subst")

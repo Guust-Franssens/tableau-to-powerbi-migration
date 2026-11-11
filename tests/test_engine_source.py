@@ -1,7 +1,4 @@
-"""The conversion engine has ONE source: the installed plugin (#107).
-
-The resolver must refuse rather than substitute another tree, and a bundle must record which engine built it.
-"""
+"""The conversion engine has ONE source: the installed plugin (#107)."""
 
 from __future__ import annotations
 

@@ -1,11 +1,4 @@
-"""Pinning tests for tiny upstream-engine repro fixtures (``fixtures/upstream-repros``).
-
-Each test's docstring states its direction: a defect-direction pin (#171) fails when upstream fixes
-the defect; a post-fix regression guard (#166, #168) fails if the defect returns. Either way a failure
-is a signal: verify against the current canonical engine, then update the expectation and
-``PINNED_ENGINE_VERSION``. Version drift is a non-fatal warning (#486) so a bump never hides the pins.
-Engine-backed tests skip cleanly when the optional engine plugin is absent.
-"""
+"""Pinning tests for tiny upstream-engine repro fixtures (``fixtures/upstream-repros``). (#171, #166, #168, #486)"""
 
 from __future__ import annotations
 
@@ -157,11 +150,7 @@ def _source_ref_entities(value: Any) -> list[str]:
 
 @requires_engine
 def test_issue_168_pins_partial_dispatcher_with_disclosure() -> None:
-    """Post-fix regression guard (#486): #168 shipped, so a return to the all-or-nothing stub is a REGRESSION.
-
-    The engine emits a partial dispatcher that keeps the three live branches, drops the unresolvable
-    one, and discloses the drop in a TranslatedBy annotation.
-    """
+    """Post-fix regression guard (#486): #168 shipped, so a return to the all-or-nothing stub is a REGRESSION."""
     slug = "issue-168-case-one-bad-branch"
     measures = _model_table_text(slug, "_Measures")
     handoff_requests = _workbook(slug)["model_translation_handoff"]["requests"]

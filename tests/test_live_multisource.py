@@ -1,15 +1,4 @@
-"""Tests for the multi-source LIVE fixture (`tests/fixtures/live/multi-source-live.twbx`).
-
-The fixture embeds real endpoint hostnames, so it is gitignored and generated on demand by
-`scripts/make_live_source_fixture.py`. Every test here SKIPS when it is absent, so a clean clone
-and CI stay green without it - the fixture is an optional depth test, not a required one.
-
-Why it exists: a federated datasource spanning several live systems is normal in real Tableau
-workbooks and has failure modes a single-source fixture cannot reach. Measured 2026-08-05 on such
-a workbook, the deterministic tier emitted ONE `Server`/`Database` pair for THREE connectors, so
-Databricks and Snowflake both pointed at the Azure SQL host and referenced undefined parameters -
-and the model still passed both of that tier's own validators.
-"""
+"""Tests for the multi-source LIVE fixture (`tests/fixtures/live/multi-source-live.twbx`)."""
 
 from __future__ import annotations
 

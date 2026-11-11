@@ -17,13 +17,7 @@ def _exit_constants(script: str) -> set[int]:
 
 
 def _preflight_exits() -> set[int]:
-    """Return literal preflight exit codes.
-
-    Assumption: preflight.ps1 uses literal `exit N` statements. A future computed exit such as
-    `$rc = 2; exit $rc` would require a PowerShell-aware parser or an executable test matrix.
-    Preflight's exits are intentionally stable today (0/1), so that extra machinery is not worth it
-    until the script grows a third outcome.
-    """
+    """Return literal preflight exit codes."""
     source = (REPO_ROOT / "scripts" / "preflight.ps1").read_text(encoding="utf-8")
     return {int(code) for code in re.findall(r"^\s*exit\s+(\d+)\s*$", source, re.IGNORECASE | re.MULTILINE)}
 

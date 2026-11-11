@@ -1,10 +1,4 @@
-"""Regression tests for the marketplace build (`scripts/build_plugin.py`).
-
-The published plugin is what makes a skill's *name* resolve inside a custom-agent subagent - a
-repo-local `.github/skills/` bundle does not (see `docs/agent-architecture.md` section 6.1). So a
-silently broken build is a silently broken persona instruction, which is why these run in CI even
-though the artifact itself is gitignored.
-"""
+"""Regression tests for the marketplace build (`scripts/build_plugin.py`)."""
 
 from __future__ import annotations
 
@@ -77,13 +71,7 @@ def test_every_skill_the_manifest_declares_is_present_at_that_path(built: Path) 
 
 
 def test_each_published_skill_travels_with_its_scripts_and_tests(built: Path) -> None:
-    """The copy-one-folder promise: a consumer installs the whole bundle, not just its markdown.
-
-    Conditional on the SOURCE bundle actually shipping code, because not every bundle does: the two
-    gotcha catalogues are pure knowledge (no scripts, so nothing to gate). Asserting unconditionally
-    would forbid a documentation-only bundle, and asserting nothing would let a build silently drop
-    the `scripts/` of a bundle that has them - which is the failure this test exists to catch.
-    """
+    """The copy-one-folder promise: a consumer installs the whole bundle, not just its markdown."""
     skills = built / "plugins" / build_plugin.PLUGIN_NAME / "skills"
     carried = 0
     for name in build_plugin.SHIPPED_SKILLS:
@@ -108,16 +96,7 @@ def test_the_diagnostic_probe_skill_is_never_published() -> None:
 
 
 def test_the_plugin_carries_its_own_manifest_for_claude_code(built: Path) -> None:
-    """Claude Code needs `plugins/<name>/.claude-plugin/plugin.json`; Copilot CLI does not.
-
-    That asymmetry is the whole hazard. The root marketplace.json is the *catalogue*, and both
-    clients read it - so a marketplace missing the per-plugin manifest still `marketplace add`s
-    cleanly in both, installs fine in Copilot CLI, and simply is not recognised by Claude Code.
-    v0.3.0 shipped exactly that way. Nothing in the build output differed, because from Copilot's
-    point of view nothing was wrong.
-
-    `microsoft/skills-for-fabric` ships both files per plugin, which is the working reference.
-    """
+    """Claude Code needs `plugins/<name>/.claude-plugin/plugin.json`; Copilot CLI does not."""
     manifest_path = built / "plugins" / build_plugin.PLUGIN_NAME / ".claude-plugin" / "plugin.json"
     assert manifest_path.is_file(), "Claude Code will not recognise a plugin without its own plugin.json"
 
@@ -137,17 +116,7 @@ def test_the_plugin_carries_its_own_manifest_for_claude_code(built: Path) -> Non
 
 
 def test_the_publish_target_matches_the_plugin_name() -> None:
-    """The three identity constants must agree, and must be the post-rename ones.
-
-    v0.3.0 renamed the marketplace to `powerbi-playbook` and the GitHub repo with it. A branch cut
-    BEFORE that rename then merged cleanly and silently reverted all three constants (#144 landing
-    after #134), because a stale base carrying the old values is not a textual conflict. Master would
-    then have republished under the dead name, over a repo that no longer answers to it.
-
-    Consistency alone would not have caught it — the revert changed all three together — so this
-    pins the identity itself. If the plugin is ever legitimately renamed again, update this test in
-    the same commit; that is the point, the rename should not be silent.
-    """
+    """The three identity constants must agree, and must be the post-rename ones. (#144, #134)"""
     assert build_plugin.PLUGIN_NAME == "powerbi-playbook"
     assert build_plugin.MARKETPLACE_NAME == "powerbi-playbook-collection"
     assert build_plugin.PUBLISH_REPO.endswith(f"/{build_plugin.PLUGIN_NAME}"), (
@@ -156,27 +125,7 @@ def test_the_publish_target_matches_the_plugin_name() -> None:
 
 
 def test_the_advertised_skills_are_the_shipped_skills(built: Path) -> None:
-    """The README table and plugin description must not promise a bundle that is not in the release.
-
-    Both are hand-written prose in `build_plugin.py`, so they drift the moment `SHIPPED_SKILLS`
-    changes. v0.3.0 published with a description still advertising "persist a refreshed local PBIP
-    ... via AMO ImageSave" for `pbip-model-refresh`, which that release had deliberately held back -
-    a marketplace listing selling a capability the plugin did not contain. Nothing caught it; the
-    build was green because the *files* were correct and only the prose lied.
-
-    Note the description never contains the skill's NAME - it sells the capability in prose - so
-    checking for the folder name catches the README table and nothing else. The distinctive-identifier
-    check below is what actually covers the marketing copy: `ImageSave` and `cache.abf` appear in the
-    withheld bundle's own frontmatter and in no shipped one, so their presence in the marketplace
-    copy is exactly the lie. (Verified failing against the v0.3.0 text.)
-
-    ⚠️ **Its reach is identifiers, not plain English.** The v0.3.0 README opened with "persisting a
-    refreshed local PBIP", which names the withheld capability in ordinary words carrying no
-    mixed-case or dotted token - measured, this check returns `[]` for that sentence. Detecting that
-    class reliably needs a human reading the summary paragraph, so treat this as a floor, not a
-    guarantee: it catches the copy-paste of technical terms, which is the common failure, and it
-    will not catch a fluent English claim.
-    """
+    """The README table and plugin description must not promise a bundle that is not in the release."""
     readme = (built / "README.md").read_text(encoding="utf-8")
     manifest = json.loads((built / ".claude-plugin" / "marketplace.json").read_text(encoding="utf-8"))
     description = manifest["plugins"][0]["description"]
@@ -243,13 +192,7 @@ def test_publication_rejects_withheld_claims(built: Path) -> None:
 
 
 def test_rebuilding_preserves_a_git_clone(tmp_path: Path) -> None:
-    """The publish workflow is clone -> rebuild -> commit -> push, so a rebuild must not nuke `.git`.
-
-    It used to: `build()` called `shutil.rmtree(out)` unconditionally, which (a) deleted the clone's
-    history, turning every republish into a fresh `git init`, and (b) crashed outright on Windows with
-    `PermissionError: [WinError 5]`, because git marks objects under `.git/objects` read-only and
-    `os.unlink` refuses those.
-    """
+    """The publish workflow is clone -> rebuild -> commit -> push, so a rebuild must not nuke `.git`."""
     out = tmp_path / "marketplace"
     build_plugin.build(out)
 
