@@ -10,6 +10,7 @@ import os
 import re
 import shutil
 import sys
+import time
 import types as reference_types
 from functools import partial
 from collections.abc import Callable
@@ -3815,6 +3816,34 @@ def test_a_package_that_cannot_be_made_safe_is_not_written_at_all(tmp_path: Path
     assert not (_out(tmp_path) / UNIT).exists()
 
 
+def test_a_UNC_literal_is_refused_WITHOUT_being_probed(tmp_path: Path) -> None:
+    """Probing a UNC host that does not exist blocks on SMB name resolution, for MINUTES (PR #462).
+
+    So containment is judged lexically and a UNC source is refused unprobed. The test is
+    time-boxed, because the failure mode is that it does not come back.
+    """
+    started = time.monotonic()
+    assert not pkg._inside(tmp_path, r"\\no-such-host-461\share\data.csv")  # noqa: SLF001
+    readable, refusal = pkg._classify_source(r"\\no-such-host-461\share\data.csv")  # noqa: SLF001
+    elapsed = time.monotonic() - started
+    assert readable is None
+    assert "UNC" in refusal and "block" in refusal
+    assert elapsed < 5, f"the UNC literal was probed: {elapsed:.1f}s"
+
+
+def test_a_foreign_flavour_source_is_REFUSED_rather_than_reinterpreted_by_the_host() -> None:
+    """`Path` is the host's: a foreign literal is RESOLVED against the current drive, not refused.
+
+    Accepting it would package whatever local bytes sit at that path as the customer's source.
+    """
+    foreign = "/opt/data/customer.xlsx" if os.name == "nt" else r"C:\opt\data\customer.xlsx"
+    readable, refusal = pkg._classify_source(foreign)  # noqa: SLF001
+    assert readable is None
+    assert refusal is not None and "cannot resolve" in refusal
+    readable, refusal = pkg._classify_source(foreign, expect_dir=True)  # noqa: SLF001
+    assert readable is None and refusal is not None
+
+
 # --- B2: a byPath that does not resolve inside the package is not self-contained --------------
 
 
@@ -3824,6 +3853,25 @@ def _bind_report_to(bundle: Path, path: str) -> None:
     (report / "definition.pbir").write_text(
         json.dumps({"version": "4.0", "datasetReference": {"byPath": {"path": path}}}), encoding="utf-8"
     )
+
+
+def test_a_report_pointing_at_a_model_outside_the_package_is_NOT_self_contained(tmp_path: Path) -> None:
+    """`byPath: ../../Shared/Shared.SemanticModel` is the ordinary shared-datasource shape.
+
+    `powerbi-report-author validate` passes a `byPath` naming a model that exists nowhere, so the
+    package must record it as not self-contained.
+    """
+    bundle, _ = _bundle(tmp_path)
+    _bind_report_to(bundle, "../../Shared/Shared.SemanticModel")
+    assert _cli(tmp_path, bundle, "--unit", UNIT) == pkg.EXIT_OK
+
+    record = json.loads((_out(tmp_path) / UNIT / "package-manifest.json").read_text(encoding="utf-8"))
+    assert record["self_contained"] is False
+    assert record["model_binding"] == {
+        "kind": "byPath",
+        "path": "../../Shared/Shared.SemanticModel",
+        "resolves_in_package": False,
+    }
 
 
 def test_a_byConnection_report_makes_no_containment_claim(tmp_path: Path) -> None:
