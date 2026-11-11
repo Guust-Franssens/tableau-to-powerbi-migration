@@ -132,6 +132,7 @@ def test_live_source_is_admitted_unproven_never_validated(root: Path) -> None:
     for scope, fallback, expected in (
         ("model_and_report", "stop", unproven),
         ("model_and_report", "model_only_unvalidated", unproven),
+        ("model_only", "stop", unproven),
         ("model_only", "model_only_unvalidated", degraded),
     ):
         result = pda.assess_data_access(
@@ -495,6 +496,7 @@ def test_provider_reference_parser_accepts_only_the_closed_token(root: Path) -> 
     """Lengths, version, case and trailing characters are not repairable."""
     for reference in (
         "provider-ref:v1:sha256:" + "a" * 63,
+        "provider-ref:v1:sha256:" + "a" * 65,
         "provider-ref:v1:sha256:" + "A" * 64,
         "provider-ref:v2:sha256:" + "a" * 64,
         "provider-ref:v1:sha256:" + "a" * 64 + "\n",

@@ -387,7 +387,7 @@ def test_invalid_selector_refuses_after_positive_setup(profile: dict[str, str]) 
     """Invalid selection must refuse rather than silently reverting to automatic discovery."""
     _install(profile, "cli", "engine")
     assert engine.discover_installed_plugin("engine", env=profile).ok
-    for selector in ("", "VSCode", "newest"):
+    for selector in ("", "VSCode", "vscode ", "newest"):
         verdict = engine.discover_installed_plugin("engine", env={**profile, "T2P_PLUGIN_HOST": selector})
         assert (verdict.status, verdict.host) == ("invalid", None), selector
         assert "T2P_PLUGIN_HOST" in verdict.install_hint

@@ -50,6 +50,7 @@ def test_classify_recognises_only_our_explicit_gate_deny() -> None:
         f"DOMAIN\\{ME}:(OI)(CI)(NP)(DENY)(WD,AD,WA)",  # extra propagation flag
     ):
         assert dg.classify(listing(target, ace), target, ME) == "clean", ace
+    assert dg.classify(listing(target, f"DOMAIN\\{ME}:{GATE}"), target, f"DOMAIN\\{ME}") == "armed"
     assert dg.classify(listing(target, f"OTHER\\{ME}:{GATE}"), target, f"DOMAIN\\{ME}") == "clean"
     assert not dg.is_current_user("DOMAIN\\", "")
     others = listing(target, "BUILTIN\\Users:(OI)(CI)(RX)", f"DOMAIN\\other:{GATE}", f"DOMAIN\\{ME}:{GATE}")

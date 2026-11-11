@@ -135,6 +135,7 @@ def test_717_scope_decodes_only_recorded_physical_identity(identifier, connectio
         ("[nyctaxi].[trips", {}),  # unclosed bracket
         ("[nyctaxi].trips", {}),  # mixed quoting
         ("[ nyctaxi].[trips]", {}),  # padded component
+        ("[nyctaxi].[a\nb]", {}),  # C0 control
         ("[nyctaxi].[a\x80b]", {}),  # C1 control
         ('[nyctaxi].[a"b]', {}),  # M string delimiter
         ("[nyctaxi].[a#(b)]", {}),  # M escape
