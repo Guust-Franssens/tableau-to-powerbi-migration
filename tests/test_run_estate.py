@@ -242,6 +242,29 @@ def test_realistic_long_estate_is_refused_by_conservative_pbir_envelope() -> Non
     assert projection["status"] == "over_ceiling"
 
 
+def test_a_datasource_unit_is_projected_as_its_visual_free_shell_and_other_units_are_not() -> None:
+    """A datasource emits no visuals, so before conversion only its shell report bounds it (issue #836).
+
+    That is a lower bound which cannot over-refuse; the emitted-tree gate measures anything longer.
+    """
+    unit = "u" * 64
+    shell = Path("pbip") / unit / f"{unit}.Report" / "definition" / "pages" / "page1"
+    root = _root_for_length(DIR_CEILING - 1 - utf16_len(str(shell)))
+    datasource = frozenset({unit})
+
+    projection = run_estate.project_estate_path_ceiling(root, [unit], datasource)
+    assert projection["status"] == "ok"
+    assert {(path["kind"], path["length"]) for path in projection["paths"]} == {
+        ("directory", DIR_CEILING),
+        ("file", utf16_len(str(root)) + 1 + utf16_len(str(shell / "page.json"))),
+    }
+    deeper = run_estate.project_estate_path_ceiling(_root_for_length(utf16_len(str(root)) + 1), [unit], datasource)
+    assert {(path["kind"], path["unit"]) for path in deeper["offenders"]} == {("directory", unit)}
+    assert run_estate.project_estate_path_ceiling(root, [unit])["status"] == "over_ceiling"
+    mixed = run_estate.project_estate_path_ceiling(root, [unit, "w" * 64], datasource)
+    assert {path["unit"] for path in mixed["offenders"]} == {"w" * 64}
+
+
 def _refuse_before_engine(tmp_path: Path, monkeypatch, output: Path) -> tuple[int, list[Path], str]:
     """Run `main` to the preflight refusal and return (exit code, engine calls, printed detail)."""
     engine = _versioned_engine(tmp_path / "engine", "2.126.0")
@@ -338,6 +361,36 @@ def test_estate_path_preflight_accepts_short_root_and_refuses_long_root(tmp_path
     ok, detail = run_estate.preflight_estate_path_ceiling(source, _boundary_root("A" * 20, FILE_CEILING + 1), engine)
     assert ok is False
     assert "--runs-parent" in detail, "the refusal must name the actual supported escape command (issue #479)"
+
+
+def test_estate_path_preflight_models_a_datasource_as_its_shell_and_discloses_the_lower_bound(tmp_path: Path) -> None:
+    name = "D" * 64
+    shell = Path("pbip") / name / f"{name}.Report" / "definition" / "pages" / "page1"
+    root = _root_for_length(DIR_CEILING - 1 - utf16_len(str(shell)))
+    engine = _versioned_engine(tmp_path / "engine", "test")
+    _write(tmp_path / "datasource" / f"{name}.tds", "<datasource />")
+    _write(tmp_path / "workbook" / f"{name}.twb", "<workbook />")
+
+    ok, detail = run_estate.preflight_estate_path_ceiling(tmp_path / "datasource", root, engine)
+    assert ok is True, detail
+    assert "lower bound" in detail
+    ok, detail = run_estate.preflight_estate_path_ceiling(tmp_path / "workbook", root, engine)
+    assert ok is False
+    assert "PATH CEILING: projected" in detail
+
+
+def test_estate_path_preflight_names_the_unit_that_breaches_not_the_longest_name(tmp_path: Path) -> None:
+    datasource, workbook = "D" * 64, "W" * 40
+    engine = _versioned_engine(tmp_path / "engine", "test")
+    _write(tmp_path / "src" / f"{datasource}.tds", "<datasource />")
+    _write(tmp_path / "src" / f"{workbook}.twb", "<workbook />")
+
+    ok, detail = run_estate.preflight_estate_path_ceiling(
+        tmp_path / "src", _boundary_root(workbook, FILE_CEILING + 1), engine
+    )
+    assert ok is False
+    assert repr(workbook) in detail
+    assert datasource not in detail
 
 
 def _work_dirs_allocate(unit: str, root_flag: str, root: Path) -> dict:
@@ -2832,6 +2885,27 @@ def test_staging_mirrors_selected_twin_and_datasource_without_renaming_it(tmp_pa
         ("workbook", "u0002"),
     ]
     assert staged_inputs == [staged]
+
+
+def test_ids_path_projects_a_long_datasource_as_its_shell_at_both_pre_engine_checks(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A datasource keeps its long name on the ids path, so only its shell may be projected (issue #836)."""
+    _prepare_id_run_gates(monkeypatch)
+    run = _ordinary_depth_run(tmp_path, "t836")
+    bundle = run / "bundle"
+    assets = run / "assets"
+    name = "D" * 50
+    assert run_estate.project_estate_path_ceiling(bundle, [name])["status"] == "over_ceiling"
+    assert run_estate.project_estate_path_ceiling(bundle, [name], frozenset({name}))["status"] == "ok"
+    _write(assets / "Sales.twb", "<workbook />")
+    _write(assets / f"{name}.tds", "<datasource />")
+    engine = _id_staging_engine(tmp_path / "engine")
+    calls: list[Path] = []
+    monkeypatch.setattr(run_estate, "run_engine", _id_bundle_engine(calls, consolidated=False))
+
+    assert run_estate.main(_landing_argv(engine, assets, bundle)) == run_estate.EXIT_OK
+    assert calls == [run / "engine-input"]
 
 
 def test_hard_link_refusal_leaves_no_reservation_and_retry_reconciles(tmp_path: Path, monkeypatch) -> None:

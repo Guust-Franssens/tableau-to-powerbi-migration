@@ -451,9 +451,12 @@ breaks git *today* (exit 128, or a silent partial commit) and Desktop refuses it
 real place where real tools run — this repo's own build root is 90 characters.
 
 For `run_estate.py`, the pre-engine projection is provisional: an eligible new run projects workbook
-units under IDs while datasource names retain their legacy paths. After hard-link staging, a
-definitive projection checks the exact staged names; after conversion, the unchanged emitted-path
-gate measures the whole bundle, including generated-edit declaration and temporary-write paths.
+units under IDs while datasource names retain their legacy paths. A datasource unit emits no
+visuals, so it is projected as its visual-free shell report: a lower bound that cannot over-refuse.
+After hard-link staging, a definitive projection checks the exact staged names; after conversion,
+the unchanged emitted-path gate measures the whole bundle, including generated-edit declaration and
+temporary-write paths, and is what refuses a datasource whose real paths are longer (a swap page or
+a long table name).
 Exit 12 is separate from the path gate: it means the host could not establish the hard-link staging
 or verify that the engine consumed the selected IDs and source bytes. A short physical root remains
 necessary for any datasource or residual source-derived path that still exceeds the ceilings.

@@ -20,6 +20,12 @@ still over 259 / 247). The tree fitted only because that datasource carried no f
 which is **data**-dependent, not **kind**-dependent. Do not let "carry the unit kind" be sold as the
 fix for the over-refusal.
 
+Production (issue #836) now projects a datasource unit as its visual-free shell BEFORE conversion, as a
+deliberate lower bound that cannot over-refuse. That is safe only because `check_emitted_path_ceiling`
+measures the tree the engine really wrote: a swap-shaped datasource is not made to fit, its refusal just
+moves from the projection to that measured gate. The permanent invariant below is why the shell is a
+bound and not a verdict, and it must keep holding.
+
 Assertion families, with deliberately different lifetimes (the shape
 `tests/test_issue_424_chart_type_pin.py` established):
 
@@ -585,8 +591,8 @@ def test_a_visual_free_datasource_envelope_would_be_fail_open(engine_bundle) -> 
 def test_the_projector_is_blind_to_unit_kind_and_over_projects_this_datasource(engine_bundle) -> None:
     """The classification defect, stated against the production function and real emitted paths.
 
-    `project_estate_path_ceiling` takes only NAMES, so it cannot tell a datasource from a workbook
-    and assigns both the workbook worst case.
+    Called with NAMES only (no `datasource_units`, issue #836), `project_estate_path_ceiling` cannot
+    tell a datasource from a workbook and assigns both the workbook worst case.
 
     ⚠️ The gap is real but it is NOT the whole of run 409's over-refusal: with the *sound*
     datasource envelope this fixture measures (`pageSelfService` + a 24-unit visual) that unit still
