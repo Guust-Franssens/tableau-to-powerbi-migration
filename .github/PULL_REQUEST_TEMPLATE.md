@@ -25,6 +25,7 @@ or customer-facing consequence qualify. A one-line behavioral change is not mech
 ## Required for either path
 
 - Validation: <!-- Each command and exit code; name any skipped checks and why. -->
+- Net test lines: <!-- Decreased/unchanged, or increased because: ... (see CONTRIBUTING.md#tests). -->
 - [ ] Diff, issue/PR text and attachments contain no secrets or customer data, including identifying screenshots or personal machine paths.
 - Blind diff review: <!-- Reviewer, link and verdict; issue/requirement + diff only, without the author's rationale. -->
 - Exact reviewed head SHA:

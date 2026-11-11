@@ -283,6 +283,12 @@ dot-directories by default, so a skill's bundled tests would otherwise be collec
 If you change `scripts/parse_tableau.py` or `docs/migration-spec.schema.json`, add or update a test in
 `tests/`. The parser must always emit a `migration-spec.json` that validates against the schema.
 
+**Net test growth needs a reason.** If `git diff --numstat origin/master` over test files (`tests/`
+and skill tests under `.github/skills/`) adds more lines than it removes, say why in the PR body
+(for example: new behaviour, or a regression test for a fixed bug). Write one focused test per new
+behaviour or fixed bug, extend an existing test rather than adding a near-duplicate, and never pad
+tests for coverage. This is a stated reason, not a cap.
+
 ## Anatomy of a migration
 
 Each workbook migration lives under `migrations/workbooks/<slug>/` (data-source migrations under `migrations/datasources/<slug>/`; our worked examples under `examples/<slug>/` — all three share this shape):
