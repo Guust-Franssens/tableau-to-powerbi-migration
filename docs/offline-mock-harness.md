@@ -13,7 +13,7 @@ python -m pytest tests/test_mock_fabric.py tests/test_mock_tableau.py tests/test
 | [`tests/mocks/fabric.py`](../tests/mocks/fabric.py) | in-process Fabric REST fake, substituted at `deploy_estate._request` |
 | [`tests/mocks/tableau.py`](../tests/mocks/tableau.py) | Tableau REST + GraphQL Metadata fake, served over a loopback socket |
 | [`tests/mocks/estate.py`](../tests/mocks/estate.py) | a synthetic estate built from this repo's real fixture workbooks, plus a stand-in for the deterministic engine |
-| [`tests/test_mock_fabric.py`](../tests/test_mock_fabric.py) | 51 fidelity self-tests for the Fabric fake |
+| [`tests/test_mock_fabric.py`](../tests/test_mock_fabric.py) | 31 fidelity self-tests for the Fabric fake |
 | [`tests/test_mock_tableau.py`](../tests/test_mock_tableau.py) | fidelity self-tests for the Tableau fake, including its narrow REST authority subset |
 | [`tests/test_e2e_offline.py`](../tests/test_e2e_offline.py) | 18 joined end-to-end tests (marked `slow`) |
 
@@ -44,7 +44,7 @@ confidence. So:
   `harvest_estate_assets.py` and the engine's `estate_survey.py` run in **subprocesses** that no
   monkeypatch can reach. `TableauSite.call(path)` exposes the same router with no socket at all, for
   the engine's injected-caller seam.
-* `test_the_mock_never_points_at_a_real_host` asserts the generated environment contains a loopback
+* `test_env_for_exports_both_names_and_only_loopback_hosts` asserts the generated environment contains a loopback
   URL and no `online.tableau.com`.
 * `run_estate.py`'s provenance worker uses its real HTTP client. The E2E keeps `tableau.serve(site)`
   **open through `run_estate.main`**, and a scoped `tableau.env_for(site, base)` process-environment
@@ -66,17 +66,17 @@ confidence. So:
 |---|---|---|---|
 | 1 | `POST /items` returns `201 {"id": ...}`, or `202` + `Location`/`x-ms-operation-id` for an LRO | measured against a real tenant | `test_a_long_running_create_must_be_polled_to_completion` |
 | 2 | **A repeated `Report`/`SemanticModel` displayName is ACCEPTED** - Fabric creates a duplicate | measured; this is why duplicates went undetected on a real estate | `test_a_duplicate_display_name_is_accepted_because_fabric_accepts_it` |
-| 3 | `GET /items` → `{"value": [...]}` with `id`, `displayName`, `type`, `description` | measured | `test_a_listing_row_carries_id_display_name_type_and_description` |
-| 4 | **`folderId` is OMITTED ENTIRELY at the workspace root** - not present-and-null | measured | `test_folder_id_is_omitted_at_the_root_not_returned_as_null` |
-| 5 | Paging via `continuationToken` + `continuationUri`; 68 items came back in **one** page with no token | measured | `test_paging_emits_a_continuation_token_and_uri`, `test_list_all_in_the_deployer_follows_the_continuation_token` |
+| 3 | `GET /items` → `{"value": [...]}` with `id`, `displayName`, `type`, `description` | measured | `test_a_listing_row_has_the_measured_shape_and_omits_folder_id_at_the_root` |
+| 4 | **`folderId` is OMITTED ENTIRELY at the workspace root** - not present-and-null | measured | `test_a_listing_row_has_the_measured_shape_and_omits_folder_id_at_the_root` |
+| 5 | Paging via `continuationToken` + `continuationUri`; 68 items came back in **one** page with no token | measured | `test_paging_emits_a_continuation_token_and_the_deployer_follows_it` |
 | 6 | `updateDefinition` replaces the definition and does **not** touch `description` or `folderId` | measured | `test_update_definition_leaves_description_and_folder_untouched` |
 | 7 | `PATCH {"description": ...}` updates the description | measured | `test_patch_updates_the_description_and_move_replaces_the_item` |
-| 8 | `POST /move {"targetFolderId": ...}`; an **empty body means the workspace root** | measured | `test_move_with_an_empty_body_means_the_workspace_root` |
-| 9 | Folder names are **REJECTED, not coerced**, with `InvalidFolderDisplayName`: `& / \ : ? * " \| < # %` and **`.` anywhere** (not just trailing), plus a leading/trailing space | measured | `test_a_folder_name_with_a_rejected_character_is_refused_not_coerced`, `test_a_folder_name_with_surrounding_space_is_refused` |
+| 8 | `POST /move {"targetFolderId": ...}`; an **empty body means the workspace root** | measured | `test_patch_updates_the_description_and_move_replaces_the_item` |
+| 9 | Folder names are **REJECTED, not coerced**, with `InvalidFolderDisplayName`: `& / \ : ? * " \| < # %` and **`.` anywhere** (not just trailing), plus a leading/trailing space | measured | `test_a_folder_name_with_a_rejected_character_is_refused_not_coerced` |
 | 10 | Folder names **accept** `- _ + ( )`, interior spaces and non-ASCII (`Ventes françaises` was accepted) | measured | `test_the_accepted_folder_characters_really_are_accepted` |
 | 11 | Nesting deeper than **10** levels → `FolderDepthOutOfRange` | measured | `test_folder_nesting_deeper_than_ten_is_refused` |
 | 12 | `GET /folders` rows carry `id`, `displayName`, `parentFolderId` | measured | `test_a_folder_listing_row_carries_id_display_name_and_parent` |
-| 13 | A workspace holds at most **1000** items | measured | `test_the_thousand_item_workspace_limit_is_enforced`, `test_the_default_workspace_limit_is_the_measured_one_thousand` |
+| 13 | A workspace holds at most **1000** items | measured | `test_the_thousand_item_workspace_limit_is_enforced` |
 | 14 | `401` with `{"errorCode": "TokenExpired"}`, distinct from a plain invalid token | measured (a 66-item deploy outlived its token) | `test_token_expiry_answers_a_named_error_code_and_the_deployer_renews_once`, `test_an_invalid_token_is_not_reported_as_expired` |
 | 15 | `429` + `Retry-After` in **both** the seconds form and the RFC 9110 HTTP-date form | measured; the date form raised `ValueError` in `float()` and killed a deploy mid-estate | `test_retry_after_is_served_in_both_measured_forms`, `test_a_throttled_create_is_retried_after_the_http_date_delay` |
 | 16 | `ItemDisplayNameNotAvailableYet` / `ItemDisplayNameAlreadyInUse` are emitted as named codes | measured | `create_item` in `deploy_estate.py` branches on them; the mock emits them from `_create_item` |
@@ -95,11 +95,11 @@ client-side network failure that surfaces as `HTTP 0` (`drop_network`), which th
 
 | Behaviour | Evidence | Pinned by |
 |---|---|---|
-| A lost session answers `401` whose body contains the literal `401002` | `assess_estate.Site.get` re-authenticates **only** on that substring - read the source | `test_a_lost_session_answers_the_literal_code_the_client_looks_for`, `test_the_real_assess_client_recovers_from_a_dropped_session` |
-| Pagination numbers are **strings** (`"pageNumber"`, `"pageSize"`, `"totalAvailable"`) | Tableau REST API | `test_pagination_numbers_are_strings_because_tableau_emits_strings` |
-| The download header is the non-standard `Content-Disposition: name="X.twbx"` with **no** `filename=` | the engine's `fetch_tds.derive_filename` carries a fallback for exactly this | `test_the_download_header_uses_tableaus_non_standard_name_form` |
+| A lost session answers `401` whose body contains the literal `401002` | `assess_estate.Site.get` re-authenticates **only** on that substring - read the source | `test_the_real_assess_client_recovers_from_a_dropped_session` |
+| Pagination numbers are **strings** (`"pageNumber"`, `"pageSize"`, `"totalAvailable"`) | Tableau REST API | `test_datasource_filter_selects_exact_content_url` |
+| The download header is the non-standard `Content-Disposition: name="X.twbx"` with **no** `filename=` | the engine's `fetch_tds.derive_filename` carries a fallback for exactly this | `test_content_download_returns_real_bytes_with_tableaus_header_and_404s_unknown_luids` |
 | The `usage` block is absent unless `includeUsageStatistics=true` | Tableau REST API; it is the input to the tiering decision | `test_usage_statistics_are_absent_unless_requested` |
-| Content download returns real `.twbx`/`.tdsx` **bytes** | the fixtures are this repo's own `tests/fixtures/*.twb` | `test_content_download_returns_a_real_packaged_workbook`, `test_a_downloaded_workbook_parses_with_the_real_parser` |
+| Content download returns real `.twbx`/`.tdsx` **bytes** | the fixtures are this repo's own `tests/fixtures/*.twb` | `test_content_download_returns_real_bytes_with_tableaus_header_and_404s_unknown_luids`, `test_a_downloaded_workbook_parses_with_the_real_parser` |
 | **`estate_survey.py` blocks forever on a hidden `getpass` prompt when `TABLEAU_PAT_VALUE` is unset** | measured; it burned 13 minutes of a real session. Confirmed in `credential_resolver.resolve_secret`: the prompt fires when `allow_prompt` **and** `sys.stdin.isatty()` | `test_running_an_engine_script_without_the_pat_variable_fails_loudly` |
 
 The GraphQL structure answer is derived from the **served workbook bytes** with `xml.etree`, on
@@ -323,12 +323,12 @@ real deployer or the mock in a subprocess and re-ran the suite. **All 22 were ca
 | `mock-ignores-the-folder-depth-limit` | `test_folder_nesting_deeper_than_ten_is_refused` |
 | `mock-never-throttles` | `test_retry_after_is_served_in_both_measured_forms[3]` |
 | `mock-updatedefinition-also-moves-and-restamps` | `test_update_definition_leaves_description_and_folder_untouched` |
-| `mock-forgets-the-item-limit` | `test_the_default_workspace_limit_is_the_measured_one_thousand` |
-| `tableau-mock-accepts-any-pat-secret` | `test_sign_in_requires_both_halves_of_the_pat` |
+| `mock-forgets-the-item-limit` | `test_the_thousand_item_workspace_limit_is_enforced` |
+| `tableau-mock-accepts-any-pat-secret` | `test_sign_in_requires_both_halves_of_the_pat_and_the_exact_site` |
 | `tableau-mock-returns-empty-graphql-instead-of-errors` | `test_an_unsupported_graphql_query_is_an_error_not_an_empty_result` |
 | `tableau-mock-always-sends-usage-statistics` | `test_usage_statistics_are_absent_unless_requested` |
-| `tableau-mock-uses-the-standard-content-disposition` | `test_the_download_header_uses_tableaus_non_standard_name_form` |
-| `tableau-mock-emits-integer-pagination` | `test_pagination_numbers_are_strings_because_tableau_emits_strings` |
+| `tableau-mock-uses-the-standard-content-disposition` | `test_content_download_returns_real_bytes_with_tableaus_header_and_404s_unknown_luids` |
+| `tableau-mock-emits-integer-pagination` | `test_datasource_filter_selects_exact_content_url` |
 | `engine-stand-in-emits-no-pages` | `test_the_whole_chain_lands_the_expected_workspace` |
 
 Two mutations **survived the first pass**, and closing them is the most useful thing the exercise
@@ -340,9 +340,9 @@ produced:
    never reached. Fixed by adding `test_a_listing_that_fails_AFTER_preflight_still_refuses_to_guess`,
    which fails **precisely the second** listing.
 2. **`mock-forgets-the-item-limit` survived.** The limit test passed `item_limit=3` explicitly, so
-   nothing asserted the **default** was the measured 1000. Fixed by
-   `test_the_default_workspace_limit_is_the_measured_one_thousand`, which also asserts the mock and
-   the deployer agree on the number.
+   nothing asserted the **default** was the measured 1000. Fixed by an
+   assertion in `test_the_thousand_item_workspace_limit_is_enforced` that pins the default and that
+   the mock and the deployer agree on the number.
 
 A third finding was in the harness itself and is worth recording: the first mutation run reported
 **22/22 caught**, and every one of those was a **false positive** - the injected plugin was not on
