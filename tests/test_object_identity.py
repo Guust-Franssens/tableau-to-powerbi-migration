@@ -23,34 +23,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import object_identity as oid  # noqa: E402  # pylint: disable=wrong-import-position
 
 
-# --------------------------------------------------------------------------------------------
-# Round 4: every "cannot" must RAISE. Absence is not prohibition.
-#
-# The previous version of this file asserted that operations were MISSING - no `__bool__`, no
-# `__getitem__` - and review measured every one of them still working, because Python's defaults run
-# the other way: a frozen dataclass has a public constructor, an object with no `__bool__` is TRUTHY,
-# and a public tuple is indexable. So each test below CALLS the forbidden operation and asserts it
-# raises. A test that a method is absent proves nothing; that is a vacuity mode in its own right.
-# --------------------------------------------------------------------------------------------
+# Round 4: every "cannot" must RAISE. Absence is not prohibition: a frozen dataclass has a public
+# constructor, an object with no `__bool__` is TRUTHY and a public tuple is indexable, so each test
+# CALLS the forbidden operation and asserts it raises.
 
 
-def test_the_public_constructor_refuses_an_unidentifiable_kind() -> None:
+def test_both_doors_refuse_an_unidentifiable_kind_or_a_blank_name() -> None:
     """Measured: `ObjectIdentity(KIND_UNKNOWN, "Ops")` built fine while `from_engine` refused it."""
-    with pytest.raises(oid.IdentityError):
-        oid.ObjectIdentity(oid.KIND_UNKNOWN, "Ops")
-    with pytest.raises(oid.IdentityError):
-        oid.ObjectIdentity("something-else", "Ops")
-
-
-def test_the_public_constructor_refuses_a_blank_name() -> None:
-    """A blank or missing name is not an identity either."""
-    for blank in ("", "   ", None):
+    for kind, name in ((oid.KIND_UNKNOWN, "Ops"), ("something-else", "Ops"), ("worksheet", ""), ("worksheet", "   ")):
         with pytest.raises(oid.IdentityError):
-            oid.ObjectIdentity("worksheet", blank)
-
-
-def test_from_engine_returns_none_where_the_constructor_raises() -> None:
-    """The two doors must agree - that they did not is exactly what round 4 found."""
+            oid.ObjectIdentity(kind, name)
+    with pytest.raises(oid.IdentityError):
+        oid.ObjectIdentity("worksheet", None)
     assert oid.ObjectIdentity.from_engine("worksheet", "Ops") == oid.ObjectIdentity("worksheet", "Ops")
     assert oid.ObjectIdentity.from_engine(oid.KIND_UNKNOWN, "Ops") is None
     assert oid.ObjectIdentity.from_engine("worksheet", "  ") is None
@@ -65,67 +49,58 @@ def ambiguous_resolution() -> oid.Resolution[str]:
     return index.resolve(oid.ObjectIdentity("worksheet", "Ops"))
 
 
-def test_truth_testing_a_resolution_raises() -> None:
-    """Measured: `bool(resolution)` returned True on an AMBIGUOUS two-match resolution.
+def test_a_resolution_is_never_a_condition_and_only_a_unique_one_is_readable() -> None:
+    """Measured: `bool(resolution)` returned True on an AMBIGUOUS two-match resolution. It raises
+    always, so a caller must branch on `.outcome`; `.value()` refuses zero and many alike."""
+    ambiguous = ambiguous_resolution()
+    unique_index: oid.CandidateIndex[str] = oid.CandidateIndex()
+    unique_index.add(oid.Candidate(names=("Ops",), kind="worksheet"), "a")
+    unique = unique_index.resolve(oid.ObjectIdentity("worksheet", "Ops"))
+    absent = oid.CandidateIndex().resolve(oid.ObjectIdentity("worksheet", "Ops"))
 
-    Omitting `__bool__` does not prevent truth-testing - it makes the object truthy, so
-    `if resolution:` silently read ambiguity as success. It raises now, always.
-    """
-    resolution = ambiguous_resolution()
-    assert resolution.outcome == oid.AMBIGUOUS
-    with pytest.raises(oid.AmbiguousIdentity):
-        bool(resolution)
-    with pytest.raises(oid.AmbiguousIdentity):
-        if resolution:  # pragma: no cover - the condition itself is what must raise
-            pass
-
-
-def test_a_unique_resolution_also_refuses_truth_testing() -> None:
-    """Always raising is the point: a caller must branch on `.outcome`, never on the object."""
-    index: oid.CandidateIndex[str] = oid.CandidateIndex()
-    index.add(oid.Candidate(names=("Ops",), kind="worksheet"), "a")
-    resolution = index.resolve(oid.ObjectIdentity("worksheet", "Ops"))
-    assert resolution.outcome == oid.UNIQUE
-    with pytest.raises(oid.AmbiguousIdentity):
-        bool(resolution)
+    assert (ambiguous.outcome, unique.outcome, absent.outcome) == (oid.AMBIGUOUS, oid.UNIQUE, oid.ABSENT)
+    for resolution in (ambiguous, unique):
+        with pytest.raises(oid.AmbiguousIdentity):
+            bool(resolution)
+    for resolution in (ambiguous, absent):
+        with pytest.raises(oid.AmbiguousIdentity):
+            resolution.value()
+    assert unique.value() == "a"
 
 
-def test_reading_an_ambiguous_resolution_raises_rather_than_picking() -> None:
-    """alue() is the only reader, and it refuses anything but a single match."""
-    resolution = ambiguous_resolution()
-    with pytest.raises(oid.AmbiguousIdentity):
-        resolution.value()
-
-
-def test_an_absent_resolution_also_raises_rather_than_returning_none() -> None:
-    """Zero and many are both non-unique, and neither may be read as a value."""
-    index: oid.CandidateIndex[str] = oid.CandidateIndex()
-    resolution = index.resolve(oid.ObjectIdentity("worksheet", "Ops"))
-    assert resolution.outcome == oid.ABSENT
-    with pytest.raises(oid.AmbiguousIdentity):
-        resolution.value()
-
-
-def test_the_matches_are_not_reachable_as_a_public_collection() -> None:
-    """Measured: `resolution.matches[0]` selected a winner from the raw tuple.
-
-    Only descriptions are public now, so there is nothing selectable to index.
-    """
+def test_an_ambiguous_resolution_hands_out_no_selectable_winner_by_any_route() -> None:
+    """Measured: `resolution.matches[0]` selected a winner; after the rename to `_matches`,
+    `astuple(resolution)` still returned both values (round 5). An ambiguous resolution retains no
+    values, while the unique twin must still carry its answer."""
     resolution = ambiguous_resolution()
     assert not hasattr(resolution, "matches")
     assert resolution.count == 2
     assert resolution.contender_names() == ("Ops",)
-    assert all(isinstance(name, str) for name in resolution.contender_names())
+    assert astuple(resolution) == (("worksheet", "Ops"), 2, ("Ops",), None)
+    state = vars(resolution)
+    assert state["_unique"] is None
+    assert set(state) == {"identity", "count", "contenders", "_unique"}
+    with pytest.raises(TypeError):
+        list(resolution)
 
-
-def test_a_candidate_index_refuses_an_object_identity_by_type() -> None:
-    """Measured: a normalized index accepted an engine identity and then uniquely resolved a
-    DIFFERENT engine name through the lossy key. It is a type error now, not a convention."""
     index: oid.CandidateIndex[str] = oid.CandidateIndex()
-    with pytest.raises(oid.IdentityError):
-        index.add(oid.ObjectIdentity("worksheet", "Ops  Summary"), "x")
-    with pytest.raises(oid.IdentityError):
-        index.add("Ops", "x")
+    index.add(oid.Candidate(names=("Ops",), kind="worksheet"), "a")
+    assert astuple(index.resolve(oid.ObjectIdentity("worksheet", "Ops")))[-1] == "a"
+
+
+def test_the_two_indexes_refuse_each_others_key_type() -> None:
+    """Measured: a normalized index accepted an engine identity and then uniquely resolved a
+    DIFFERENT engine name through the lossy key. The type split runs both ways."""
+    candidates: oid.CandidateIndex[str] = oid.CandidateIndex()
+    engine: oid.EngineIndex[str] = oid.EngineIndex()
+    for bad in (
+        lambda: candidates.add(oid.ObjectIdentity("worksheet", "Ops  Summary"), "x"),
+        lambda: candidates.add("Ops", "x"),
+        lambda: engine.add(oid.Candidate(names=("Ops",), kind="worksheet"), "a"),
+        lambda: engine.resolve(oid.Candidate(names=("Ops",), kind="worksheet")),
+    ):
+        with pytest.raises(oid.IdentityError):
+            bad()
 
 
 def test_an_engine_index_has_no_normalized_layer_to_fall_back_to() -> None:
@@ -137,41 +112,37 @@ def test_an_engine_index_has_no_normalized_layer_to_fall_back_to() -> None:
     assert index.resolve(oid.ObjectIdentity("worksheet", "Ops  Summary")).outcome == oid.UNIQUE
 
 
-def test_an_engine_index_refuses_a_candidate_by_type() -> None:
-    """The type split runs both ways: an exact index will not take an external candidate."""
-    index: oid.EngineIndex[str] = oid.EngineIndex()
-    with pytest.raises(oid.IdentityError):
-        index.add(oid.Candidate(names=("Ops",), kind="worksheet"), "a")
-    with pytest.raises(oid.IdentityError):
-        index.resolve(oid.Candidate(names=("Ops",), kind="worksheet"))
-
-
-def test_a_candidate_index_resolves_a_spelling_difference_but_refuses_a_collision() -> None:
-    """The external-producer fallback: useful for one candidate, a refusal for two."""
+def _resolve(entries: list[tuple[tuple[str, ...], str | None, str]], name: str, kind: str = "worksheet"):
     index: oid.CandidateIndex[str] = oid.CandidateIndex()
-    index.add(oid.Candidate(names=("ops summary",), kind="worksheet"), "a")
-    assert index.resolve(oid.ObjectIdentity("worksheet", "Ops Summary")).outcome == oid.UNIQUE
-
-    index.add(oid.Candidate(names=("OPS  SUMMARY",), kind="worksheet"), "b")
-    assert index.resolve(oid.ObjectIdentity("worksheet", "Ops Summary")).outcome == oid.AMBIGUOUS
+    for names, cand_kind, value in entries:
+        index.add(oid.Candidate(names=names, kind=cand_kind) if cand_kind else oid.Candidate(names=names), value)
+    return index.resolve(oid.ObjectIdentity(kind, name))
 
 
-def test_an_exact_candidate_match_is_not_double_counted() -> None:
-    """A name is indexed exactly AND normalized, so one record must not read as two."""
-    index: oid.CandidateIndex[str] = oid.CandidateIndex()
-    index.add(oid.Candidate(names=("Ops Summary",), kind="worksheet"), "a")
-    resolution = index.resolve(oid.ObjectIdentity("worksheet", "Ops Summary"))
-    assert resolution.outcome == oid.UNIQUE
-    assert resolution.value() == "a"
+def test_a_candidate_index_resolves_one_spelling_and_refuses_a_guess() -> None:
+    """The external-producer fallback, with round 6's false FAIL and its discriminating control.
 
-
-def test_a_candidate_with_no_declared_kind_resolves_against_nothing() -> None:
-    """ "I cannot tell what this depicts" must not satisfy a page of either type."""
-    index: oid.CandidateIndex[str] = oid.CandidateIndex()
-    index.add(oid.Candidate(names=("Ops",)), "a")
-
-    assert index.resolve(oid.ObjectIdentity("worksheet", "Ops")).outcome == oid.ABSENT
-    assert index.resolve(oid.ObjectIdentity("dashboard", "Ops")).outcome == oid.ABSENT
+    One record is one record however many alike spellings it offers or its exact and normalized
+    keys coincide (`ops`, `main`: most real names), and an exact match is authoritative. But two
+    candidates that only normalize to the identity are a guess, and a kindless candidate depicts
+    nothing a page of either type may claim.
+    """
+    one = _resolve([(("ops summary",), "worksheet", "a")], "Ops Summary")
+    assert one.outcome == oid.UNIQUE
+    two = _resolve([(("ops summary",), "worksheet", "a"), (("OPS  SUMMARY",), "worksheet", "b")], "Ops Summary")
+    assert two.outcome == oid.AMBIGUOUS
+    exact = _resolve([(("Ops Summary",), "worksheet", "a")], "Ops Summary")
+    assert (exact.outcome, exact.value()) == (oid.UNIQUE, "a")
+    lower = _resolve([(("ops",), "worksheet", "a")], "ops")
+    assert (lower.outcome, lower.count, lower.value()) == (oid.UNIQUE, 1, "a")
+    for name in ("ops", "Ops"):
+        assert _resolve([(("Ops", "ops"), "worksheet", "a")], name).outcome == oid.UNIQUE
+    beats = _resolve([(("ops",), "worksheet", "exact"), (("OPS",), "worksheet", "lookalike")], "ops")
+    assert beats.outcome == oid.UNIQUE and beats.value() == "exact"
+    guess = _resolve([(("Ops Summary",), "worksheet", "a"), (("ops  summary",), "worksheet", "b")], "OPS SUMMARY")
+    assert (guess.outcome, guess.count) == (oid.AMBIGUOUS, 2)
+    for kind in ("worksheet", "dashboard"):
+        assert _resolve([(("Ops",), None, "a")], "Ops", kind).outcome == oid.ABSENT
 
 
 def test_name_lookalikes_cannot_be_used_to_select_evidence() -> None:
@@ -181,7 +152,6 @@ def test_name_lookalikes_cannot_be_used_to_select_evidence() -> None:
     found = oid.name_lookalikes(key, [oid.Candidate(names=("ops",), kind="worksheet")])
 
     assert found == [oid.Lookalike(name="ops", kind="worksheet")]
-    assert not hasattr(found[0], "value")
     assert set(vars(found[0])) == {"name", "kind"}
 
 
@@ -199,109 +169,10 @@ def test_collisions_and_duplicates_preserve_multiplicity() -> None:
     assert oid.duplicates(["WB", "Other"]) == []
 
 
-def test_astuple_hands_out_no_selectable_winner() -> None:
-    """Round 5: a dataclass has a SERIALISATION surface independent of its API.
-
-    Renaming the field to `_matches` hid nothing - `astuple(resolution)` returned both values with
-    `'a'` at an indexable position, invoking no raising mechanism at all. An ambiguous resolution
-    retains no values now, so there is nothing for `astuple` to reach.
-    """
-    resolution = ambiguous_resolution()
-    flattened = astuple(resolution)
-    assert resolution.outcome == oid.AMBIGUOUS
-    assert "a" not in flattened
-    assert "b" not in flattened
-    assert flattened == (("worksheet", "Ops"), 2, ("Ops",), None)
-
-
-def test_vars_hands_out_no_selectable_winner() -> None:
-    """The same probe through `__dict__`, which is the other free serialisation path."""
-    resolution = ambiguous_resolution()
-    state = vars(resolution)
-    assert state["_unique"] is None
-    assert not any(value in ("a", "b") for value in state.values())
-    assert set(state) == {"identity", "count", "contenders", "_unique"}
-
-
-def test_a_unique_resolution_still_carries_its_answer() -> None:
-    """The discriminating twin: retaining nothing when ambiguous must not empty the unique case."""
-    index: oid.CandidateIndex[str] = oid.CandidateIndex()
-    index.add(oid.Candidate(names=("Ops",), kind="worksheet"), "a")
-    resolution = index.resolve(oid.ObjectIdentity("worksheet", "Ops"))
-
-    assert resolution.outcome == oid.UNIQUE
-    assert resolution.value() == "a"
-    assert astuple(resolution)[-1] == "a"
-
-
-def test_the_probed_operations_that_are_safe_stay_safe() -> None:
-    """Four operations round 5 probed and CLEARED, pinned so a later change cannot quietly undo them.
-
-    Recording what held is as useful as recording what broke: it is why round 5 was two narrow holes
-    rather than a re-litigation of the design.
-    """
+def test_kind_is_part_of_identity_and_replace_revalidates() -> None:
+    """Round 5 probed and CLEARED these; pinned so a later change cannot quietly undo them."""
     key = oid.ObjectIdentity("worksheet", "Ops")
-    # equality and hash include the kind, so a dashboard and a worksheet never collide
     assert key != oid.ObjectIdentity("dashboard", "Ops")
     assert hash(key) != hash(oid.ObjectIdentity("dashboard", "Ops"))
-    # replace() re-runs validation rather than bypassing __post_init__
     with pytest.raises(oid.IdentityError):
         replace(key, kind=oid.KIND_UNKNOWN)
-    # iterating a resolution raises rather than yielding a winner
-    with pytest.raises(TypeError):
-        list(ambiguous_resolution())
-
-
-def test_an_already_lowercase_name_does_not_self_collide() -> None:
-    """Round 6, a false FAIL: one shared key table made a normalized-looking name collide with itself.
-
-    `ops` has an exact spelling identical to its normalized one, so a single record landed twice
-    under one key and the exact lookup - which runs before any de-duplication - returned AMBIGUOUS.
-    It fires on any already-lowercase name (`ops`, `main`, `detail`, `summary`), which on a real
-    estate is most of them, so the gate would have rejected evidence it had just verified.
-    """
-    index: oid.CandidateIndex[str] = oid.CandidateIndex()
-    index.add(oid.Candidate(names=("ops",), kind="worksheet"), "a")
-
-    resolution = index.resolve(oid.ObjectIdentity("worksheet", "ops"))
-    assert resolution.outcome == oid.UNIQUE
-    assert resolution.count == 1
-    assert resolution.value() == "a"
-
-
-def test_one_record_offering_several_alike_spellings_is_still_one_record() -> None:
-    """A `manual` record offers both `tableau-ops` and `ops`; alike spellings must not self-collide."""
-    index: oid.CandidateIndex[str] = oid.CandidateIndex()
-    index.add(oid.Candidate(names=("Ops", "ops"), kind="worksheet"), "a")
-
-    assert index.resolve(oid.ObjectIdentity("worksheet", "ops")).outcome == oid.UNIQUE
-    assert index.resolve(oid.ObjectIdentity("worksheet", "Ops")).outcome == oid.UNIQUE
-
-
-def test_an_exact_match_beats_a_normalized_one() -> None:
-    """The exact table is authoritative and consulted alone, so a lookalike cannot dilute it."""
-    index: oid.CandidateIndex[str] = oid.CandidateIndex()
-    index.add(oid.Candidate(names=("ops",), kind="worksheet"), "exact")
-    index.add(oid.Candidate(names=("OPS",), kind="worksheet"), "lookalike")
-
-    resolution = index.resolve(oid.ObjectIdentity("worksheet", "ops"))
-    assert resolution.outcome == oid.UNIQUE
-    assert resolution.value() == "exact"
-
-
-def test_two_external_spellings_with_no_exact_match_are_still_ambiguous() -> None:
-    """⚠️ The discriminating control for the round-6 fix.
-
-    Making the false FAIL go away must not be achieved by weakening the ambiguity detection this PR
-    spent four rounds building. Neither candidate matches exactly, both normalize to the identity, so
-    picking one would be a guess - and a guess is what this gate exists to refuse.
-    """
-    index: oid.CandidateIndex[str] = oid.CandidateIndex()
-    index.add(oid.Candidate(names=("Ops Summary",), kind="worksheet"), "a")
-    index.add(oid.Candidate(names=("ops  summary",), kind="worksheet"), "b")
-
-    resolution = index.resolve(oid.ObjectIdentity("worksheet", "OPS SUMMARY"))
-    assert resolution.outcome == oid.AMBIGUOUS
-    assert resolution.count == 2
-    with pytest.raises(oid.AmbiguousIdentity):
-        resolution.value()

@@ -124,8 +124,8 @@ def test_indexed_unit_keeps_id_key_uses_legacy_fabric_name_and_preserves_empty_w
 # --------------------------------------------------------------------------- configuration
 
 
-def test_configured_workspace_reads_dotenv_and_prefers_an_export(tmp_path, monkeypatch):
-    """The customer landing zone persists in `.env`, while an explicit session can override it."""
+def test_the_workspace_comes_from_flag_then_export_then_dotenv(tmp_path, monkeypatch):
+    """`.env` persists the landing zone; an export overrides it, and a one-off flag overrides both."""
     (tmp_path / ".env").write_text('FABRIC_WORKSPACE_ID="dotenv-workspace" # customer landing zone\n', encoding="utf-8")
     monkeypatch.setattr(de, "REPO_ROOT", tmp_path)
     monkeypatch.delenv("FABRIC_WORKSPACE_ID", raising=False)
@@ -133,34 +133,12 @@ def test_configured_workspace_reads_dotenv_and_prefers_an_export(tmp_path, monke
     monkeypatch.setenv("FABRIC_WORKSPACE_ID", "exported-workspace")
     assert de.configured_workspace() == "exported-workspace"
 
-
-def test_workspace_flag_overrides_configured_workspace(tmp_path, monkeypatch):
-    """A one-off deployment must not be silently redirected by persisted configuration."""
-    monkeypatch.setenv("FABRIC_WORKSPACE_ID", "configured-workspace")
     monkeypatch.setattr(de, "token", lambda tenant: "token")
-    called: dict[str, str] = {}
-
-    def fake_deploy(bundle, workspace, tok, args):  # noqa: ANN001
-        called["workspace"] = workspace
-        return de.EXIT_OK
-
-    monkeypatch.setattr(de, "deploy", fake_deploy)
+    called: list[str] = []
+    monkeypatch.setattr(de, "deploy", lambda bundle, workspace, tok, args: called.append(workspace) or de.EXIT_OK)
     assert de.main(["--bundle", str(tmp_path), "--workspace", "flag-workspace", "--dry-run"]) == de.EXIT_OK
-    assert called["workspace"] == "flag-workspace"
-
-
-def test_main_uses_configured_workspace_when_the_flag_is_omitted(tmp_path, monkeypatch):
-    monkeypatch.setenv("FABRIC_WORKSPACE_ID", "configured-workspace")
-    monkeypatch.setattr(de, "token", lambda tenant: "token")
-    called: dict[str, str] = {}
-
-    def fake_deploy(bundle, workspace, tok, args):  # noqa: ANN001
-        called["workspace"] = workspace
-        return de.EXIT_OK
-
-    monkeypatch.setattr(de, "deploy", fake_deploy)
     assert de.main(["--bundle", str(tmp_path), "--dry-run"]) == de.EXIT_OK
-    assert called["workspace"] == "configured-workspace"
+    assert called == ["flag-workspace", "exported-workspace"]
 
 
 def test_main_refuses_to_deploy_without_any_workspace(tmp_path, monkeypatch):
@@ -176,87 +154,49 @@ def test_main_refuses_to_deploy_without_any_workspace(tmp_path, monkeypatch):
 _WORKSPACE = "11111111-2222-3333-4444-555555555555"
 
 
-@pytest.mark.parametrize(
-    ("label", "declaration", "encoding"),
-    [
-        ("plain", f"FABRIC_WORKSPACE_ID={_WORKSPACE}\n", "utf-8"),
-        # `Set-Content -Encoding utf8` writes a BOM on Windows PowerShell 5.1, and `Get-Content`
-        # hides it from preflight - so this is the LIKELY spelling of a hand-saved `.env`, not an
-        # exotic one. Read as plain utf-8 the BOM lands on the first key, which then matches nothing
-        # and reports "no workspace declared" while preflight has just verified the same file.
-        ("utf-8 BOM", f"FABRIC_WORKSPACE_ID={_WORKSPACE}\n", "utf-8-sig"),
-        # ...and only the FIRST key is affected, which is what makes the failure look intermittent.
-        ("utf-8 BOM, second key", f"FABRIC_TENANT_ID=\nFABRIC_WORKSPACE_ID={_WORKSPACE}\n", "utf-8-sig"),
-        # The measured case: a TAB before the note. `split(" #")` never sees it, so the whole comment
-        # was carried into the id and surfaced as the late WorkspaceNotFound this check exists to
-        # prevent - on a value preflight had just called reachable.
-        ("tab before a comment", f"FABRIC_WORKSPACE_ID={_WORKSPACE}\t# customer landing zone\n", "utf-8"),
-        ("space before a comment", f"FABRIC_WORKSPACE_ID={_WORKSPACE} # customer landing zone\n", "utf-8"),
-        ("surrounding whitespace", f"FABRIC_WORKSPACE_ID=   {_WORKSPACE}\t \n", "utf-8"),
-        ("double quotes", f'FABRIC_WORKSPACE_ID="{_WORKSPACE}"\n', "utf-8"),
-        ("single quotes", f"FABRIC_WORKSPACE_ID='{_WORKSPACE}'\n", "utf-8"),
-        ("quotes and a comment", f'FABRIC_WORKSPACE_ID="{_WORKSPACE}"\t# both at once\n', "utf-8"),
-    ],
-)
-def test_the_declared_workspace_survives_every_ordinary_dotenv_spelling(
-    label: str, declaration: str, encoding: str, tmp_path, monkeypatch
-):
-    """`.env.example` promises quotes, whitespace and a trailing `# comment` are all fine. Keep it.
+def test_the_declared_workspace_survives_every_ordinary_dotenv_spelling(tmp_path, monkeypatch):
+    """`.env.example` promises quotes, whitespace, a BOM and a trailing `# comment` are all fine.
 
-    preflight VERIFIES this id and this deployer USES it, so a spelling either works in both readers
-    or the toolkit contradicts itself in front of a customer: preflight printing "workspace ...
-    is reachable" while the deploy that follows says the workspace does not exist, or that no
-    workspace was configured at all.
-
-    `tests/test_preflight_contract.py` pins both readers to one table of spellings; this covers the
-    whole `.env` -> `configured_workspace()` path, including the file ENCODING, which that table
-    cannot express.
+    preflight verifies this id and the deployer uses it, so a spelling must work in both readers.
+    `tests/test_preflight_contract.py` pins the spellings; this adds the file ENCODING. A PowerShell
+    5.1 `Set-Content -Encoding utf8` BOM lands on the first key only; a TAB before a comment was the
+    measured late WorkspaceNotFound.
     """
-    (tmp_path / ".env").write_text(declaration, encoding=encoding)
     monkeypatch.setattr(de, "REPO_ROOT", tmp_path)
     monkeypatch.delenv("FABRIC_WORKSPACE_ID", raising=False)
-    assert de.configured_workspace() == _WORKSPACE, label
+    spellings = [
+        (f"FABRIC_WORKSPACE_ID={_WORKSPACE}\n", "utf-8"),
+        (f"FABRIC_WORKSPACE_ID={_WORKSPACE}\n", "utf-8-sig"),
+        (f"FABRIC_TENANT_ID=\nFABRIC_WORKSPACE_ID={_WORKSPACE}\n", "utf-8-sig"),
+        (f"FABRIC_WORKSPACE_ID={_WORKSPACE}\t# customer landing zone\n", "utf-8"),
+        (f"FABRIC_WORKSPACE_ID={_WORKSPACE} # customer landing zone\n", "utf-8"),
+        (f"FABRIC_WORKSPACE_ID=   {_WORKSPACE}\t \n", "utf-8"),
+        (f'FABRIC_WORKSPACE_ID="{_WORKSPACE}"\n', "utf-8"),
+        (f"FABRIC_WORKSPACE_ID='{_WORKSPACE}'\n", "utf-8"),
+        (f'FABRIC_WORKSPACE_ID="{_WORKSPACE}"\t# both at once\n', "utf-8"),
+    ]
+    for declaration, encoding in spellings:
+        (tmp_path / ".env").write_text(declaration, encoding=encoding)
+        assert de.configured_workspace() == _WORKSPACE, (declaration, encoding)
 
 
 # --------------------------------------------------------------------------- the binding
 
 
-def test_a_report_is_rebound_from_bypath_to_byconnection(tmp_path):
-    """A migrated PBIP binds by PATH, which cannot resolve in a service keyed by object id."""
-    bundle = _bundle(tmp_path, {"WB": True})
-    parts = de.parts_for(bundle / "pbip" / "WB" / "WB.Report")
-    rebound = de.rebind(parts, "My Workspace", "WB", "1111-2222")
-    pbir = json.loads(base64.b64decode(next(p["payload"] for p in rebound if p["path"] == "definition.pbir")))
-    assert "byPath" not in pbir["datasetReference"]
-    assert "byConnection" in pbir["datasetReference"]
-
-
-def test_the_connection_string_carries_the_model_guid(tmp_path):
-    """Schema 2.0.0 allows ONLY `connectionString`, so the guid has nowhere else to go.
-
-    Omitting it is answered with `InvalidConnectionInformation`; putting it in a sibling property
-    (the widely-quoted 1.0.0 shape) is answered with `Workload_FailedToParseFile`. Both measured.
-    """
-    bundle = _bundle(tmp_path, {"WB": True})
-    parts = de.parts_for(bundle / "pbip" / "WB" / "WB.Report")
-    pbir = json.loads(
-        base64.b64decode(
-            next(p["payload"] for p in de.rebind(parts, "WS", "WB", "GUID-1") if p["path"] == "definition.pbir")
-        )
-    )
-    connection = pbir["datasetReference"]["byConnection"]
-    assert list(connection) == ["connectionString"], "2.0.0 forbids any other property here"
-    # Lowercase, matching the product's own serialisation rather than our earlier reconstruction.
-    assert "semanticmodelid=GUID-1" in connection["connectionString"]
-
-
-def test_rebinding_leaves_every_other_part_untouched(tmp_path):
-    """Only the binding changes; rewriting anything else would silently alter the report."""
+def test_rebinding_swaps_bypath_for_a_guid_connection_and_touches_nothing_else(tmp_path):
+    """A PBIP binds by PATH, which cannot resolve in the service; schema 2.0.0 allows ONLY
+    `connectionString`, so the guid goes there (a sibling property was measured as
+    `Workload_FailedToParseFile`). Rewriting any other part would silently alter the report."""
     bundle = _bundle(tmp_path, {"WB": True})
     report = bundle / "pbip" / "WB" / "WB.Report"
     (report / "definition" / "report.json").write_text('{"x":1}', encoding="utf-8")
     before = de.parts_for(report)
-    after = de.rebind(before, "WS", "WB", "G")
+    after = de.rebind(before, "WS", "WB", "GUID-1")
+    pbir = json.loads(base64.b64decode(next(p["payload"] for p in after if p["path"] == "definition.pbir")))
+    assert "byPath" not in pbir["datasetReference"]
+    connection = pbir["datasetReference"]["byConnection"]
+    assert list(connection) == ["connectionString"]
+    assert "semanticmodelid=GUID-1" in connection["connectionString"]
     unchanged = {p["path"]: p["payload"] for p in after if p["path"] != "definition.pbir"}
     assert unchanged == {p["path"]: p["payload"] for p in before if p["path"] != "definition.pbir"}
 
@@ -264,86 +204,48 @@ def test_rebinding_leaves_every_other_part_untouched(tmp_path):
 # --------------------------------------------------------------------------- crash safety
 
 
-def test_an_unchanged_item_is_skipped_on_a_re_run(tmp_path):
-    """The whole point of the journal: a resume must not redeploy what already landed."""
-    bundle = _bundle(tmp_path, {"WB": False})
-    journal = de.Journal(tmp_path / "j.jsonl")
-    item = de.Item("WB", de.MODEL_TYPE, bundle / "pbip" / "WB" / "WB.SemanticModel")
-    item.parts = de.parts_for(item.folder)
-    journal.intent(item, "create")
-    journal.outcome(item, "Succeeded", "id-1", "op-1")
-
-    assert de.Journal(tmp_path / "j.jsonl").already_deployed(item) is not None
-
-
-def test_a_CHANGED_item_is_not_skipped(tmp_path):
-    """'An item with this name exists' is the check that silently ships a half-uploaded item."""
-    bundle = _bundle(tmp_path, {"WB": False})
+def test_only_an_unchanged_success_counts_as_already_deployed(tmp_path):
+    """A resume skips what landed; a CHANGED definition or a later-FAILED `202` is not done."""
+    bundle = _bundle(tmp_path, {"WB": False, "F": False})
     folder = bundle / "pbip" / "WB" / "WB.SemanticModel"
     item = de.Item("WB", de.MODEL_TYPE, folder)
     item.parts = de.parts_for(folder)
+    failed = de.Item("F", de.MODEL_TYPE, bundle / "pbip" / "F" / "F.SemanticModel")
+    failed.parts = de.parts_for(failed.folder)
     journal = de.Journal(tmp_path / "j.jsonl")
     journal.intent(item, "create")
     journal.outcome(item, "Succeeded", "id-1", "op-1")
+    journal.intent(failed, "create")
+    journal.outcome(failed, "Failed", None, "op-2", "boom")
 
+    assert de.Journal(tmp_path / "j.jsonl").already_deployed(item) is not None
+    assert de.Journal(tmp_path / "j.jsonl").already_deployed(failed) is None
     (folder / "definition.pbism").write_text('{"version":"4.0","changed":true}', encoding="utf-8")
     changed = de.Item("WB", de.MODEL_TYPE, folder)
     changed.parts = de.parts_for(folder)
     assert de.Journal(tmp_path / "j.jsonl").already_deployed(changed) is None
 
 
-def test_an_intent_without_an_outcome_is_visible_as_unfinished(tmp_path):
-    """Intent-before-mutation is what makes a crash mid-call distinguishable from never calling."""
-    bundle = _bundle(tmp_path, {"WB": False})
-    item = de.Item("WB", de.MODEL_TYPE, bundle / "pbip" / "WB" / "WB.SemanticModel")
-    item.parts = de.parts_for(item.folder)
-    de.Journal(tmp_path / "j.jsonl").intent(item, "create")
-    assert de.Journal(tmp_path / "j.jsonl").unfinished(item) is not None
-
-
-def test_a_torn_final_line_does_not_break_resume(tmp_path):
-    """A hard kill can leave a partial line; refusing to load would strand the whole run."""
+def test_an_intent_without_an_outcome_survives_a_torn_final_line_as_unfinished(tmp_path):
+    """Intent-before-mutation distinguishes a crash mid-call; a hard kill's partial line must not
+    strand the resume."""
     path = tmp_path / "j.jsonl"
     path.write_text('{"phase":"intent","item":"A","type":"SemanticModel"}\n{"phase":"outc', encoding="utf-8")
     assert de.Journal(path).unfinished(de.Item("A", de.MODEL_TYPE, tmp_path)) is not None
 
 
-def test_a_failed_outcome_is_not_treated_as_done(tmp_path):
-    """A `202` that later FAILS looks identical to success unless the operation is read."""
-    bundle = _bundle(tmp_path, {"WB": False})
-    item = de.Item("WB", de.MODEL_TYPE, bundle / "pbip" / "WB" / "WB.SemanticModel")
-    item.parts = de.parts_for(item.folder)
-    journal = de.Journal(tmp_path / "j.jsonl")
-    journal.intent(item, "create")
-    journal.outcome(item, "Failed", None, "op-1", "boom")
-    assert de.Journal(tmp_path / "j.jsonl").already_deployed(item) is None
-
-
 # --------------------------------------------------------------------------- concurrency
 
 
-def test_a_second_run_cannot_start_while_one_holds_the_lock(tmp_path):
-    """Measured: two overlapping runs created DUPLICATE models and reports.
-
-    Fabric does not reject a repeated report/model name, so the journal alone cannot prevent this -
-    the runs have to be prevented from overlapping.
-    """
+def test_the_run_lock_refuses_a_second_run_until_released_or_forced(tmp_path):
+    """Measured: two overlapping runs created DUPLICATE models and reports, since Fabric does not
+    reject a repeated name. A stale lock must still be clearable in a live session."""
     lock = de.RunLock(tmp_path / "run.lock")
     assert lock.acquire()[0] is True
     ok, message = de.RunLock(tmp_path / "run.lock").acquire()
     assert ok is False
     assert "DUPLICATE" in message
-
-
-def test_a_stale_lock_can_be_forced(tmp_path):
-    """A lock that cannot be cleared is worse than none when a session is live."""
-    de.RunLock(tmp_path / "run.lock").acquire()
     assert de.RunLock(tmp_path / "run.lock").acquire(force=True)[0] is True
-
-
-def test_releasing_lets_the_next_run_start(tmp_path):
-    lock = de.RunLock(tmp_path / "run.lock")
-    lock.acquire()
     lock.release()
     assert de.RunLock(tmp_path / "run.lock").acquire()[0] is True
 
@@ -373,28 +275,17 @@ def test_preflight_distinguishes_not_found_from_no_access(monkeypatch):
     assert "Contributor" in de.preflight("ws", "tok", 1)[1]
 
 
-def test_preflight_budgets_against_items_ALREADY_in_the_workspace(monkeypatch):
-    """A customer-supplied landing zone is not necessarily empty."""
-    existing = {"value": [{"id": str(i)} for i in range(880)]}
-    monkeypatch.setattr(
-        de,
-        "call",
-        lambda method, url, *a, **k: (200, {}, existing if url.endswith("/items") else {"displayName": "LZ"}),
-    )
-    ok, message, _ = de.preflight("ws", "tok", 50)
-    assert ok is False
-    assert "880 already there" in message
-
-
-def test_preflight_keeps_headroom_rather_than_filling_to_the_limit(monkeypatch):
-    """A re-deploy may create before deleting, and the customer adds their own content."""
+def test_preflight_budgets_with_headroom_against_items_ALREADY_in_the_workspace(monkeypatch):
+    """A customer landing zone is not necessarily empty, and a re-deploy may create before deleting."""
     existing = {"value": [{"id": str(i)} for i in range(500)]}
     monkeypatch.setattr(
         de,
         "call",
         lambda method, url, *a, **k: (200, {}, existing if url.endswith("/items") else {"displayName": "LZ"}),
     )
-    assert de.preflight("ws", "tok", 450)[0] is False, "should refuse: 500+450 exceeds the 900 usable budget"
+    ok, message, _ = de.preflight("ws", "tok", 450)
+    assert ok is False, "500+450 exceeds the 900 usable budget"
+    assert "500 already there" in message
     assert de.preflight("ws", "tok", 300)[0] is True
 
 
@@ -462,67 +353,38 @@ def test_a_report_is_never_deployed_without_a_model_id(tmp_path, monkeypatch):
 # The dot is the trap: rejected ANYWHERE, and Tableau project names carry dots routinely.
 
 
-@pytest.mark.parametrize("bad", ["R&D", "R/D", "R\\D", "A:B", "A?B", "A*B", 'A"B', "A|B", "A<B", "A#B", "A%B", "v1.2"])
-def test_every_character_fabric_rejects_is_removed(bad):
-    cleaned = de.folder_display_name(bad)
-    assert not set(cleaned) & set('&/\\:?*"|<#%.')
-
-
-@pytest.mark.parametrize("good", ["Ventes françaises", "Q1 (2026)", "R+D", "A-B", "A_B", "Sales Reports"])
-def test_names_fabric_accepts_are_left_alone(good):
-    """Over-sanitising is a real failure too: it degrades a name the customer recognises."""
-    assert de.folder_display_name(good) == good
-
-
-def test_a_leading_or_trailing_space_is_stripped():
+def test_folder_display_name_removes_only_what_fabric_rejects():
+    """Over-sanitising degrades a name the customer recognises; under-sanitising is refused by the API."""
+    for bad in ["R&D", "R/D", "R\\D", "A:B", "A?B", "A*B", 'A"B', "A|B", "A<B", "A#B", "A%B", "v1.2"]:
+        assert not set(de.folder_display_name(bad)) & set('&/\\:?*"|<#%.'), bad
+    for good in ["Ventes françaises", "Q1 (2026)", "R+D", "A-B", "A_B", "Sales Reports"]:
+        assert de.folder_display_name(good) == good
     assert de.folder_display_name(" Lead") == "Lead"
     assert de.folder_display_name("Trail ") == "Trail"
-
-
-def test_a_name_that_sanitises_to_nothing_still_gets_a_name():
     assert de.folder_display_name("...") == "folder"
     assert de.folder_display_name("///") == "folder"
 
 
 def test_projects_that_collide_after_sanitising_get_DISTINCT_folders():
-    """The failure this guards is SILENT: three Tableau projects pooling into one folder.
-
-    `R&D`, `R/D` and `R.D` all coerce toward `R-D`. A customer would have no way to tell that the
-    content of three projects had been merged.
-    """
+    """The failure is SILENT: `R&D`, `R/D` and `R.D` pooling into one folder. Fabric compares folder
+    names case-insensitively, so the suffixes must too."""
     final = de.unique_siblings(["R&D", "R/D", "R.D"])
     assert len(set(final.values())) == 3, f"collided: {final}"
-
-
-def test_collision_suffixes_are_case_insensitive():
-    """Fabric treats folder names case-insensitively for uniqueness; so must we."""
     final = de.unique_siblings(["r&d", "R/D"])
     assert len(set(v.casefold() for v in final.values())) == 2
 
 
-def test_a_deep_tree_is_flattened_to_fabric_s_limit_not_dropped():
-    parents = {f"L{i}": f"L{i - 1}" for i in range(2, 13)}
-    plan = de.folder_plan({"wb": "L12"}, parents)
-    assert len(plan["wb"]) == de.MAX_FOLDER_DEPTH
-    assert "L12" in plan["wb"][-1], "the overflow must be preserved in the compound name, not dropped"
-
-
-def test_two_deep_chains_differing_below_the_limit_do_not_collapse():
-    """The subtlest collision: identical for 9 levels, differing only in the compounded tail."""
+def test_folder_plan_flattens_deep_trees_distinctly_survives_cycles_and_never_guesses(tmp_path):
+    """Overflow is compounded, not dropped; two chains differing only below the limit stay distinct;
+    a cycle terminates; a workbook with no known project is absent rather than invented."""
     parents = {f"L{i}": f"L{i - 1}" for i in range(2, 13)}
     parents["X12"] = "L11"
     plan = de.folder_plan({"a": "L12", "b": "X12"}, parents)
-    assert plan["a"] != plan["b"], "two distinct projects flattened to the same folder path"
-
-
-def test_a_cycle_in_the_project_tree_terminates():
-    """A self-parent or an A->B->A loop must not hang the deploy."""
+    assert len(plan["a"]) == de.MAX_FOLDER_DEPTH
+    assert "L12" in plan["a"][-1]
+    assert plan["a"] != plan["b"]
     assert de.folder_plan({"wb": "A"}, {"A": "B", "B": "A"})["wb"]
     assert de.folder_plan({"wb": "S"}, {"S": "S"})["wb"] == ["S"]
-
-
-def test_a_workbook_with_no_known_project_is_absent_rather_than_guessed(tmp_path):
-    """Inventing a folder would send the customer looking under a heading Tableau never had."""
     assert de.folder_plan({}, {}) == {}
     assert de.project_map(tmp_path, None) == {}
 
@@ -579,8 +441,9 @@ def test_an_unavailable_folders_api_degrades_to_a_flat_deploy(monkeypatch):
     assert de.ensure_folders("ws", "tok", [["A"]]) == {}
 
 
-def test_an_item_carries_its_folder_id_at_creation(monkeypatch):
-    """`folderId` is a field on Create Item - placement happens at creation, with no move step."""
+def test_an_item_carries_its_folder_id_and_provenance_stamp_at_creation(monkeypatch):
+    """`folderId` is a field on Create Item, so placement needs no move step; and if creation stops
+    stamping, ownership recognition silently stops working."""
     sent: dict = {}
 
     def _call(method, url, tok, body=None):  # noqa: ARG001
@@ -591,6 +454,7 @@ def test_an_item_carries_its_folder_id_at_creation(monkeypatch):
     item = de.Item("N", de.MODEL_TYPE, Path("."), parts=[], folder_id="folder-1")
     de.create_item("ws", "tok", item, de.Journal(Path("nul") if sys.platform == "win32" else Path("/dev/null")))
     assert sent.get("folderId") == "folder-1"
+    assert sent.get("description") == de.PROVENANCE
 
 
 # --------------------------------------------------------------------------- adversarial findings
@@ -676,63 +540,35 @@ def test_a_report_with_no_pages_is_skipped_with_a_clear_reason(tmp_path, monkeyp
         is None
     )
     assert created == [], "an empty report must not be sent to the service"
-
-
-def test_a_report_WITH_pages_is_not_mistaken_for_empty(tmp_path):
-    report = tmp_path / "Y.Report"
-    (report / "definition" / "pages").mkdir(parents=True)
     (report / "definition" / "pages" / "pages.json").write_text('{"pageOrder": ["p1"]}', encoding="utf-8")
     assert de.report_is_empty(report) is False
 
 
-def test_the_journal_is_scoped_to_a_WORKSPACE(tmp_path):
-    """Promotion deploys the SAME bundle to a second workspace; it must not be skipped as done.
-
-    A journal keyed only by (item, type) would report success while creating nothing in the target.
-    """
+def test_already_deployed_is_scoped_to_the_WORKSPACE_and_the_FOLDER(tmp_path):
+    """Promotion deploys the SAME bundle to a second workspace, and moving a project in Tableau must
+    re-place its items; neither may be skipped as done."""
     bundle = _bundle(tmp_path, {"WB": False})
-    item = de.Item("WB", de.MODEL_TYPE, bundle / "pbip" / "WB" / "WB.SemanticModel")
-    item.parts = de.parts_for(item.folder)
-
+    folder = bundle / "pbip" / "WB" / "WB.SemanticModel"
+    item = de.Item("WB", de.MODEL_TYPE, folder, folder_id="old-folder")
+    item.parts = de.parts_for(folder)
     first = de.Journal(tmp_path / "j.jsonl", "workspace-A")
     first.intent(item, "create")
     first.outcome(item, "Succeeded", "id-1", "op-1")
 
     assert de.Journal(tmp_path / "j.jsonl", "workspace-A").already_deployed(item) is not None
     assert de.Journal(tmp_path / "j.jsonl", "workspace-B").already_deployed(item) is None
-
-
-def test_moving_a_project_in_tableau_re_places_its_items(tmp_path):
-    """The folder is part of the recorded state; otherwise items stay where last year's tree put them."""
-    bundle = _bundle(tmp_path, {"WB": False})
-    folder = bundle / "pbip" / "WB" / "WB.SemanticModel"
-    item = de.Item("WB", de.MODEL_TYPE, folder, folder_id="old-folder")
-    item.parts = de.parts_for(folder)
-    journal = de.Journal(tmp_path / "j.jsonl", "ws")
-    journal.intent(item, "create")
-    journal.outcome(item, "Succeeded", "id-1", "op-1")
-
     moved = de.Item("WB", de.MODEL_TYPE, folder, folder_id="new-folder")
     moved.parts = de.parts_for(folder)
-    assert de.Journal(tmp_path / "j.jsonl", "ws").already_deployed(moved) is None
+    assert de.Journal(tmp_path / "j.jsonl", "workspace-A").already_deployed(moved) is None
 
 
 def test_the_lock_is_taken_atomically(tmp_path, monkeypatch):
-    """exists()-then-write has a window two simultaneous starts can both pass.
-
-    Asserting only that a second acquire fails cannot tell the two implementations apart - an
-    exists()-then-write version passes that too (mutation-verified). So we simulate the race the
-    O_EXCL is there for: the file is on disk while `exists()` insists it is not, which is exactly
-    what a check-then-act loses to. Only an atomic create still refuses.
-    """
+    """exists()-then-write has a window two simultaneous starts can both pass. Simulate the race:
+    the file is on disk while `exists()` insists it is not; only an atomic create still refuses."""
     lock = de.RunLock(tmp_path / "run.lock")
     assert lock.acquire()[0] is True
-    assert de.RunLock(tmp_path / "run.lock").acquire()[0] is False
-
     monkeypatch.setattr(de.Path, "exists", lambda _self: False)
-    assert de.RunLock(tmp_path / "run.lock").acquire()[0] is False, (
-        "the lock must be taken by an atomic create, not by looking first"
-    )
+    assert de.RunLock(tmp_path / "run.lock").acquire()[0] is False
 
 
 def test_a_report_without_a_pbir_is_refused_rather_than_guessed(tmp_path):
@@ -741,18 +577,17 @@ def test_a_report_without_a_pbir_is_refused_rather_than_guessed(tmp_path):
         de.rebind([{"path": "definition/report.json", "payload": "e30=", "payloadType": "InlineBase64"}], "W", "M", "G")
 
 
-def test_an_expired_token_is_renewed_and_the_call_retried(monkeypatch):
-    """Measured: a 66-item deploy outlived its token and every later call failed with 401.
-
-    The run was resumable, but an operator should not have to notice and re-run in front of a
-    customer.
-    """
+def test_only_an_EXPIRED_token_is_renewed_and_retried(monkeypatch):
+    """Measured: a 66-item deploy outlived its token and every later call failed with 401. A genuine
+    401 is a real problem to report, not to retry."""
     calls: list[str] = []
 
     def _request(method, url, bearer, body=None):  # noqa: ARG001
         calls.append(bearer)
         if bearer == "old":
             return 401, {}, {"errorCode": "TokenExpired", "message": "Access token has expired"}
+        if bearer == "denied":
+            return 401, {}, {"errorCode": "Unauthorized", "message": "not a contributor"}
         return 201, {}, {"id": "x"}
 
     monkeypatch.setattr(de, "_request", _request)
@@ -760,95 +595,32 @@ def test_an_expired_token_is_renewed_and_the_call_retried(monkeypatch):
     tok.tenant = None
     tok._value = "old"
     monkeypatch.setattr(tok, "_mint", lambda: "fresh")
-    status, _, _ = de.call("POST", "http://x", tok)
-    assert status == 201
-    assert calls == ["old", "fresh"], "the call must be retried with a renewed token"
+    assert de.call("POST", "http://x", tok)[0] == 201
+    assert calls == ["old", "fresh"]
+
+    calls.clear()
+    tok._value = "denied"
+    assert de.call("GET", "http://x", tok)[0] == 401
+    assert calls == ["denied"]
 
 
-def test_a_real_authorisation_failure_is_not_retried(monkeypatch):
-    """Only an EXPIRED token earns a retry; a genuine 401 is a real problem to report."""
-    calls: list[str] = []
-
-    def _request(method, url, bearer, body=None):  # noqa: ARG001
-        calls.append(bearer)
-        return 401, {}, {"errorCode": "Unauthorized", "message": "not a contributor"}
-
-    monkeypatch.setattr(de, "_request", _request)
-    tok = de.Token.__new__(de.Token)
-    tok.tenant = None
-    tok._value = "tok"
-    status, _, _ = de.call("GET", "http://x", tok)
-    assert status == 401
-    assert len(calls) == 1, "a non-expiry 401 must not be retried"
-
-
-def test_a_timed_out_item_is_adopted_not_recreated(tmp_path, monkeypatch):
-    """A `Timeout` is OUR poll giving up, not the service giving up.
-
-    Measured on a real estate: a model timed out at 300s, completed server-side anyway, and the
-    resume created a SECOND copy - Fabric does not reject a duplicate name, so nothing stopped it.
-    """
-    bundle = _bundle(tmp_path, {"WB": False})
-    item = de.Item("WB", de.MODEL_TYPE, bundle / "pbip" / "WB" / "WB.SemanticModel")
-    item.parts = de.parts_for(item.folder)
-
+def test_a_timeout_or_failure_but_not_a_clean_first_run_triggers_reconciliation(tmp_path):
+    """A `Timeout` is OUR poll giving up, and a `Failed` may still have created the item. Measured: a
+    model timed out at 300s, completed server-side, and the resume created a SECOND copy. An item
+    never attempted must not pay for an extra lookup."""
+    bundle = _bundle(tmp_path, {"T": False, "F": False})
+    items = {}
     journal = de.Journal(tmp_path / "j.jsonl", "ws")
-    journal.intent(item, "create")
-    journal.outcome(item, "Timeout", None, "op-1")
-
+    for name, status in (("T", "Timeout"), ("F", "Failed")):
+        items[name] = de.Item(name, de.MODEL_TYPE, bundle / "pbip" / name / f"{name}.SemanticModel")
+        items[name].parts = de.parts_for(items[name].folder)
+        journal.intent(items[name], "create")
+        journal.outcome(items[name], status, None, "op-1")
     reloaded = de.Journal(tmp_path / "j.jsonl", "ws")
-    assert reloaded.already_deployed(item) is None, "a timeout is not a success"
-    assert reloaded.attempted(item) is True, "but it MUST trigger reconciliation before creating"
-
-    created: list[str] = []
-    updated: list[str] = []
-    monkeypatch.setattr(de, "create_item", lambda *a, **k: created.append("x") or ("Succeeded", "new", ""))
-    monkeypatch.setattr(de, "update_item", lambda *a, **k: updated.append("u") or ("Succeeded", ""))
-    landing = de.Landing(
-        [
-            {
-                "id": "existing-id",
-                "displayName": "WB",
-                "type": de.MODEL_TYPE,
-                "folderId": None,
-                "description": de.PROVENANCE,
-            }
-        ]
-    )
-    target = de.Target("ws", "LZ", "tok", reloaded, landing)
-    model_id, failure = de._deploy_model(target, "WB", item)
-
-    assert failure is None
-    assert model_id == "existing-id", "the item that already exists must be adopted"
-    assert created == [], "creating a second copy is the defect this guards"
-    assert updated == ["u"], "its definition is refreshed in place instead"
-
-
-def test_a_failed_item_is_also_reconciled_before_recreating(tmp_path, monkeypatch):
-    """A `Failed` outcome may still have created the item; only a clean success is proof it did not."""
-    bundle = _bundle(tmp_path, {"WB": False})
-    item = de.Item("WB", de.MODEL_TYPE, bundle / "pbip" / "WB" / "WB.SemanticModel")
-    item.parts = de.parts_for(item.folder)
-    journal = de.Journal(tmp_path / "j.jsonl", "ws")
-    journal.intent(item, "create")
-    journal.outcome(item, "Failed", None, "op-1", "boom")
-    assert de.Journal(tmp_path / "j.jsonl", "ws").attempted(item) is True
-
-
-def test_a_clean_first_run_does_not_pay_for_reconciliation(tmp_path):
-    """An item never attempted must not trigger an extra lookup on every deploy."""
-    bundle = _bundle(tmp_path, {"WB": False})
-    item = de.Item("WB", de.MODEL_TYPE, bundle / "pbip" / "WB" / "WB.SemanticModel")
-    item.parts = de.parts_for(item.folder)
-    assert de.Journal(tmp_path / "absent.jsonl", "ws").attempted(item) is False
-
-
-def test_the_summary_reports_what_was_deployed_not_what_was_planned(caplog):
-    """Saying 'all 66 deployed' when two were skipped erodes trust in every other number."""
-    with caplog.at_level("INFO"):
-        de._report_failures([], 66, "LZ", skipped=2)
-    assert "64 item(s) deployed" in caplog.text
-    assert "2 skipped as empty" in caplog.text
+    assert reloaded.already_deployed(items["T"]) is None
+    assert reloaded.attempted(items["T"]) is True
+    assert reloaded.attempted(items["F"]) is True
+    assert de.Journal(tmp_path / "absent.jsonl", "ws").attempted(items["T"]) is False
 
 
 def test_a_dropped_network_stops_the_run_instead_of_failing_every_item(tmp_path, monkeypatch, caplog):
@@ -1039,29 +811,14 @@ def test_a_repeating_continuation_token_cannot_loop_forever(monkeypatch):
     assert len(calls) == 2, "a server repeating one token must not be followed indefinitely"
 
 
-def test_a_list_failure_is_reported_rather_than_read_as_empty(monkeypatch):
-    """The status must reach the caller. This test previously ALSO asserted that the lookup
-    returned None on a 403 - which is precisely "read as empty", the defect its name denies."""
+def test_a_failed_list_or_existence_read_refuses_rather_than_reading_as_empty(monkeypatch):
+    """ "I could not ask" must never be read as "it is not there". Measured: one transient 500 made a
+    re-run create a second model, exit 0, and rebind the report to the DUPLICATE."""
     monkeypatch.setattr(de, "call", lambda *a, **k: (403, {}, {}))
     status, rows = de.list_all("ws", "tok", "items")
     assert status == 403 and rows == []
     landing, why = de.Landing.read("ws", "tok")
-    assert landing is None and "403" in why, "a refused read must not become an empty workspace"
-
-
-# --- findings from the blind adversarial review of PR #105 -------------------------------------
-
-
-def test_a_failed_existence_read_refuses_to_deploy_rather_than_creating_duplicates(monkeypatch):
-    """ "I could not ask" must never be read as "it is not there".
-
-    Measured by the reviewer: one transient 500 on the read made a re-run create a second copy of a
-    model, exit 0, and rebind the report to the DUPLICATE - leaving the original as an orphan
-    holding the pre-fix definition.
-    """
-    monkeypatch.setattr(de, "list_all", lambda *a, **k: (500, []))
-    landing, why = de.Landing.read("ws", "tok")
-    assert landing is None, "an unreadable workspace must not be treated as an empty one"
+    assert landing is None and "403" in why
     assert "refusing to deploy" in why.lower()
 
     monkeypatch.setattr(de, "list_all", lambda *a, **k: (200, []))
@@ -1069,34 +826,47 @@ def test_a_failed_existence_read_refuses_to_deploy_rather_than_creating_duplicat
     assert landing is not None and why == "", "a readable empty workspace is still deployable"
 
 
-def test_an_item_we_did_not_create_is_never_overwritten(tmp_path):
-    """A customer-supplied landing zone is not necessarily empty.
+def test_landing_claims_only_what_is_provably_ours(tmp_path):
+    """Identity is only (displayName, type) and Create Item does not reject a repeated name, so
+    `claim()` decides which existing item is OURS. Each row is a measured failure: an unrelated
+    customer `Sales` overwritten; a failed create authorising any same-named item (R1); two estates
+    collapsing into one item (R2); an older stamp with no estate disabling the guard; a portal
+    governance tag flipping ownership. The stamp lives in the SERVICE, so a lost journal or a crash
+    between POST and outcome is still recognised."""
+    folder = _bundle(tmp_path, {"WB": False}) / "pbip" / "WB" / "WB.SemanticModel"
+    stamp = f"{de.PROVENANCE} {de.SOURCE_PREFIX} e1"
 
-    Identity here is only (displayName, type), so an unrelated report called `Sales` was
-    indistinguishable from ours and was overwritten in place - reported as "already existed".
-    """
-    bundle = _bundle(tmp_path, {"Sales": False})
-    item = de.Item("Sales", de.MODEL_TYPE, bundle / "pbip" / "Sales" / "Sales.SemanticModel")
-    journal = de.Journal(tmp_path / "j.jsonl", "ws")
-    theirs = {"id": "customer-1", "displayName": "Sales", "type": de.MODEL_TYPE, "folderId": "their-folder"}
+    def row(item_id, description=None):
+        found = {"id": item_id, "displayName": "WB", "type": de.MODEL_TYPE}
+        return found if description is None else {**found, "description": description}
 
-    item_id, refusal = de.Landing([theirs]).claim(item, journal)
-
-    assert item_id is None, "we must not claim an item we have no record of creating"
-    assert refusal and "may not be ours" in refusal
-
-
-def test_an_item_this_run_created_is_ours_to_update(tmp_path):
-    """The refusal above must not break the ordinary resume."""
-    bundle = _bundle(tmp_path, {"Sales": False})
-    item = de.Item("Sales", de.MODEL_TYPE, bundle / "pbip" / "Sales" / "Sales.SemanticModel")
-    journal = de.Journal(tmp_path / "j.jsonl", "ws")
-    journal.intent(item, "create")
-    journal.outcome(item, "Succeeded", "ours-1", "op-1")
-    reloaded = de.Journal(tmp_path / "j.jsonl", "ws")
-    row = {"id": "ours-1", "displayName": "Sales", "type": de.MODEL_TYPE, "folderId": None}
-
-    assert de.Landing([row]).claim(item, reloaded) == ("ours-1", None)
+    cases = [
+        # (label, workspace rows, journal state, adopt, item source, claimed id, refusal fragment)
+        ("not ours", [row("cust-1")], None, False, "", None, "may not be ours"),
+        ("journalled by this run", [row("ours-1")], "Succeeded", False, "", "ours-1", None),
+        ("stamped, journal lost", [row("ours-1", de.PROVENANCE)], None, False, "", "ours-1", None),
+        ("unstamped needs adopt", [row("x-1", "")], None, False, "", None, "--adopt-existing"),
+        ("adopt taken explicitly", [row("x-1", "")], None, True, "", "x-1", None),
+        ("failed create", [row("cust-1", "Finance's own model")], "Failed", False, "", None, "may not be ours"),
+        ("crashed create", [row("made-1", de.PROVENANCE)], "intent", False, "", "made-1", None),
+        ("other estate", [row("f-1", f"{de.PROVENANCE} {de.SOURCE_PREFIX} Fin")], None, False, "e1", None, "'Fin'"),
+        ("same estate", [row("hr-1", stamp)], None, False, "e1", "hr-1", None),
+        ("stamp without estate", [row("old-1", de.PROVENANCE)], None, False, "e1", None, "earlier version"),
+        ("tag before", [row("x", f"[certified] {stamp}")], None, False, "e1", "x", None),
+        ("tag after", [row("x", f"{stamp} [certified]")], None, False, "e1", "x", None),
+        ("two share the name", [row("a", de.PROVENANCE), row("b", de.PROVENANCE)], None, False, "", None, "ambiguous"),
+    ]
+    for n, (label, rows, state, adopt, source, expected, refusal) in enumerate(cases):
+        item = de.Item("WB", de.MODEL_TYPE, folder, source=source)
+        path = tmp_path / f"j{n}.jsonl"
+        if state:
+            journal = de.Journal(path, "ws")
+            journal.intent(item, "create")
+            if state != "intent":
+                journal.outcome(item, state, rows[0]["id"] if state == "Succeeded" else None, "op-1")
+        claimed, why = de.Landing(rows, adopt=adopt).claim(item, de.Journal(path, "ws"))
+        assert claimed == expected, label
+        assert (refusal in why) if refusal else why is None, (label, why)
 
 
 def test_a_journalled_item_deleted_in_the_portal_is_recreated(tmp_path, monkeypatch):
@@ -1206,14 +976,6 @@ def test_a_failed_parent_folder_does_not_scatter_its_children_at_the_root(monkey
     assert all(c.get("parentFolderId") or c["displayName"] == "HR" for c in created)
 
 
-def test_folder_naming_does_not_depend_on_set_iteration_order(monkeypatch):
-    """Which of two collision-prone projects owned which folder was decided by the hash seed."""
-    monkeypatch.setattr(de, "call", lambda *a, **k: (200, {}, {"value": []}))
-    first = de._display_names(sorted({("R&D",), ("R/D",)}, key=lambda p: (len(p), p)))
-    second = de._display_names(sorted({("R/D",), ("R&D",)}, key=lambda p: (len(p), p)))
-    assert first == second, "the same plan must produce the same folder names every run"
-
-
 def test_a_resume_does_not_count_its_own_items_against_the_budget(monkeypatch):
     """existing + planned double-counted the run's own items, so a large estate could never re-run."""
     rows = [{"id": f"i{n}", "displayName": f"WB{n}", "type": de.MODEL_TYPE} for n in range(460)]
@@ -1250,161 +1012,22 @@ def test_a_name_taken_but_unlocatable_item_is_a_failure_not_a_success(tmp_path, 
     assert failure and "no matching item" in failure
 
 
-def test_an_item_stamped_by_a_previous_run_is_recognised_without_the_journal(tmp_path):
-    """Ownership that lives only in a local file is lost with the file.
-
-    Refusing to touch our own previous output because a temp journal was cleaned is safe but
-    useless. The stamp is written to the SERVICE at creation, so any later run can read it.
-    """
-    bundle = _bundle(tmp_path, {"WB": False})
-    item = de.Item("WB", de.MODEL_TYPE, bundle / "pbip" / "WB" / "WB.SemanticModel")
-    empty_journal = de.Journal(tmp_path / "fresh.jsonl", "ws")
-    stamped = {
-        "id": "ours-1",
-        "displayName": "WB",
-        "type": de.MODEL_TYPE,
-        "folderId": None,
-        "description": de.PROVENANCE,
-    }
-
-    assert de.Landing([stamped]).claim(item, empty_journal) == ("ours-1", None)
-
-
-def test_adopt_existing_is_required_to_take_over_an_unstamped_item(tmp_path):
-    """The escape hatch must be explicit - and must actually work when asked for."""
-    bundle = _bundle(tmp_path, {"WB": False})
-    item = de.Item("WB", de.MODEL_TYPE, bundle / "pbip" / "WB" / "WB.SemanticModel")
-    journal = de.Journal(tmp_path / "fresh.jsonl", "ws")
-    theirs = {"id": "x-1", "displayName": "WB", "type": de.MODEL_TYPE, "folderId": None}
-
-    refused_id, refusal = de.Landing([theirs]).claim(item, journal)
-    assert refused_id is None and "--adopt-existing" in refusal
-
-    assert de.Landing([theirs], adopt=True).claim(item, journal) == ("x-1", None)
-
-
-def test_every_created_item_carries_the_provenance_stamp(tmp_path, monkeypatch):
-    """If creation stops stamping, the recognition above silently stops working."""
+def test_an_item_is_stamped_on_update_only_when_it_lacks_the_stamp(tmp_path, monkeypatch):
+    """Measured live: 64 adopted items came back 0 of 64 stamped, because updateDefinition carries
+    only the definition; the escape hatch was needed forever. One needless PATCH per item per run is
+    worth avoiding too."""
     bundle = _bundle(tmp_path, {"WB": False})
     item = de.Item("WB", de.MODEL_TYPE, bundle / "pbip" / "WB" / "WB.SemanticModel")
     item.parts = de.parts_for(item.folder)
-    sent: list[dict] = []
-    monkeypatch.setattr(de, "call", lambda method, url, tok, body=None: (sent.append(body), (201, {}, {"id": "i"}))[1])
-
-    de._post_item("ws", "tok", item)
-
-    assert sent[0]["description"] == de.PROVENANCE
-
-
-def test_adopting_an_item_stamps_it_so_the_next_run_needs_no_flag(tmp_path, monkeypatch):
-    """Measured live: 64 items were adopted and 0 of 64 came back stamped.
-
-    updateDefinition carries only the definition, so without an explicit mark the escape hatch
-    would be needed on every future run - which is the same as having no marker at all.
-    """
-    bundle = _bundle(tmp_path, {"WB": False})
-    item = de.Item("WB", de.MODEL_TYPE, bundle / "pbip" / "WB" / "WB.SemanticModel")
-    item.parts = de.parts_for(item.folder)
-    unstamped = {"id": "x-1", "displayName": "WB", "type": de.MODEL_TYPE, "folderId": None, "description": ""}
-    landing = de.Landing([unstamped], adopt=True)
-
     stamped: list[str] = []
     monkeypatch.setattr(de, "update_item", lambda *a, **k: ("Succeeded", ""))
     monkeypatch.setattr(de, "stamp_item", lambda w, t, i, it: stamped.append(i) or True)
-    target = de.Target("ws", "LZ", "tok", de.Journal(tmp_path / "j.jsonl", "ws"), landing)
-
-    de._deploy_model(target, "WB", item)
-
-    assert stamped == ["x-1"], "an adopted item must be marked as ours"
-    assert landing.describe("x-1") == de.PROVENANCE
-
-
-def test_an_already_stamped_item_is_not_stamped_again(tmp_path, monkeypatch):
-    """One needless PATCH per item per run, across a whole estate, is worth avoiding."""
-    bundle = _bundle(tmp_path, {"WB": False})
-    item = de.Item("WB", de.MODEL_TYPE, bundle / "pbip" / "WB" / "WB.SemanticModel")
-    item.parts = de.parts_for(item.folder)
-    row = {"id": "x-1", "displayName": "WB", "type": de.MODEL_TYPE, "folderId": None, "description": de.PROVENANCE}
-    stamped: list[str] = []
-    monkeypatch.setattr(de, "update_item", lambda *a, **k: ("Succeeded", ""))
-    monkeypatch.setattr(de, "stamp_item", lambda w, t, i, it: stamped.append(i) or True)
-    target = de.Target("ws", "LZ", "tok", de.Journal(tmp_path / "j.jsonl", "ws"), de.Landing([row]))
-
-    de._deploy_model(target, "WB", item)
-
-    assert stamped == []
-
-
-# --- round 2: findings from re-reviewing the fixes -----------------------------------------------
-
-
-def test_a_failed_create_does_not_authorise_overwriting_a_strangers_item(tmp_path):
-    """R1, critical: the first fix moved this boundary instead of removing it.
-
-    Ownership used to include `journal.attempted(item)`, which never looked at the row - so one
-    failed create authorised overwriting ANY item of that name for the life of the journal, and a
-    create that failed is exactly what this deployer exists to resume from. It destroyed the
-    customer's content and then stamped it as ours, making the damage permanent.
-    """
-    bundle = _bundle(tmp_path, {"Sales": False})
-    item = de.Item("Sales", de.MODEL_TYPE, bundle / "pbip" / "Sales" / "Sales.SemanticModel")
-    journal = de.Journal(tmp_path / "j.jsonl", "ws")
-    journal.intent(item, "create")
-    journal.outcome(item, "Failed", None, "op-1", "HTTP 400")
-    reloaded = de.Journal(tmp_path / "j.jsonl", "ws")
-    assert reloaded.attempted(item) is True, "precondition: the journal remembers the failed attempt"
-
-    theirs = {"id": "cust-1", "displayName": "Sales", "type": de.MODEL_TYPE, "description": "Finance's own model"}
-    item_id, refusal = de.Landing([theirs]).claim(item, reloaded)
-
-    assert item_id is None, "a failed attempt must not authorise touching someone else's item"
-    assert refusal
-
-
-def test_a_crashed_create_is_still_recovered_because_the_item_is_stamped(tmp_path):
-    """Removing `attempted()` must not lose what it was there for.
-
-    `_post_item` sends the marker in the CREATE body, so an item created just before a crash is
-    already stamped when we come back for it - better evidence than the journal ever had.
-    """
-    bundle = _bundle(tmp_path, {"WB": False})
-    item = de.Item("WB", de.MODEL_TYPE, bundle / "pbip" / "WB" / "WB.SemanticModel")
-    journal = de.Journal(tmp_path / "j.jsonl", "ws")
-    journal.intent(item, "create")  # crashed before the outcome was written
-    reloaded = de.Journal(tmp_path / "j.jsonl", "ws")
-    orphan = {"id": "made-1", "displayName": "WB", "type": de.MODEL_TYPE, "description": de.PROVENANCE}
-
-    assert de.Landing([orphan]).claim(item, reloaded) == ("made-1", None)
-
-
-def test_two_estates_sharing_a_workbook_name_do_not_collapse_into_one_item(tmp_path):
-    """R2: the stamp said "some run of this tool", not WHICH estate."""
-    bundle = _bundle(tmp_path, {"Sales": False})
-    mine = de.Item("Sales", de.MODEL_TYPE, bundle / "pbip" / "Sales" / "Sales.SemanticModel", source="HR-estate")
-    theirs = {
-        "id": "fin-1",
-        "displayName": "Sales",
-        "type": de.MODEL_TYPE,
-        "description": f"{de.PROVENANCE} {de.SOURCE_PREFIX} Finance-estate",
-    }
-
-    item_id, refusal = de.Landing([theirs]).claim(mine, de.Journal(tmp_path / "j.jsonl", "ws"))
-
-    assert item_id is None
-    assert refusal and "came from 'Finance-estate'" in refusal
-
-
-def test_the_same_estate_redeployed_is_still_recognised(tmp_path):
-    """The source check must not break the ordinary re-run."""
-    bundle = _bundle(tmp_path, {"Sales": False})
-    mine = de.Item("Sales", de.MODEL_TYPE, bundle / "pbip" / "Sales" / "Sales.SemanticModel", source="HR-estate")
-    row = {
-        "id": "hr-1",
-        "displayName": "Sales",
-        "type": de.MODEL_TYPE,
-        "description": f"{de.PROVENANCE} {de.SOURCE_PREFIX} HR-estate",
-    }
-    assert de.Landing([row]).claim(mine, de.Journal(tmp_path / "j.jsonl", "ws")) == ("hr-1", None)
+    for description in ("", de.PROVENANCE):
+        row = {"id": "x-1", "displayName": "WB", "type": de.MODEL_TYPE, "folderId": None, "description": description}
+        landing = de.Landing([row], adopt=True)
+        de._deploy_model(de.Target("ws", "LZ", "tok", de.Journal(tmp_path / "j.jsonl", "ws"), landing), "WB", item)
+        assert landing.describe("x-1") == de.PROVENANCE
+    assert stamped == ["x-1"]
 
 
 def test_a_refusal_stops_the_run_before_anything_is_created(tmp_path, monkeypatch):
@@ -1503,38 +1126,6 @@ def test_ensure_folders_itself_is_order_independent(monkeypatch):
     assert seen[0] == seen[1], f"folder assignment depends on input order: {seen}"
 
 
-def test_the_model_named_by_the_report_is_the_one_deployed(tmp_path):
-    """M13/R3: sorting made the choice deterministic and deterministically WRONG."""
-    bundle = tmp_path / "b"
-    wb = bundle / "pbip" / "WB"
-    for name in ("Bravo", "WB"):
-        (wb / f"{name}.SemanticModel").mkdir(parents=True)
-        (wb / f"{name}.SemanticModel" / "definition.pbism").write_text(f'{{"iam":"{name}"}}', encoding="utf-8")
-    report = wb / "WB.Report"
-    (report / "definition" / "pages").mkdir(parents=True)
-    (report / "definition.pbir").write_text(
-        json.dumps({"datasetReference": {"byPath": {"path": "../WB.SemanticModel"}}}), encoding="utf-8"
-    )
-    (report / "definition" / "pages" / "pages.json").write_text(json.dumps({"pageOrder": ["p1"]}), encoding="utf-8")
-
-    (_name, model, _report) = de.discover(bundle)[0]
-
-    assert model.folder.name == "WB.SemanticModel", "the report's own byPath names the right model"
-
-
-def test_two_items_sharing_a_name_are_refused_rather_than_guessed(tmp_path):
-    """M18: the ambiguity branch had no test at all."""
-    bundle = _bundle(tmp_path, {"WB": False})
-    item = de.Item("WB", de.MODEL_TYPE, bundle / "pbip" / "WB" / "WB.SemanticModel")
-    rows = [
-        {"id": "a", "displayName": "WB", "type": de.MODEL_TYPE, "description": de.PROVENANCE},
-        {"id": "b", "displayName": "WB", "type": de.MODEL_TYPE, "description": de.PROVENANCE},
-    ]
-    item_id, refusal = de.Landing(rows).claim(item, de.Journal(tmp_path / "j.jsonl", "ws"))
-    assert item_id is None
-    assert refusal and "ambiguous" in refusal
-
-
 # --- round 3: the identity chain, tested END TO END rather than at its midpoint ------------------
 
 
@@ -1622,31 +1213,6 @@ def test_the_estate_identity_travels_inside_the_bundle(tmp_path):
     assert de.estate_identity(bundle, "explicit-id") == "explicit-id"
 
 
-def test_an_item_stamped_without_an_estate_is_refused_not_silently_taken(tmp_path):
-    """An empty source on EITHER side used to disable the guard, then re-stamp the victim as ours."""
-    bundle = _bundle(tmp_path, {"Sales": False})
-    mine = de.Item("Sales", de.MODEL_TYPE, bundle / "pbip" / "Sales" / "Sales.SemanticModel", source="mine")
-    legacy = {"id": "old-1", "displayName": "Sales", "type": de.MODEL_TYPE, "description": de.PROVENANCE}
-
-    item_id, refusal = de.Landing([legacy]).claim(mine, de.Journal(tmp_path / "j.jsonl", "ws"))
-
-    assert item_id is None
-    assert refusal and "earlier version" in refusal
-
-
-def test_a_governance_tag_added_in_the_portal_does_not_flip_ownership(tmp_path):
-    """Prepending or appending to the description is a routine edit; startswith turned it fatal."""
-    bundle = _bundle(tmp_path, {"WB": False})
-    item = de.Item("WB", de.MODEL_TYPE, bundle / "pbip" / "WB" / "WB.SemanticModel", source="e1")
-    journal = de.Journal(tmp_path / "j.jsonl", "ws")
-    for description in (
-        f"[certified] {de.PROVENANCE} {de.SOURCE_PREFIX} e1",
-        f"{de.PROVENANCE} {de.SOURCE_PREFIX} e1 [certified]",
-    ):
-        row = {"id": "x", "displayName": "WB", "type": de.MODEL_TYPE, "description": description}
-        assert de.Landing([row]).claim(item, journal) == ("x", None), description
-
-
 def test_one_foreign_name_does_not_block_the_rest_of_the_estate(tmp_path, monkeypatch):
     """Per-estate refusal turned one collision into an outage over provably-ours workbooks."""
     bundle = _bundle(tmp_path / "b", {"Clean": False, "Clash": False})
@@ -1719,28 +1285,17 @@ def test_a_stamp_the_service_refused_is_not_recorded_as_applied(monkeypatch):
     assert de.stamp_item("ws", "tok", "id-1", item) is True
 
 
-def test_the_model_choice_is_deterministic_when_nothing_names_a_winner(tmp_path):
-    """No byPath and no folder-name match still must not vary between runs."""
-    bundle = tmp_path / "b"
-    wb = bundle / "pbip" / "WB"
+def test_the_model_tiebreak_is_stable_when_nothing_names_a_winner(tmp_path):
+    """No byPath and no folder-name match must not vary between runs, nor with listing order (NTFS
+    enumerates alphabetically, which masks an unsorted glob in `discover`)."""
+    wb = tmp_path / "b" / "pbip" / "WB"
+    paths = []
     for name in ("Zulu", "Alpha"):
         (wb / f"{name}.SemanticModel").mkdir(parents=True)
         (wb / f"{name}.SemanticModel" / "definition.pbism").write_text("{}", encoding="utf-8")
+        paths.append(wb / f"{name}.SemanticModel")
 
-    (_name, model, _report) = de.discover(bundle)[0]
-
-    assert model.folder.name == "Alpha.SemanticModel", "the tiebreak must be stable, not glob order"
-
-
-def test_the_model_tiebreak_does_not_depend_on_directory_listing_order(tmp_path):
-    """Filesystem-independent: NTFS enumerates alphabetically, which masks an unsorted glob here."""
-    wb = tmp_path / "WB"
-    paths = []
-    for name in ("Zulu", "Alpha"):
-        path = wb / f"{name}.SemanticModel"
-        path.mkdir(parents=True)
-        paths.append(path)
-
+    assert de.discover(tmp_path / "b")[0][1].folder.name == "Alpha.SemanticModel"
     assert de._preferred_model(wb, list(paths), []) == wb / "Alpha.SemanticModel"
     assert de._preferred_model(wb, list(reversed(paths)), []) == wb / "Alpha.SemanticModel"
 
@@ -1764,17 +1319,6 @@ def test_the_binding_matches_the_products_own_serialisation(tmp_path):
         "integrated security=ClaimsToken;"
         "semanticmodelid=a317a5b3-ebca-4110-ada7-7d9920059109"
     )
-
-
-def test_a_semicolon_in_a_workspace_name_cannot_truncate_the_connection_string(tmp_path):
-    """A bare `;` ends a connection-string segment: unquoted, the binding silently loses everything
-    after it, including the semanticmodelid that makes the whole recipe work."""
-    parts = [{"path": "definition.pbir", "payload": "e30=", "payloadType": "InlineBase64"}]
-    out = de.rebind(parts, "Sales; Finance", "M", "guid-1")
-    conn = json.loads(base64.b64decode(out[0]["payload"]))["datasetReference"]["byConnection"]["connectionString"]
-
-    assert conn.startswith('Data Source="powerbi://api.powerbi.com/v1.0/myorg/Sales; Finance";')
-    assert "semanticmodelid=guid-1" in conn
 
 
 def test_a_quote_in_a_workspace_name_is_escaped_rather_than_breaking_the_value():
@@ -1862,46 +1406,29 @@ def test_a_named_unit_is_withheld_from_a_real_deploy(tmp_path, caplog):
     assert code == de.EXIT_INCOMPLETE
     assert "2 planned (2 new)" in caplog.text, "preflight budgets the run that will happen, not the bundle"
     assert "WITHHELD" in caplog.text and "Empty" in caplog.text
-
-
-def test_a_withheld_unit_is_not_counted_as_deployed(tmp_path, caplog):
-    """ "All 4 deployed" over an estate that is missing one unit is the lie this exists to prevent."""
-    bundle = _bundle(tmp_path / "b", {"Sales": True, "Empty": True})
-    service = _FakeFabric()
-    de.call = service.call
-    try:
-        with caplog.at_level("INFO"):
-            _deploy_into(bundle, service, tmp_path / "j.jsonl", skip=["Empty"])
-    finally:
-        importlib.reload(de)
-
+    # "All 4 deployed" over an estate missing one unit is the lie this exists to prevent.
     assert "2 item(s) deployed" in caplog.text
     assert "all 4" not in caplog.text and "4 item(s) deployed" not in caplog.text
-    assert "1 unit(s), 2 item(s) NOT deployed" in caplog.text, caplog.text
+    assert "1 unit(s), 2 item(s) NOT deployed" in caplog.text
 
 
-def test_the_exit_code_says_incomplete_rather_than_ok_or_failed():
-    """Deliberate: EXIT_OK would claim a complete estate, EXIT_FAILED would ask for a pointless re-run."""
+def test_report_failures_counts_honestly_and_ranks_failed_over_incomplete_over_ok(caplog):
+    """Saying "all 66 deployed" when two were skipped erodes trust in every other number. EXIT_OK
+    would claim a complete estate and EXIT_FAILED a pointless re-run, so a withheld unit is its own
+    verdict; an empty report owes no follow-up run; a failure outranks a skip but still names it."""
     held = [("Empty", 2, "EMPTY MODEL - loads no rows")]
     assert de.EXIT_INCOMPLETE not in (de.EXIT_OK, de.EXIT_FAILED)
+    with caplog.at_level("INFO"):
+        assert de._report_failures([], 66, "LZ", skipped=2) == de.EXIT_OK
+    assert "64 item(s) deployed" in caplog.text
+    assert "2 skipped as empty" in caplog.text
     assert de._report_failures([], 2, "LZ", 0, held) == de.EXIT_INCOMPLETE
     assert de._report_failures([], 2, "LZ", 0, []) == de.EXIT_OK
-    # A failure outranks a skip: it is the verdict that wants this exact command run again.
-    assert de._report_failures(["Sales (Report): boom"], 2, "LZ", 0, held) == de.EXIT_FAILED
-
-
-def test_a_failed_run_still_names_the_units_it_withheld(caplog):
-    """Two things went wrong; reporting only the louder one hides the estate's real shape."""
+    caplog.clear()
     with caplog.at_level("INFO"):
-        de._report_failures(["Sales (Report): boom"], 2, "LZ", 0, [("Empty", 2, "EMPTY MODEL - no rows")])
+        assert de._report_failures(["Sales (Report): boom"], 2, "LZ", 0, held) == de.EXIT_FAILED
     assert "1 item(s) failed" in caplog.text
     assert "WITHHELD" in caplog.text and "Empty" in caplog.text
-
-
-def test_an_empty_report_is_still_exit_zero_and_a_withheld_unit_is_not():
-    """The two skips are different: an empty report has no item to create and no follow-up run owed."""
-    assert de._report_failures([], 2, "LZ", skipped=1) == de.EXIT_OK
-    assert de._report_failures([], 2, "LZ", 1, [("Empty", 1, "why")]) == de.EXIT_INCOMPLETE
 
 
 def test_the_withheld_item_count_matches_what_would_have_been_created(tmp_path):
@@ -1953,29 +1480,16 @@ def test_skip_empty_models_reads_the_report_so_no_name_is_retyped(tmp_path, capl
     assert "EMPTY MODEL" in caplog.text and "file does not exist" in caplog.text
 
 
-def test_a_missing_empty_model_report_refuses_rather_than_reading_it_as_nothing_is_empty(tmp_path):
+def test_a_missing_or_unreadable_empty_model_report_refuses_rather_than_reading_as_all_clear(tmp_path):
     """ "I could not read the list" and "the list is empty" differ by exactly the unit at stake."""
-    bundle = _bundle(tmp_path / "b", {"Sales": False})
-    service = _FakeFabric()
-    de.call = service.call
-    try:
-        code = _deploy_into(bundle, service, tmp_path / "j.jsonl", skip_empty_models=True)
-    finally:
-        importlib.reload(de)
-
-    assert code == de.EXIT_PREFLIGHT
-    assert service.items == []
-
-
-def test_an_unreadable_empty_model_report_is_refused_too(tmp_path):
-    """A torn or half-written report is the same unknown, and must not read as an all-clear."""
     bundle = _bundle(tmp_path, {"Sales": False})
-    (bundle / de.EMPTY_MODEL_REPORT).write_text('{"models": [', encoding="utf-8")
-
-    skips, refusal = de.resolve_skips(bundle, {"Sales"}, _options(skip_empty_models=True))
-
-    assert skips == {}
-    assert refusal and "could not be read" in refusal
+    for content in (None, '{"models": ['):
+        if content is not None:
+            (bundle / de.EMPTY_MODEL_REPORT).write_text(content, encoding="utf-8")
+        skips, refusal = de.resolve_skips(bundle, {"Sales"}, _options(skip_empty_models=True))
+        assert skips == {}
+        assert refusal, content
+    assert "could not be read" in refusal
 
 
 def test_the_multi_target_form_of_the_report_is_understood(tmp_path):

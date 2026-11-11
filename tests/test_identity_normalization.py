@@ -48,38 +48,23 @@ def test_the_owner_module_is_allowed_to_call_its_own_function() -> None:
 
 
 # --------------------------------------------------------------------------------------------
-# Every route to the guarded function is caught
+# Every route to the guarded function is caught, and nothing else is
 # --------------------------------------------------------------------------------------------
 
 
-def test_a_module_alias_call_is_caught() -> None:
-    """`import object_identity as oid` then `oid.normalize(...)`."""
-    found = violations("import object_identity as oid\n\n\ndef f(a, b):\n    return oid.normalize(a) == b\n")
-    assert [item.line for item in found] == [5]
-    assert found[0].expression == "oid.normalize()"
-
-
-def test_an_unaliased_module_call_is_caught() -> None:
-    """`import object_identity` then `object_identity.normalize(...)`."""
-    found = violations("import object_identity\n\n\ndef f(a):\n    return object_identity.normalize(a)\n")
-    assert [item.line for item in found] == [5]
-
-
-def test_a_bare_imported_name_is_caught() -> None:
-    """`from object_identity import normalize` then `normalize(...)` - no attribute to match on."""
-    found = violations("from object_identity import normalize\n\n\ndef f(a):\n    return normalize(a)\n")
-    assert [item.line for item in found] == [5]
-    assert found[0].expression == "normalize()"
-
-
-def test_a_renamed_import_is_caught() -> None:
-    """`from object_identity import normalize as squash` - the alias is resolved, not the spelling."""
-    found = violations("from object_identity import normalize as squash\n\n\ndef f(a):\n    return squash(a)\n")
-    assert [item.line for item in found] == [5]
-
-
-def test_every_call_is_reported_not_just_the_first() -> None:
-    """A file that reintroduces the join in three places must show all three."""
+def test_every_import_route_to_the_guarded_function_is_caught_and_every_call_reported() -> None:
+    """Module alias, plain module, bare import and renamed import (the alias is resolved, not the
+    spelling); a file that reintroduces the join in three places must show all three."""
+    routes = [
+        ("import object_identity as oid", "oid.normalize", "oid.normalize()"),
+        ("import object_identity", "object_identity.normalize", "object_identity.normalize()"),
+        ("from object_identity import normalize", "normalize", "normalize()"),
+        ("from object_identity import normalize as squash", "squash", None),
+    ]
+    for import_line, call, expression in routes:
+        found = violations(f"{import_line}\n\n\ndef f(a):\n    return {call}(a)\n")
+        assert [item.line for item in found] == [5], import_line
+        assert expression is None or found[0].expression == expression
     source = (
         "import object_identity as oid\n\n\n"
         "def f(a, b, c):\n"
@@ -90,42 +75,20 @@ def test_every_call_is_reported_not_just_the_first() -> None:
     assert [item.line for item in violations(source)] == [5, 6, 7]
 
 
-# --------------------------------------------------------------------------------------------
-# False-positive controls - a rule that cries wolf gets disabled and protects nothing
-# --------------------------------------------------------------------------------------------
-
-
-def test_another_modules_own_normalize_is_not_reported() -> None:
-    """`group_oracle_by_workbook.py` has its own `normalize()`, and it is a different function."""
-    source = "import group_oracle_by_workbook as grp\n\n\ndef f(a):\n    return grp.normalize(a)\n"
-    assert violations(source) == []
-
-
-def test_the_stdlib_normalize_is_not_reported() -> None:
-    """`work_dirs.py` calls `unicodedata.normalize`, which is unrelated to identity."""
-    source = 'import unicodedata\n\n\ndef f(a):\n    return unicodedata.normalize("NFKD", a)\n'
-    assert violations(source) == []
-
-
-def test_a_local_function_called_normalize_is_not_reported() -> None:
-    """A file may define and call its own helper of the same name without importing the owner."""
-    source = "def normalize(text):\n    return text.strip()\n\n\ndef f(a):\n    return normalize(a)\n"
-    assert violations(source) == []
-
-
-def test_an_occurrence_inside_a_string_literal_is_not_reported() -> None:
-    """Deliberate: the mutation harness carries `oid.normalize` in mutation SOURCE strings.
-
-    Those exist to reintroduce the defect and prove the suite catches it, so reporting them would
-    make the rule fight the very tests that defend the invariant.
-    """
-    source = 'import object_identity as oid\n\nMUTATION = """\noid.normalize(x) == oid.normalize(y)\n"""\n'
-    assert violations(source) == []
-
-
-def test_a_file_that_never_imports_the_owner_is_not_scanned_for_calls() -> None:
-    """No import means no route, whatever the file happens to spell."""
-    assert violations("def f(a):\n    return a.normalize()\n") == []
+def test_unrelated_normalize_calls_are_not_reported() -> None:
+    """A rule that cries wolf gets disabled and protects nothing. Another module's `normalize()`
+    (`group_oracle_by_workbook.py`), `unicodedata.normalize` (`work_dirs.py`), a local helper, a
+    mutation SOURCE string (the harness that proves the invariant), and a file that never imports
+    the owner are all clean."""
+    clean = [
+        "import group_oracle_by_workbook as grp\n\n\ndef f(a):\n    return grp.normalize(a)\n",
+        'import unicodedata\n\n\ndef f(a):\n    return unicodedata.normalize("NFKD", a)\n',
+        "def normalize(text):\n    return text.strip()\n\n\ndef f(a):\n    return normalize(a)\n",
+        'import object_identity as oid\n\nMUTATION = """\noid.normalize(x) == oid.normalize(y)\n"""\n',
+        "def f(a):\n    return a.normalize()\n",
+    ]
+    for source in clean:
+        assert violations(source) == [], source
 
 
 # --------------------------------------------------------------------------------------------
