@@ -243,9 +243,9 @@ def test_realistic_long_estate_is_refused_by_conservative_pbir_envelope() -> Non
 
 
 def test_a_datasource_unit_is_projected_as_its_visual_free_shell_and_other_units_are_not() -> None:
-    """A datasource emits no visuals, so before conversion only its shell report bounds it (issue #836).
+    """Before conversion a datasource unit is projected as its shell report, a lower bound (issue #836).
 
-    That is a lower bound which cannot over-refuse; the emitted-tree gate measures anything longer.
+    Other units keep the visual tail; the emitted-tree gate decides anything longer.
     """
     unit = "u" * 64
     shell = Path("pbip") / unit / f"{unit}.Report" / "definition" / "pages" / "page1"
@@ -374,6 +374,10 @@ def test_estate_path_preflight_models_a_datasource_as_its_shell_and_discloses_th
     ok, detail = run_estate.preflight_estate_path_ceiling(tmp_path / "datasource", root, engine)
     assert ok is True, detail
     assert "lower bound" in detail
+    deeper = _root_for_length(utf16_len(str(root)) + 1)
+    ok, detail = run_estate.preflight_estate_path_ceiling(tmp_path / "datasource", deeper, engine)
+    assert ok is False
+    assert f"projected directory is {DIR_CEILING + 1} UTF-16 units (ceiling {DIR_CEILING})" in detail
     ok, detail = run_estate.preflight_estate_path_ceiling(tmp_path / "workbook", root, engine)
     assert ok is False
     assert "PATH CEILING: projected" in detail

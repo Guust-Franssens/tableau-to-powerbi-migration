@@ -451,8 +451,8 @@ breaks git *today* (exit 128, or a silent partial commit) and Desktop refuses it
 real place where real tools run — this repo's own build root is 90 characters.
 
 For `run_estate.py`, the pre-engine projection is provisional: an eligible new run projects workbook
-units under IDs while datasource names retain their legacy paths. A datasource unit emits no
-visuals, so it is projected as its visual-free shell report: a lower bound that cannot over-refuse.
+units under IDs while datasource names retain their legacy paths. A datasource unit is projected as
+its shell report (`definition/pages/page1/page.json`), a lower bound on its real report path.
 After hard-link staging, a definitive projection checks the exact staged names; after conversion,
 the unchanged emitted-path gate measures the whole bundle, including generated-edit declaration and
 temporary-write paths, and is what refuses a datasource whose real paths are longer (a swap page or

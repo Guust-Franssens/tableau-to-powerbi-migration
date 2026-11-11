@@ -20,11 +20,11 @@ still over 259 / 247). The tree fitted only because that datasource carried no f
 which is **data**-dependent, not **kind**-dependent. Do not let "carry the unit kind" be sold as the
 fix for the over-refusal.
 
-Production (issue #836) now projects a datasource unit as its visual-free shell BEFORE conversion, as a
-deliberate lower bound that cannot over-refuse. That is safe only because `check_emitted_path_ceiling`
-measures the tree the engine really wrote: a swap-shaped datasource is not made to fit, its refusal just
-moves from the projection to that measured gate. The permanent invariant below is why the shell is a
-bound and not a verdict, and it must keep holding.
+Production (issue #836) projects a datasource unit as its shell report BEFORE conversion, as a lower
+bound and not a verdict: `check_emitted_path_ceiling` measures the tree the engine really wrote, so a
+swap-shaped datasource is not made to fit, its refusal just moves from the projection to that gate
+(`test_an_over_ceiling_emitted_tree_refuses_before_any_consumer_sees_it` in `tests/test_run_estate.py`
+pins the gate itself).
 
 Assertion families, with deliberately different lifetimes (the shape
 `tests/test_issue_424_chart_type_pin.py` established):
@@ -567,6 +567,9 @@ def test_a_visual_free_datasource_envelope_would_be_fail_open(engine_bundle) -> 
     A datasource envelope modelled on the thin shell understates the SWAP datasource's own emitted
     path. Fail-open is the direction that ships a tree Power BI Desktop refuses, so this is the
     assertion that kills the over-broad remedy.
+
+    This is arithmetic over measured engine output and never calls production: production uses the
+    shell only as a lower bound, and the emitted-tree gate (see the module docstring) is the verdict.
     """
     swap = engine_bundle["shapes"][SWAP_UNIT]["deepest_tail_len"]
     thin_envelope = ENVELOPE_TAIL[THIN_UNIT]

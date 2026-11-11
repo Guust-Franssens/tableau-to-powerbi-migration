@@ -75,9 +75,9 @@ things a conversation cannot be trusted to remember every time:
 
 8. **The pre-engine path projection is fail-open, so the EMITTED tree is measured too (issue #564).**
    `preflight_estate_path_ceiling` projects the canonical PBIR visual tail onto names knowable before
-   conversion (a datasource unit, which emits no visuals, onto its shell report: a lower bound that
-   cannot over-refuse); the path that actually breaches on the committed issue-194 repro is an uncapped
-   SEMANTIC-MODEL table filename, which no pre-conversion projection here models. A bundle could
+   conversion (a datasource unit onto its shell report, a lower bound); the path that actually
+   breaches on the committed issue-194 repro is an uncapped SEMANTIC-MODEL table filename, which no
+   pre-conversion projection here models. A bundle could
    therefore pass the projection and still be one Power BI Desktop refuses to open, with every
    signal green. `check_emitted_path_ceiling` measures what the engine really wrote - through
    `check_path_ceiling.scan`, the same walker and the same measured 259/247 ceilings every other
@@ -417,8 +417,8 @@ _PBIR_PAGE_ID = "p" * _PBIR_MAX_PAGE_ID_UTF16
 _PBIR_VISUAL_ID = "v" * (_PBIR_MAX_VISUAL_ID_UTF16 + _PBIR_IDENTIFIER_SAFETY_MARGIN)
 _PBIR_VISUAL_FILE = "visual" + ".json"
 _PBIR_VISUAL_TAIL = f"definition/pages/{_PBIR_PAGE_ID}/visuals/{_PBIR_VISUAL_ID}/{_PBIR_VISUAL_FILE}"
-# A datasource unit's report is a visual-free shell (one `page1`), so its real tail is never shorter than
-# this: a lower bound that cannot over-refuse. The post-conversion measured gate judges anything longer.
+# A datasource unit is projected before conversion as its shell report (`page1`), a lower bound on its real
+# report path; `check_emitted_path_ceiling` decides anything longer (a swap page, a long table name).
 _PBIR_DATASOURCE_SHELL_TAIL = "definition/pages/page1/page.json"
 
 
@@ -586,8 +586,8 @@ def project_estate_path_ceiling(
 
     The fixed page/visual identifiers define the minimum canonical PBIR safety envelope; the estate's
     longest source name and actual output root are the variable inputs available at this stage.
-    A datasource unit is projected as its visual-free shell report instead: a lower bound that cannot
-    over-refuse, because `check_emitted_path_ceiling` measures the real tree after conversion.
+    Units in `datasource_units` are projected as their shell report instead (see
+    `_PBIR_DATASOURCE_SHELL_TAIL`).
     """
     output_root = output_root.resolve()
     if not unit_names:
@@ -2812,7 +2812,7 @@ def record_engine_output(out_dir: Path, report: dict | None, phases: list[dict],
 #
 # The pre-engine projection above (`preflight_estate_path_ceiling`) is a PROJECTION: it composes the
 # canonical PBIR visual tail onto unit names it can know BEFORE conversion (a datasource unit onto its
-# visual-free shell report, a lower bound that this gate then measures for real). That is genuinely
+# shell report, a lower bound that this gate then measures for real). That is genuinely
 # all it can see, and it is fail-open by construction - measured on the committed issue-194 repro, the path
 # that actually breaches is a SEMANTIC-MODEL table file
 # (`<unit>.SemanticModel/definition/tables/<uncapped table name>`), which no pre-conversion
