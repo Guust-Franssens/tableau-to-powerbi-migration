@@ -1366,27 +1366,31 @@ Caller cwd is never changed: relative `--env`/`--runs-parent` keep caller-relati
 `--storage-decision` stays literal: the existing front door forwards it into a toolkit-cwd child,
 so that relative policy resolves there, not at caller cwd. Packaging does not silently repair/rebase it.
 
-Ordinary `status` is an **anonymous interim human view** of the existing safe projection; `--json`
-remains **byte-for-byte `t2p/v1` compatible**, including syntax/error/interrupt envelopes. After the
-status/exit header, five consecutive lines explain Goal (this inspection), Now, Observed handoff,
-Need and Existing owner. Every projected unit/occurrence, run-level finding, unscoped-package count,
-folder/evidence state and historical phase remains visible in owner order, including duplicates.
-Zero-based unit ordinals are ephemeral, **not durable IDs**; findings have no positional unit join.
-`active` is allocation metadata, and phase results are **last observed**, never current checks.
-Need is only a fixed inspection rule: missing/unassessable/finding observations need inspection,
-with cause and operator/lifecycle decision unknown; otherwise this diagnostic establishes no required
-decision. Presence, package claims and historical success never make handoff green: **NOT CHECKED**.
-The sole local-path exception is an explicitly supplied run accepted by the owner; it is **not
-publication consent**. Rejected/null runs expose no path. Exact named/openable artifacts and other
-private locations are unavailable here; role states are observations, not artifact links.
-Full commissioned denominator, readiness, credentials, liveness, fidelity, START_READY and COMPLETE
-remain **unestablished**. Current path safety/longest paths/remaining budgets are not checked/recorded;
-259/247 are static file/directory UTF-16 ceilings, not measurements.
-One `run_status.build_status` call owns all reads and the exact diagnostic exit. There are no added
-reads, git/process/network calls, scans, cache/result writes, repairs, allocations, routing or gates;
-`next_action` remains omitted. Doctor/start/direct-owner behavior is unchanged.
-**Refs #734 / #469 / #663, not Fixes**: named/private-location enrichment is separate, unplanned work;
-this view does not close those issues or establish a legal next execution command.
+Ordinary `status` is a **local operator view** of the owner's projection (#843); `--json` stays
+`t2p/v1` with additive fields only (syntax/error/interrupt envelopes are byte-for-byte unchanged).
+After the status/exit header, five consecutive lines explain Goal (this inspection), Now, Observed
+handoff, Need and Existing owner. A **Units** table then shows each unit's ID (from `unit-index.json`)
+or `-`, kind, original name, stage (`reported|converted|packaged|not_started`) and working package
+(`packages/<unit>/fabric`, the run-local edit tree) or `not-started`. Original names come from the
+scope bridge only when its manifest hash matches the engine receipt (else finding
+`SCOPE_BRIDGE_UNSEALED` and engine names); the engine identity stays the package join key, and
+sealed-but-unmatched bridge occurrences become `not_started` rows. Every occurrence, run-level
+finding, unscoped-package count, folder/evidence state and historical phase remains visible in owner
+order. `active` is allocation metadata; phase results are **last observed**, never current checks.
+**Paths** shows the runs parent, root kind (`repo_local|external`), longest file/directory and
+remaining UTF-16 budget measured live over `bundle/` and `packages/` with the git-free
+`check_path_ceiling.collect`, and the unmeasured count. When a budget is negative or a `path_ceiling`
+phase failed, it shows the front door's own rerun command under `C:\t2p` (authoritative only when the
+run recorded `front_door.env`/`storage_decision`; otherwise flagged with a note). **Next** and
+**Blocked by** project the owner's `next_action` as JSON `next {kind: command|agent|human, command,
+headline, owner, gate, affected_units}`: e.g. the exact `set_data_folder.py --package "<abs>"` for an
+unbound package, or the `tableau-migrator` agent step for a converted but unpackaged unit. Status never
+runs the command. Names and paths are customer labels: **local-only, not publication consent**.
+Presence, package claims and historical success never make handoff green: **NOT CHECKED**; readiness,
+credentials, liveness, fidelity, START_READY and COMPLETE remain **unestablished**.
+One `run_status.build_status` call owns all reads and the exact diagnostic exit; there are no
+git/process/network calls, cache/result writes, repairs, allocations or gates.
+**Refs #734 / #469 / #663, not Fixes.**
 
 `units` (Refs #836) is a **read-only lookup** over recorded unit identities in one runs root (default
 toolkit `_runs/`, or `--runs-parent`). `show <id>` follows the reservation's owner pointer, so no run is

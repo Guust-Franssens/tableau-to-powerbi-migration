@@ -18,7 +18,7 @@ import subprocess
 import sys
 import sysconfig
 import tomllib
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 from urllib.parse import urlsplit
 from urllib.request import url2pathname
 
@@ -161,7 +161,7 @@ def build_parser(prog: str = "python -B scripts/t2p.py") -> argparse.ArgumentPar
         ("doctor", "Read-only plain preflight and configuration presence; no login or run."),
         ("start", "Attempt one exact live Tableau project; assessment remains site-wide."),
         ("assess", "Assess one Tableau site and write offline HTML; no harvest, capture, or conversion."),
-        ("status", "Read-only inventory for one absolute run; no next action or readiness."),
+        ("status", "Read-only inventory for one absolute run: units, path budget and the owner's next command."),
         ("units", "Read-only unit-ID lookup across one runs root; no allocation, rename or refresh."),
     ):
         child = commands.add_parser(command, help=help_text, description=help_text, allow_abbrev=False)
@@ -887,7 +887,7 @@ def start(args: argparse.Namespace, result: dict) -> int:  # pylint: disable=too
 
 
 def status(args: argparse.Namespace, result: dict) -> int:
-    """Project safe inventory observations; never call status guidance, path scanners or git."""
+    """Project the owner's inventory, path budget and next command; never call path scanners or git."""
     import run_status  # pylint: disable=import-outside-toplevel
 
     result["authority"] = "run_status.py"
@@ -910,11 +910,12 @@ def status(args: argparse.Namespace, result: dict) -> int:
         result["run_location_reason"] = None
     else:
         result["run_location_reason"] = "identity_unestablished"
-    # Identity labels and arbitrary manifest strings are deliberately not copied. Ordered records
-    # retain multiplicity, owner-derived state and fixed reason codes, not customer prose.
+    # Arbitrary manifest strings and owner prose are deliberately not copied. Unit names, package
+    # locators and the owner's next command are local operator output, like `t2p units`.
     result["observations"] = {
         "run_recorded_status": observed.get("run_recorded_status"),
         "inventory_scope": observed.get("inventory_scope"),
+        "scope_denominator": observed.get("scope_denominator"),
         "canonical_subdirs": observed.get("canonical_subdirs"),
         "child_evidence": observed.get("child_evidence"),
         "findings": [
@@ -924,6 +925,10 @@ def status(args: argparse.Namespace, result: dict) -> int:
         "units": [
             {
                 "ordinal": index,
+                "id": row.get("id"),
+                "name": row.get("name"),
+                "stage": row.get("stage"),
+                "working_package": row.get("working_package"),
                 "kind": row["kind"],
                 "scope": row["scope"],
                 "generated_working_copy": row["generated_working_copy"],
@@ -940,6 +945,42 @@ def status(args: argparse.Namespace, result: dict) -> int:
             for row in observed.get("recorded_phases", [])
         ],
     }
+    action = observed.get("next_action")
+    result["next"] = (
+        {key: action.get(key) for key in ("kind", "command", "headline", "owner", "gate", "affected_units")}
+        if isinstance(action, dict) and "gate" in action
+        else None
+    )
+    budget = observed.get("path_budget")
+    if isinstance(budget, dict) and result["path_report"] is not None:
+        report = result["path_report"]
+        for kind in ("file", "directory"):
+            measured = budget[kind]
+            report[f"{kind}_ceiling_utf16"] = measured["ceiling"]
+            for field, key in (
+                ("longest_{}_utf16", "longest"),
+                ("remaining_{}_utf16", "remaining"),
+                ("longest_{}_locator", "path"),
+            ):
+                report[field.format(kind)] = {
+                    "value": measured[key],
+                    "reason": None if measured[key] is not None else "no_paths",
+                }
+        report["unknown_paths"] = budget["unknown"]
+        report["runs_parent"] = budget["runs_parent"]
+        report["root_kind"] = budget["root_kind"]
+        rerun = budget.get("rerun")
+        report["rerun"] = (
+            {
+                "argv": None,
+                "command": rerun["command"],
+                "runs_parent": rerun["runs_parent"],
+                "authoritative": rerun["authoritative"],
+                "reason": rerun.get("reason"),
+            }
+            if rerun
+            else {"argv": None, "command": None, "authoritative": False, "reason": "within_ceilings"}
+        )
     if observed.get("intent") == "assessment":
         result["observations"].update(
             {
@@ -948,7 +989,7 @@ def status(args: argparse.Namespace, result: dict) -> int:
                 "assessment": observed["assessment"],
             }
         )
-    result["limitations"] = ["last_observed_not_liveness", "customer_labels_withheld", "no_routing"]
+    result["limitations"] = ["last_observed_not_liveness", "customer_labels_local_only"]
     if observed.get("intent") == "assessment":
         result["limitations"].append("assessment_only_not_migration_readiness")
     result["proof_boundary"]["established"] = ["read_only_inventory"]
@@ -1016,6 +1057,34 @@ def _units_human(result: dict) -> None:
     _print_safe("\n".join(lines))
 
 
+def _status_path_lines(report: dict, scalar: Callable[[Any], str]) -> list[str]:
+    """Render the owner's path budget, or the static ceilings when it was not measured."""
+    if "root_kind" not in report:
+        return [
+            "Paths: NOT CHECKED; current longest/remaining budgets not recorded; "
+            "ceilings file=259, directory=247 UTF-16 code units."
+        ]
+    paths = [
+        f"Paths: runs-parent={scalar(report.get('runs_parent'))} root={scalar(report.get('root_kind'))}; "
+        f"unmeasured={scalar(report.get('unknown_paths'))}"
+    ]
+    for kind in ("file", "directory"):
+        paths.append(
+            f"  longest {kind}={scalar(report[f'longest_{kind}_utf16']['value'])} of "
+            f"{scalar(report[f'{kind}_ceiling_utf16'])}; "
+            f"remaining={scalar(report[f'remaining_{kind}_utf16']['value'])}; "
+            f"path={scalar(report[f'longest_{kind}_locator']['value'])}"
+        )
+    rerun = report.get("rerun") or {}
+    if rerun.get("command"):
+        paths.append(
+            "  Rerun: "
+            + scalar(rerun["command"])
+            + ("" if rerun.get("authoritative") else " (env and storage decision not recorded; check both)")
+        )
+    return paths
+
+
 def _status_human(result: dict) -> None:
     """Explain only the final safe projection, without acquiring or certifying evidence."""
 
@@ -1040,11 +1109,16 @@ def _status_human(result: dict) -> None:
             )
         if observed.get("inventory_scope") is not None:
             rows.append("Inventory scope: " + scalar(observed["inventory_scope"]))
+        denominator = observed.get("scope_denominator")
+        if denominator is not None:
+            rows.append(f"Scope denominator: {scalar(denominator.get('status'))}; {pairs(denominator.get('counts'))}")
         if observed.get("units") or observed.get("inventory_scope") == "established":
-            rows.append("Units (ephemeral zero-based ordinals; not durable IDs):")
+            rows.append("Units (ID or -, kind, name, stage, working package):")
         for unit in observed.get("units") or []:
             rows.append(
-                f"  [{scalar(unit.get('ordinal'))}] {scalar(unit.get('kind'))}/{scalar(unit.get('scope'))}; "
+                f"  {scalar(unit.get('id') or '-')} {scalar(unit.get('kind'))} "
+                f"{scalar(json.dumps(unit.get('name'), ensure_ascii=True))}; stage={scalar(unit.get('stage'))}; "
+                f"working-package={scalar(unit.get('working_package'))}; scope={scalar(unit.get('scope'))}; "
                 f"working-copy={scalar(unit.get('generated_working_copy'))}; handover={scalar(unit.get('handover'))}; "
                 f"packages={scalar(unit.get('package_count'))}; "
                 f"certification={scalar(unit.get('current_certification'))}"
@@ -1056,7 +1130,7 @@ def _status_human(result: dict) -> None:
                 )
         if observed.get("units") == [] and observed.get("inventory_scope") == "established":
             rows.append("  none projected")
-        rows.append("Findings (run-level; not associated with unit ordinals):")
+        rows.append("Findings (run-level; not associated with units):")
         for index, finding in enumerate(observed.get("findings") or []):
             rows.append(
                 f"  [{index}] code={scalar(finding.get('code'))} reason={scalar(finding.get('reason'))} "
@@ -1093,7 +1167,8 @@ def _status_human(result: dict) -> None:
                 "assessment evidence observed; no migration readiness or handoff was checked."
                 if assessing
                 else f"inventory scope={scalar(observed.get('inventory_scope'))}; "
-                f"{len(observed.get('units', []))} observed units (not the commissioned denominator)."
+                f"{sum(unit.get('stage') != 'not_started' for unit in observed.get('units', []))} observed units "
+                "(not the commissioned denominator)."
             )
             if result.get("run_location") is not None
             else "selected run identity was not established; no accepted run or child location is shown."
@@ -1158,20 +1233,28 @@ def _status_human(result: dict) -> None:
                     f"Report: {scalar(assessment.get('report'))} ({scalar(assessment.get('report_reason'))})",
                 ]
             )
-    lines.extend(
+    paths = _status_path_lines(result.get("path_report") or {}, scalar)
+    action = result.get("next")
+    steps = (
         [
-            *(
-                []
-                if observed is not None and observed.get("intent") == "assessment"
-                else [
-                    "Paths: NOT CHECKED; current longest/remaining budgets not recorded; "
-                    "ceilings file=259, directory=247 UTF-16 code units.",
-                    "Unavailable here: original intent/revision; named/openable artifact; full commissioned "
-                    "denominator; recorded parent/root/repo/git/commit state; authoritative rerun; subst.",
-                ]
-            ),
+            "Next: " + scalar(action.get("command") or action.get("headline")),
+            f"Blocked by: {scalar(action.get('gate'))} (owner {scalar(action.get('owner'))}; "
+            f"kind {scalar(action.get('kind'))})",
         ]
+        if action
+        else []
     )
+    if observed is not None and observed.get("intent") == "assessment":
+        lines.extend(steps)
+    else:
+        lines.extend(
+            [
+                *paths,
+                *steps,
+                "Unavailable here: original intent/revision; openability; recorded parent/root/repo/git/commit "
+                "state; subst.",
+            ]
+        )
     _print_safe("\n".join(lines))
 
 

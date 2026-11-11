@@ -114,6 +114,10 @@ def _status_observed():
                     "stored_readiness": [{"status": "START_READY"}, {"status": "COMPLETE"}],
                 },
                 "current_certification": "NOT_CHECKED",
+                "id": "u0001",
+                "name": "Sales Overview",
+                "stage": "packaged",
+                "working_package": "packages/sales_overview/fabric",
             },
             {
                 "unit": "PRIVATE_DATASOURCE_CANARY",
@@ -128,8 +132,13 @@ def _status_observed():
                 ],
                 "package": None,
                 "current_certification": "NOT_CHECKED",
+                "id": None,
+                "name": "Orders",
+                "stage": "converted",
+                "working_package": "not-started",
             },
         ],
+        "scope_denominator": {"status": "established", "counts": {"workbooks": 1, "required_datasources": 1}},
         "unscoped_packages": [{"unit": "PRIVATE_UNSCOPED_CANARY", "relative_path": "packages/PRIVATE_UNSCOPED_CANARY"}],
         "recorded_phases": [
             {
@@ -161,142 +170,174 @@ def _status_observed():
             {"source": "bundle/phase-timings.json#phases[1]", "last_observed": {}, "failed": False},
         ],
         "locations": [{"path": r"C:\PRIVATE_HOST_CANARY\PRIVATE_TOOLKIT_CANARY"}],
-        "next_action": {"command": "PRIVATE_COMMAND_CANARY", "detail": "PRIVATE_PROSE_CANARY"},
+        "next_action": {
+            "kind": "command",
+            "command": 'python scripts/set_data_folder.py --package "C:\\synthetic\\_runs\\001-demo\\packages\\sales"',
+            "headline": "Bind the package data folder.",
+            "owner": "set_data_folder.py",
+            "gate": "data_binding",
+            "affected_units": ["sales_overview"],
+            "details": ["PRIVATE_PROSE_CANARY"],
+        },
+        "path_budget": {
+            "runs_parent": "C:\\synthetic\\_runs",
+            "root_kind": "external",
+            "unknown": 0,
+            "file": {"ceiling": 259, "longest": 120, "path": "packages/sales/fabric/x.tmdl", "remaining": 139},
+            "directory": {"ceiling": 247, "longest": 100, "path": "packages/sales/fabric", "remaining": 147},
+            "rerun": None,
+        },
         "path_report": {"projection_verdict": "PASS", "remaining_file_utf16": 999},
     }
 
 
-# Complete stdout bytes captured from approved base 5af09020 with these synthetic owner records.
+# Complete stdout bytes captured from approved base 5af09020 with these synthetic owner records;
+# status cases regenerated for #843 (additive t2p/v1 fields: unit columns, next, path budget).
 STATUS_FROZEN_JSON = {
     "status0": (
         b'{"artifacts": [], "authority": "run_status.py", "checks": [], "command": "status", "dele'
         b'gated_exit_code": 0, "evidence": [], "exit_code": 0, "limitations": ["last_observed_not_'
-        b'liveness", "customer_labels_withheld", "no_routing"], "observations": {"canonical_subdir'
-        b's": {"assessment": "present", "assets": "present", "bundle": "present", "deliverables": '
-        b'"missing", "oracle": "missing", "packages": "present", "scratch": "present"}, "child_evi'
-        b'dence": {"bundle/handover": "present", "bundle/pbip": "present", "bundle/phase-timings.j'
-        b'son": "recorded", "bundle/source-provenance.json": "recorded"}, "findings": [], "invento'
-        b'ry_scope": "established", "recorded_phases": [{"failed": true, "last_observed": {"elapse'
-        b'd_sec": 0.25, "errors": [{"code": "collect-inputs-failed", "operation": "collect-inputs"'
-        b'}, {"code": "unknown", "operation": "unknown"}], "exit_code": 1, "started_at": "2026-10-'
-        b'19T08:00:00+00:00", "status": "failed"}, "phase": "provenance", "source": "bundle/source'
-        b'-provenance.json"}, {"failed": false, "last_observed": {"elapsed_sec": 0.5, "exit_code":'
-        b' 0, "started_at": "2026-10-19T08:00:01+00:00", "status": "ok"}, "phase": "path_ceiling",'
-        b' "source": "bundle/phase-timings.json#phases[0]"}, {"failed": false, "last_observed": {}'
-        b', "phase": null, "source": "bundle/phase-timings.json#phases[1]"}], "run_recorded_status'
-        b'": "active", "units": [{"current_certification": "NOT_CHECKED", "generated_working_copy"'
-        b': "missing", "handover": "present", "kind": "workbook", "occurrences": [{"kind": "workbo'
-        b'ok", "status": "observed"}], "ordinal": 0, "package_count": 1, "scope": "scoped"}, {"cur'
-        b'rent_certification": "NOT_CHECKED", "generated_working_copy": "present", "handover": "no'
-        b't_applicable", "kind": "datasource", "occurrences": [{"kind": "datasource", "status": "o'
-        b'bserved"}, {"kind": "datasource", "status": "observed"}, {"kind": "datasource", "status"'
-        b': "present"}], "ordinal": 1, "package_count": 0, "scope": "working_copy_only"}], "unscop'
-        b'ed_package_count": 1}, "path_report": {"directory_ceiling_utf16": 247, "file_ceiling_utf'
-        b'16": 259, "initial_decision": "cannot_establish", "initial_reason": "unknown_until_harve'
-        b'st", "longest_directory_locator": {"reason": "not_recorded", "value": null}, "longest_di'
-        b'rectory_utf16": {"reason": "not_recorded", "value": null}, "longest_file_locator": {"rea'
-        b'son": "not_recorded", "value": null}, "longest_file_utf16": {"reason": "not_recorded", "'
-        b'value": null}, "owner": "run_estate.py", "projection_reason": "not_recorded", "projectio'
-        b'n_verdict": null, "remaining_directory_utf16": {"reason": "not_recorded", "value": null}'
-        b', "remaining_file_utf16": {"reason": "not_recorded", "value": null}, "rerun": {"argv": n'
-        b'ull, "authoritative": false, "reason": "arguments_not_recorded"}, "subst": {"reason": "n'
-        b'ot_derivable_read_only", "value": null}}, "proof_boundary": {"established": ["read_only_'
-        b'inventory"], "not_established": ["credential_validity", "source_reachability", "path_saf'
-        b'ety", "process_liveness", "START_READY", "fidelity", "COMPLETE", "deployability"]}, "run'
-        b'_location": {"commit_safety": null, "commit_safety_reason": "not_derivable_read_only", "'
-        b'git_visibility": null, "git_visibility_reason": "not_derivable_read_only", "physical_run'
-        b'": "C:\\\\synthetic\\\\_runs\\\\001-demo", "recorded_run": "C:\\\\synthetic\\\\_runs\\\\001-demo", "'
-        b'relationship": null, "relationship_reason": "not_derivable_read_only", "selected_run": "'
-        b'C:\\\\synthetic\\\\_runs\\\\001-demo"}, "run_location_reason": null, "runs_root": null, "schem'
-        b'a_version": "t2p/v1", "stages": [], "status": "ok"}\n'
+        b'liveness", "customer_labels_local_only"], "next": {"affected_units": ["sales_overview"],'
+        b' "command": "python scripts/set_data_folder.py --package \\"C:\\\\synthetic\\\\_runs\\\\001-dem'
+        b'o\\\\packages\\\\sales\\"", "gate": "data_binding", "headline": "Bind the package data folder'
+        b'.", "kind": "command", "owner": "set_data_folder.py"}, "observations": {"canonical_subdi'
+        b'rs": {"assessment": "present", "assets": "present", "bundle": "present", "deliverables":'
+        b' "missing", "oracle": "missing", "packages": "present", "scratch": "present"}, "child_ev'
+        b'idence": {"bundle/handover": "present", "bundle/pbip": "present", "bundle/phase-timings.'
+        b'json": "recorded", "bundle/source-provenance.json": "recorded"}, "findings": [], "invent'
+        b'ory_scope": "established", "recorded_phases": [{"failed": true, "last_observed": {"elaps'
+        b'ed_sec": 0.25, "errors": [{"code": "collect-inputs-failed", "operation": "collect-inputs'
+        b'"}, {"code": "unknown", "operation": "unknown"}], "exit_code": 1, "started_at": "2026-10'
+        b'-19T08:00:00+00:00", "status": "failed"}, "phase": "provenance", "source": "bundle/sourc'
+        b'e-provenance.json"}, {"failed": false, "last_observed": {"elapsed_sec": 0.5, "exit_code"'
+        b': 0, "started_at": "2026-10-19T08:00:01+00:00", "status": "ok"}, "phase": "path_ceiling"'
+        b', "source": "bundle/phase-timings.json#phases[0]"}, {"failed": false, "last_observed": {'
+        b'}, "phase": null, "source": "bundle/phase-timings.json#phases[1]"}], "run_recorded_statu'
+        b's": "active", "scope_denominator": {"counts": {"required_datasources": 1, "workbooks": 1'
+        b'}, "status": "established"}, "units": [{"current_certification": "NOT_CHECKED", "generat'
+        b'ed_working_copy": "missing", "handover": "present", "id": "u0001", "kind": "workbook", "'
+        b'name": "Sales Overview", "occurrences": [{"kind": "workbook", "status": "observed"}], "o'
+        b'rdinal": 0, "package_count": 1, "scope": "scoped", "stage": "packaged", "working_package'
+        b'": "packages/sales_overview/fabric"}, {"current_certification": "NOT_CHECKED", "generate'
+        b'd_working_copy": "present", "handover": "not_applicable", "id": null, "kind": "datasourc'
+        b'e", "name": "Orders", "occurrences": [{"kind": "datasource", "status": "observed"}, {"ki'
+        b'nd": "datasource", "status": "observed"}, {"kind": "datasource", "status": "present"}], '
+        b'"ordinal": 1, "package_count": 0, "scope": "working_copy_only", "stage": "converted", "w'
+        b'orking_package": "not-started"}], "unscoped_package_count": 1}, "path_report": {"directo'
+        b'ry_ceiling_utf16": 247, "file_ceiling_utf16": 259, "initial_decision": "cannot_establish'
+        b'", "initial_reason": "unknown_until_harvest", "longest_directory_locator": {"reason": nu'
+        b'll, "value": "packages/sales/fabric"}, "longest_directory_utf16": {"reason": null, "valu'
+        b'e": 100}, "longest_file_locator": {"reason": null, "value": "packages/sales/fabric/x.tmd'
+        b'l"}, "longest_file_utf16": {"reason": null, "value": 120}, "owner": "run_estate.py", "pr'
+        b'ojection_reason": "not_recorded", "projection_verdict": null, "remaining_directory_utf16'
+        b'": {"reason": null, "value": 147}, "remaining_file_utf16": {"reason": null, "value": 139'
+        b'}, "rerun": {"argv": null, "authoritative": false, "command": null, "reason": "within_ce'
+        b'ilings"}, "root_kind": "external", "runs_parent": "C:\\\\synthetic\\\\_runs", "subst": {"rea'
+        b'son": "not_derivable_read_only", "value": null}, "unknown_paths": 0}, "proof_boundary": '
+        b'{"established": ["read_only_inventory"], "not_established": ["credential_validity", "sou'
+        b'rce_reachability", "path_safety", "process_liveness", "START_READY", "fidelity", "COMPLE'
+        b'TE", "deployability"]}, "run_location": {"commit_safety": null, "commit_safety_reason": '
+        b'"not_derivable_read_only", "git_visibility": null, "git_visibility_reason": "not_derivab'
+        b'le_read_only", "physical_run": "C:\\\\synthetic\\\\_runs\\\\001-demo", "recorded_run": "C:\\\\sy'
+        b'nthetic\\\\_runs\\\\001-demo", "relationship": null, "relationship_reason": "not_derivable_r'
+        b'ead_only", "selected_run": "C:\\\\synthetic\\\\_runs\\\\001-demo"}, "run_location_reason": nul'
+        b'l, "runs_root": null, "schema_version": "t2p/v1", "stages": [], "status": "ok"}\n'
     ),
     "findings0": (
         b'{"artifacts": [], "authority": "run_status.py", "checks": [], "command": "status", "dele'
         b'gated_exit_code": 0, "evidence": [], "exit_code": 0, "limitations": ["last_observed_not_'
-        b'liveness", "customer_labels_withheld", "no_routing"], "observations": {"canonical_subdir'
-        b's": {"assessment": "present", "assets": "present", "bundle": "present", "deliverables": '
-        b'"missing", "oracle": "missing", "packages": "present", "scratch": "present"}, "child_evi'
-        b'dence": {"bundle/handover": "present", "bundle/pbip": "present", "bundle/phase-timings.j'
-        b'son": "recorded", "bundle/source-provenance.json": "recorded"}, "findings": [{"code": "U'
-        b'NSCOPED_PACKAGE", "reason": "preserve_and_inspect_association", "unassessable": false}, '
-        b'{"code": "UNSCOPED_HANDOVER", "reason": "preserve_and_inspect_identity", "unassessable":'
-        b' false}], "inventory_scope": "established", "recorded_phases": [{"failed": true, "last_o'
-        b'bserved": {"elapsed_sec": 0.25, "errors": [{"code": "collect-inputs-failed", "operation"'
-        b': "collect-inputs"}, {"code": "unknown", "operation": "unknown"}], "exit_code": 1, "star'
-        b'ted_at": "2026-10-19T08:00:00+00:00", "status": "failed"}, "phase": "provenance", "sourc'
-        b'e": "bundle/source-provenance.json"}, {"failed": false, "last_observed": {"elapsed_sec":'
-        b' 0.5, "exit_code": 0, "started_at": "2026-10-19T08:00:01+00:00", "status": "ok"}, "phase'
-        b'": "path_ceiling", "source": "bundle/phase-timings.json#phases[0]"}, {"failed": false, "'
-        b'last_observed": {}, "phase": null, "source": "bundle/phase-timings.json#phases[1]"}], "r'
-        b'un_recorded_status": "active", "units": [{"current_certification": "NOT_CHECKED", "gener'
-        b'ated_working_copy": "missing", "handover": "present", "kind": "workbook", "occurrences":'
-        b' [{"kind": "workbook", "status": "observed"}], "ordinal": 0, "package_count": 1, "scope"'
-        b': "scoped"}, {"current_certification": "NOT_CHECKED", "generated_working_copy": "present'
-        b'", "handover": "not_applicable", "kind": "datasource", "occurrences": [{"kind": "datasou'
-        b'rce", "status": "observed"}, {"kind": "datasource", "status": "observed"}, {"kind": "dat'
-        b'asource", "status": "present"}], "ordinal": 1, "package_count": 0, "scope": "working_cop'
-        b'y_only"}], "unscoped_package_count": 1}, "path_report": {"directory_ceiling_utf16": 247,'
-        b' "file_ceiling_utf16": 259, "initial_decision": "cannot_establish", "initial_reason": "u'
-        b'nknown_until_harvest", "longest_directory_locator": {"reason": "not_recorded", "value": '
-        b'null}, "longest_directory_utf16": {"reason": "not_recorded", "value": null}, "longest_fi'
-        b'le_locator": {"reason": "not_recorded", "value": null}, "longest_file_utf16": {"reason":'
-        b' "not_recorded", "value": null}, "owner": "run_estate.py", "projection_reason": "not_rec'
-        b'orded", "projection_verdict": null, "remaining_directory_utf16": {"reason": "not_recorde'
-        b'd", "value": null}, "remaining_file_utf16": {"reason": "not_recorded", "value": null}, "'
-        b'rerun": {"argv": null, "authoritative": false, "reason": "arguments_not_recorded"}, "sub'
-        b'st": {"reason": "not_derivable_read_only", "value": null}}, "proof_boundary": {"establis'
-        b'hed": ["read_only_inventory"], "not_established": ["credential_validity", "source_reacha'
-        b'bility", "path_safety", "process_liveness", "START_READY", "fidelity", "COMPLETE", "depl'
-        b'oyability"]}, "run_location": {"commit_safety": null, "commit_safety_reason": "not_deriv'
-        b'able_read_only", "git_visibility": null, "git_visibility_reason": "not_derivable_read_on'
-        b'ly", "physical_run": "C:\\\\synthetic\\\\_runs\\\\001-demo", "recorded_run": "C:\\\\synthetic\\\\_'
-        b'runs\\\\001-demo", "relationship": null, "relationship_reason": "not_derivable_read_only",'
-        b' "selected_run": "C:\\\\synthetic\\\\_runs\\\\001-demo"}, "run_location_reason": null, "runs_r'
-        b'oot": null, "schema_version": "t2p/v1", "stages": [], "status": "findings"}\n'
+        b'liveness", "customer_labels_local_only"], "next": {"affected_units": ["sales_overview"],'
+        b' "command": "python scripts/set_data_folder.py --package \\"C:\\\\synthetic\\\\_runs\\\\001-dem'
+        b'o\\\\packages\\\\sales\\"", "gate": "data_binding", "headline": "Bind the package data folder'
+        b'.", "kind": "command", "owner": "set_data_folder.py"}, "observations": {"canonical_subdi'
+        b'rs": {"assessment": "present", "assets": "present", "bundle": "present", "deliverables":'
+        b' "missing", "oracle": "missing", "packages": "present", "scratch": "present"}, "child_ev'
+        b'idence": {"bundle/handover": "present", "bundle/pbip": "present", "bundle/phase-timings.'
+        b'json": "recorded", "bundle/source-provenance.json": "recorded"}, "findings": [{"code": "'
+        b'UNSCOPED_PACKAGE", "reason": "preserve_and_inspect_association", "unassessable": false},'
+        b' {"code": "UNSCOPED_HANDOVER", "reason": "preserve_and_inspect_identity", "unassessable"'
+        b': false}], "inventory_scope": "established", "recorded_phases": [{"failed": true, "last_'
+        b'observed": {"elapsed_sec": 0.25, "errors": [{"code": "collect-inputs-failed", "operation'
+        b'": "collect-inputs"}, {"code": "unknown", "operation": "unknown"}], "exit_code": 1, "sta'
+        b'rted_at": "2026-10-19T08:00:00+00:00", "status": "failed"}, "phase": "provenance", "sour'
+        b'ce": "bundle/source-provenance.json"}, {"failed": false, "last_observed": {"elapsed_sec"'
+        b': 0.5, "exit_code": 0, "started_at": "2026-10-19T08:00:01+00:00", "status": "ok"}, "phas'
+        b'e": "path_ceiling", "source": "bundle/phase-timings.json#phases[0]"}, {"failed": false, '
+        b'"last_observed": {}, "phase": null, "source": "bundle/phase-timings.json#phases[1]"}], "'
+        b'run_recorded_status": "active", "scope_denominator": {"counts": {"required_datasources":'
+        b' 1, "workbooks": 1}, "status": "established"}, "units": [{"current_certification": "NOT_'
+        b'CHECKED", "generated_working_copy": "missing", "handover": "present", "id": "u0001", "ki'
+        b'nd": "workbook", "name": "Sales Overview", "occurrences": [{"kind": "workbook", "status"'
+        b': "observed"}], "ordinal": 0, "package_count": 1, "scope": "scoped", "stage": "packaged"'
+        b', "working_package": "packages/sales_overview/fabric"}, {"current_certification": "NOT_C'
+        b'HECKED", "generated_working_copy": "present", "handover": "not_applicable", "id": null, '
+        b'"kind": "datasource", "name": "Orders", "occurrences": [{"kind": "datasource", "status":'
+        b' "observed"}, {"kind": "datasource", "status": "observed"}, {"kind": "datasource", "stat'
+        b'us": "present"}], "ordinal": 1, "package_count": 0, "scope": "working_copy_only", "stage'
+        b'": "converted", "working_package": "not-started"}], "unscoped_package_count": 1}, "path_'
+        b'report": {"directory_ceiling_utf16": 247, "file_ceiling_utf16": 259, "initial_decision":'
+        b' "cannot_establish", "initial_reason": "unknown_until_harvest", "longest_directory_locat'
+        b'or": {"reason": null, "value": "packages/sales/fabric"}, "longest_directory_utf16": {"re'
+        b'ason": null, "value": 100}, "longest_file_locator": {"reason": null, "value": "packages/'
+        b'sales/fabric/x.tmdl"}, "longest_file_utf16": {"reason": null, "value": 120}, "owner": "r'
+        b'un_estate.py", "projection_reason": "not_recorded", "projection_verdict": null, "remaini'
+        b'ng_directory_utf16": {"reason": null, "value": 147}, "remaining_file_utf16": {"reason": '
+        b'null, "value": 139}, "rerun": {"argv": null, "authoritative": false, "command": null, "r'
+        b'eason": "within_ceilings"}, "root_kind": "external", "runs_parent": "C:\\\\synthetic\\\\_run'
+        b's", "subst": {"reason": "not_derivable_read_only", "value": null}, "unknown_paths": 0}, '
+        b'"proof_boundary": {"established": ["read_only_inventory"], "not_established": ["credenti'
+        b'al_validity", "source_reachability", "path_safety", "process_liveness", "START_READY", "'
+        b'fidelity", "COMPLETE", "deployability"]}, "run_location": {"commit_safety": null, "commi'
+        b't_safety_reason": "not_derivable_read_only", "git_visibility": null, "git_visibility_rea'
+        b'son": "not_derivable_read_only", "physical_run": "C:\\\\synthetic\\\\_runs\\\\001-demo", "reco'
+        b'rded_run": "C:\\\\synthetic\\\\_runs\\\\001-demo", "relationship": null, "relationship_reason"'
+        b': "not_derivable_read_only", "selected_run": "C:\\\\synthetic\\\\_runs\\\\001-demo"}, "run_loc'
+        b'ation_reason": null, "runs_root": null, "schema_version": "t2p/v1", "stages": [], "statu'
+        b's": "findings"}\n'
     ),
     "native1": (
         b'{"artifacts": [], "authority": "run_status.py", "checks": [], "command": "status", "dele'
         b'gated_exit_code": 1, "evidence": [], "exit_code": 1, "limitations": ["last_observed_not_'
-        b'liveness", "customer_labels_withheld", "no_routing"], "observations": {"canonical_subdir'
-        b's": null, "child_evidence": null, "findings": [{"code": "UNASSESSABLE_EVIDENCE", "reason'
-        b'": "run_location_unestablished", "unassessable": true}], "inventory_scope": null, "recor'
-        b'ded_phases": [], "run_recorded_status": null, "units": [], "unscoped_package_count": 0},'
-        b' "path_report": {"directory_ceiling_utf16": 247, "file_ceiling_utf16": 259, "initial_dec'
-        b'ision": "cannot_establish", "initial_reason": "unknown_until_harvest", "longest_director'
-        b'y_locator": {"reason": "not_recorded", "value": null}, "longest_directory_utf16": {"reas'
-        b'on": "not_recorded", "value": null}, "longest_file_locator": {"reason": "not_recorded", '
-        b'"value": null}, "longest_file_utf16": {"reason": "not_recorded", "value": null}, "owner"'
-        b': "run_estate.py", "projection_reason": "not_recorded", "projection_verdict": null, "rem'
-        b'aining_directory_utf16": {"reason": "not_recorded", "value": null}, "remaining_file_utf1'
-        b'6": {"reason": "not_recorded", "value": null}, "rerun": {"argv": null, "authoritative": '
-        b'false, "reason": "arguments_not_recorded"}, "subst": {"reason": "not_derivable_read_only'
-        b'", "value": null}}, "proof_boundary": {"established": ["read_only_inventory"], "not_esta'
-        b'blished": ["credential_validity", "source_reachability", "path_safety", "process_livenes'
-        b's", "START_READY", "fidelity", "COMPLETE", "deployability"]}, "run_location": null, "run'
-        b'_location_reason": "identity_unestablished", "runs_root": null, "schema_version": "t2p/v'
-        b'1", "stages": [], "status": "cannot_establish"}\n'
+        b'liveness", "customer_labels_local_only"], "next": null, "observations": {"canonical_subd'
+        b'irs": null, "child_evidence": null, "findings": [{"code": "UNASSESSABLE_EVIDENCE", "reas'
+        b'on": "run_location_unestablished", "unassessable": true}], "inventory_scope": null, "rec'
+        b'orded_phases": [], "run_recorded_status": null, "scope_denominator": null, "units": [], '
+        b'"unscoped_package_count": 0}, "path_report": {"directory_ceiling_utf16": 247, "file_ceil'
+        b'ing_utf16": 259, "initial_decision": "cannot_establish", "initial_reason": "unknown_unti'
+        b'l_harvest", "longest_directory_locator": {"reason": "not_recorded", "value": null}, "lon'
+        b'gest_directory_utf16": {"reason": "not_recorded", "value": null}, "longest_file_locator"'
+        b': {"reason": "not_recorded", "value": null}, "longest_file_utf16": {"reason": "not_recor'
+        b'ded", "value": null}, "owner": "run_estate.py", "projection_reason": "not_recorded", "pr'
+        b'ojection_verdict": null, "remaining_directory_utf16": {"reason": "not_recorded", "value"'
+        b': null}, "remaining_file_utf16": {"reason": "not_recorded", "value": null}, "rerun": {"a'
+        b'rgv": null, "authoritative": false, "reason": "arguments_not_recorded"}, "subst": {"reas'
+        b'on": "not_derivable_read_only", "value": null}}, "proof_boundary": {"established": ["rea'
+        b'd_only_inventory"], "not_established": ["credential_validity", "source_reachability", "p'
+        b'ath_safety", "process_liveness", "START_READY", "fidelity", "COMPLETE", "deployability"]'
+        b'}, "run_location": null, "run_location_reason": "identity_unestablished", "runs_root": n'
+        b'ull, "schema_version": "t2p/v1", "stages": [], "status": "cannot_establish"}\n'
     ),
     "native2": (
         b'{"artifacts": [], "authority": "run_status.py", "checks": [], "command": "status", "dele'
         b'gated_exit_code": 2, "evidence": [], "exit_code": 2, "limitations": ["last_observed_not_'
-        b'liveness", "customer_labels_withheld", "no_routing"], "observations": {"canonical_subdir'
-        b's": null, "child_evidence": null, "findings": [{"code": "UNASSESSABLE_EVIDENCE", "reason'
-        b'": "run_location_unestablished", "unassessable": true}], "inventory_scope": null, "recor'
-        b'ded_phases": [], "run_recorded_status": null, "units": [], "unscoped_package_count": 0},'
-        b' "path_report": {"directory_ceiling_utf16": 247, "file_ceiling_utf16": 259, "initial_dec'
-        b'ision": "cannot_establish", "initial_reason": "unknown_until_harvest", "longest_director'
-        b'y_locator": {"reason": "not_recorded", "value": null}, "longest_directory_utf16": {"reas'
-        b'on": "not_recorded", "value": null}, "longest_file_locator": {"reason": "not_recorded", '
-        b'"value": null}, "longest_file_utf16": {"reason": "not_recorded", "value": null}, "owner"'
-        b': "run_estate.py", "projection_reason": "not_recorded", "projection_verdict": null, "rem'
-        b'aining_directory_utf16": {"reason": "not_recorded", "value": null}, "remaining_file_utf1'
-        b'6": {"reason": "not_recorded", "value": null}, "rerun": {"argv": null, "authoritative": '
-        b'false, "reason": "arguments_not_recorded"}, "subst": {"reason": "not_derivable_read_only'
-        b'", "value": null}}, "proof_boundary": {"established": ["read_only_inventory"], "not_esta'
-        b'blished": ["credential_validity", "source_reachability", "path_safety", "process_livenes'
-        b's", "START_READY", "fidelity", "COMPLETE", "deployability"]}, "run_location": null, "run'
-        b'_location_reason": "identity_unestablished", "runs_root": null, "schema_version": "t2p/v'
-        b'1", "stages": [], "status": "cannot_establish"}\n'
+        b'liveness", "customer_labels_local_only"], "next": null, "observations": {"canonical_subd'
+        b'irs": null, "child_evidence": null, "findings": [{"code": "UNASSESSABLE_EVIDENCE", "reas'
+        b'on": "run_location_unestablished", "unassessable": true}], "inventory_scope": null, "rec'
+        b'orded_phases": [], "run_recorded_status": null, "scope_denominator": null, "units": [], '
+        b'"unscoped_package_count": 0}, "path_report": {"directory_ceiling_utf16": 247, "file_ceil'
+        b'ing_utf16": 259, "initial_decision": "cannot_establish", "initial_reason": "unknown_unti'
+        b'l_harvest", "longest_directory_locator": {"reason": "not_recorded", "value": null}, "lon'
+        b'gest_directory_utf16": {"reason": "not_recorded", "value": null}, "longest_file_locator"'
+        b': {"reason": "not_recorded", "value": null}, "longest_file_utf16": {"reason": "not_recor'
+        b'ded", "value": null}, "owner": "run_estate.py", "projection_reason": "not_recorded", "pr'
+        b'ojection_verdict": null, "remaining_directory_utf16": {"reason": "not_recorded", "value"'
+        b': null}, "remaining_file_utf16": {"reason": "not_recorded", "value": null}, "rerun": {"a'
+        b'rgv": null, "authoritative": false, "reason": "arguments_not_recorded"}, "subst": {"reas'
+        b'on": "not_derivable_read_only", "value": null}}, "proof_boundary": {"established": ["rea'
+        b'd_only_inventory"], "not_established": ["credential_validity", "source_reachability", "p'
+        b'ath_safety", "process_liveness", "START_READY", "fidelity", "COMPLETE", "deployability"]'
+        b'}, "run_location": null, "run_location_reason": "identity_unestablished", "runs_root": n'
+        b'ull, "schema_version": "t2p/v1", "stages": [], "status": "cannot_establish"}\n'
     ),
     "syntax": (
         b'{"artifacts": [], "authority": null, "checks": [], "command": "status", "delegated_exit_'
@@ -740,7 +781,11 @@ def test_status_readonly_and_owner_parity(monkeypatch, tmp_path, capsys, damage,
             result, _captured_output = _json(capsys)
             assert result["delegated_exit_code"] == expected
             assert len(result["observations"]["findings"]) == len(direct["findings"])
-            assert "next_action" not in json.dumps(result), "status must not route or suggest"
+            assert "next_action" not in json.dumps(result), "status exposes the owner's next only as `next`"
+            assert result["next"] == {
+                key: direct["next_action"][key]
+                for key in ("kind", "command", "headline", "owner", "gate", "affected_units")
+            }, "status must carry the owner's structured next step"
             assert result["path_report"]["projection_verdict"] is None
             if damage:
                 assert result["status"] == "cannot_establish"
@@ -748,7 +793,8 @@ def test_status_readonly_and_owner_parity(monkeypatch, tmp_path, capsys, damage,
         else:
             _captured_output = capsys.readouterr()
             assert _captured_output.out.startswith("STATUS ")
-            assert "next_action" not in _captured_output.out, "status must not route or suggest"
+            assert "next_action" not in _captured_output.out, "status exposes the owner's next only as `next`"
+            assert "\nBlocked by: " + direct["next_action"]["gate"] in _captured_output.out
             if damage:
                 assert "\nRun: " not in _captured_output.out
         assert _captured_output.err == ""
@@ -903,24 +949,33 @@ def test_doctor_valid_default_and_optional_absence(monkeypatch, tmp_path, capsys
             assert row["remedy"] == "none", "optional missing keys must not prescribe repair"
 
 
+def _label_locations(value, path=""):
+    """Every (json-path, string) leaf, so a label can be pinned to the fields allowed to carry it."""
+    if isinstance(value, dict):
+        return [hit for key, item in value.items() for hit in _label_locations(item, f"{path}/{key}")]
+    if isinstance(value, list):
+        return [hit for index, item in enumerate(value) for hit in _label_locations(item, f"{path}/{index}")]
+    return [(path, value)] if isinstance(value, str) else []
+
+
 @pytest.mark.parametrize("json_mode", [False, True])
-def test_status_customer_labels_are_withheld(monkeypatch, tmp_path, capsys, json_mode):
+def test_status_customer_labels_stay_in_their_fields(monkeypatch, tmp_path, capsys, json_mode):
+    """Local names, package locators and the owner's command are shown; nothing else leaks."""
     import run_status
 
-    labels = [
-        "PRIVATE_UNIT_CANARY_73",
-        "PRIVATE_FINDING_CANARY_84",
-        "PRIVATE_PACKAGE_CANARY_95",
+    unit, engine, package = "PRIVATE_UNIT_CANARY_73", "PRIVATE_ENGINE_CANARY_61", "PRIVATE_PACKAGE_CANARY_95"
+    env, project, finding = "PRIVATE_ENV_CANARY", "PRIVATE_PROJECT_CANARY", "PRIVATE_FINDING_CANARY_84"
+    absent = [
+        finding,
         "PRIVATE_TOOLKIT_CANARY",
-        "PRIVATE_ENV_CANARY",
         "PRIVATE_PROFILE_CANARY",
         "PRIVATE_HOST_CANARY",
-        "PRIVATE_COMMAND_CANARY",
         "PRIVATE_SERVER_CANARY",
         "PRIVATE_SITE_CANARY",
-        "PRIVATE_PROJECT_CANARY",
+        "PRIVATE_PROSE_CANARY",
     ]
-    unit, finding, package = labels[:3]
+    rerun = f'python -B scripts\\start_migration.py --env "C:\\{env}.env" --runs-parent C:\\t2p --project {project}'
+    command = f'python scripts/set_data_folder.py --package "C:\\runs\\001\\packages\\{package}"'
     observed = {
         "run_location": {"state": "intact"},
         "findings": [
@@ -934,36 +989,81 @@ def test_status_customer_labels_are_withheld(monkeypatch, tmp_path, capsys, json
         ],
         "units": [
             {
-                "unit": unit,
+                "unit": engine,
+                "id": "u0001",
+                "name": unit + "\x1b[31m\nFORGED_LINE",
+                "stage": "packaged",
+                "working_package": f"packages/{package}/fabric",
                 "kind": "workbook",
                 "scope": "scoped",
                 "generated_working_copy": "present",
                 "handover": "present",
-                "occurrences": [{"unit": unit, "source": f"bundle/{unit}", "kind": "workbook", "status": "observed"}],
-                "package": {"unit": package, "relative_path": f"packages/{package}"},
+                "occurrences": [
+                    {"unit": engine, "source": f"bundle/{engine}", "kind": "workbook", "status": "observed"}
+                ],
+                "package": {"unit": engine, "relative_path": f"packages/{package}"},
                 "current_certification": "NOT_CHECKED",
             }
         ],
         "unscoped_packages": [{"unit": package, "relative_path": f"packages/{package}"}],
-        "locations": [{"path": f"C:\\{label}\x1b[31m\nFORGED_LINE"} for label in labels[3:]],
-        "next_action": {"command": "PRIVATE_COMMAND_CANARY\x1b[31m\nFORGED_LINE"},
-        "environment": "PRIVATE_ENV_CANARY",
+        "locations": [{"path": f"C:\\{label}\x1b[31m\nFORGED_LINE"} for label in absent[1:]],
+        "next_action": {
+            "kind": "command",
+            "command": command,
+            "headline": "Bind the data folder.",
+            "owner": "set_data_folder.py",
+            "gate": "data_binding",
+            "affected_units": [engine],
+            "details": ["PRIVATE_PROSE_CANARY"],
+        },
+        "path_budget": {
+            "runs_parent": "C:\\runs",
+            "root_kind": "external",
+            "unknown": 0,
+            "file": {"ceiling": 259, "longest": None, "path": None, "remaining": None},
+            "directory": {"ceiling": 247, "longest": None, "path": None, "remaining": None},
+            "rerun": {"command": rerun, "runs_parent": "C:\\t2p", "authoritative": True},
+        },
+        "environment": env,
         "profile": "PRIVATE_PROFILE_CANARY",
     }
     monkeypatch.setattr(run_status, "build_status", lambda _run: (observed, 0))
     assert t2p.main(["status", "--run", str(tmp_path), *(["--json"] if json_mode else [])]) == 0
     captured = capsys.readouterr()
-    for label in labels:
-        assert label not in captured.out + captured.err, f"status leaked customer label: {label}"
-    assert "\x1b" not in captured.out + captured.err and "FORGED_LINE" not in captured.out + captured.err
+    output = captured.out + captured.err
+    for label in absent:
+        assert label not in output, f"status leaked customer label: {label}"
+    assert "\x1b" not in output and not any(line.startswith("FORGED_LINE") for line in output.splitlines()), (
+        "a local name must not control the terminal or forge a line"
+    )
     assert captured.err == ""
     if json_mode:
         result = json.loads(captured.out)
         jsonschema.validate(result, t2p.ENVELOPE_SCHEMA)
-        assert len(result["observations"]["units"]) == len(result["observations"]["findings"]) == 1
+        hits = _label_locations(result)
+        allowed = {
+            unit: {"/observations/units/0/name"},
+            package: {"/observations/units/0/working_package", "/next/command"},
+            engine: {"/next/affected_units/0"},
+            env: {"/path_report/rerun/command"},
+            project: {"/path_report/rerun/command"},
+        }
+        for label, paths in allowed.items():
+            assert {path for path, text in hits if label in text} == paths, f"{label} escaped its field"
+        assert result["next"]["command"] == command
         assert result["observations"]["unscoped_package_count"] == 1
     else:
-        assert captured.out.startswith("STATUS findings (exit 0)")
+        assert engine not in captured.out, f"status leaked customer label: {engine}"
+        rows = captured.out.splitlines()
+        allowed = {
+            unit: ("  u0001 workbook ",),
+            package: ("  u0001 workbook ", "Next: "),
+            env: ("  Rerun: ",),
+            project: ("  Rerun: ",),
+        }
+        for label, prefixes in allowed.items():
+            assert all(row.startswith(prefixes) for row in rows if label in row), f"{label} escaped its field"
+            assert any(label in row for row in rows), f"{label} must be shown locally"
         assert str(tmp_path) in captured.out
         assert "Unscoped packages: 1" in captured.out
 
@@ -1038,6 +1138,22 @@ def test_status_native_envelopes(monkeypatch, capsys, case, json_mode):
 def test_status_human_preserves_every_observation(monkeypatch, capsys, order):
     """Ordered anonymous units, duplicate occurrences and run-level findings remain independent."""
     observed = _status_observed()
+    observed["units"].append(
+        {
+            "unit": "PRIVATE_PLANNED_CANARY",
+            "kind": "workbook",
+            "scope": "scoped",
+            "generated_working_copy": "missing",
+            "handover": "missing",
+            "occurrences": [],
+            "package": None,
+            "current_certification": "NOT_CHECKED",
+            "id": None,
+            "name": "Planned",
+            "stage": "not_started",
+            "working_package": "not-started",
+        }
+    )
     if order == "units":
         observed["units"].reverse()
         for unit in observed["units"]:
@@ -1053,27 +1169,31 @@ def test_status_human_preserves_every_observation(monkeypatch, capsys, order):
         "human status must render inspection headings, not pretty JSON"
     )
     assert "Now: inventory scope=established; 2 observed units (not the commissioned denominator)." in captured.out
-    assert "ephemeral zero-based ordinals; not durable IDs" in captured.out
+    assert "Units (ID or -, kind, name, stage, working package):" in captured.out
     assert "Recorded allocation status: active (metadata only; not process liveness)" in captured.out
-    assert "Inventory scope: established" in captured.out
+    assert "Inventory scope: established\nScope denominator: established; workbooks=1; required_datasources=1\n" in (
+        captured.out
+    ), "the sealed scope denominator is shown in text, not only in --json"
     assert "Unscoped packages: 1" in captured.out
     assert captured.err == ""
     expected = []
-    for index, unit in enumerate(observed["units"]):
+    for unit in observed["units"]:
         expected.append(
-            f"  [{index}] {unit['kind']}/{unit['scope']}; working-copy={unit['generated_working_copy']}; "
+            f"  {unit['id'] or '-'} {unit['kind']} {json.dumps(unit['name'])}; stage={unit['stage']}; "
+            f"working-package={unit['working_package']}; scope={unit['scope']}; "
+            f"working-copy={unit['generated_working_copy']}; "
             f"handover={unit['handover']}; packages={int(unit['package'] is not None)}; certification=NOT_CHECKED"
         )
         expected.extend(
             f"    occurrence[{number}] kind={item['kind']} status={item['status']}"
             for number, item in enumerate(unit["occurrences"])
         )
-    assert captured.out.split("Units (ephemeral zero-based ordinals; not durable IDs):\n")[1].split("Findings")[0] == (
+    assert captured.out.split("Units (ID or -, kind, name, stage, working package):\n")[1].split("Findings")[0] == (
         "\n".join(expected) + "\n"
     ), "every ordered unit and occurrence, including duplicates, must survive"
-    assert captured.out.split("Findings (run-level; not associated with unit ordinals):\n")[1].split(
-        "Unscoped packages:"
-    )[0] == "".join(
+    assert captured.out.split("Findings (run-level; not associated with units):\n")[1].split("Unscoped packages:")[
+        0
+    ] == "".join(
         f"  [{index}] code={row['code']} reason={row['reason']} unassessable=false (run-level)\n"
         for index, row in enumerate(observed["findings"])
     ), "findings stay ordered at run level, never positionally joined to units"
@@ -1092,12 +1212,14 @@ def test_status_human_preserves_every_observation(monkeypatch, capsys, order):
             )
             + " - historical only, not a current check."
         ) in captured.out, "every safe phase field and ordered nested error record is historical only"
-    assert [line for line in captured.out.splitlines() if line.startswith(("Paths:", "Unavailable here:"))] == [
-        "Paths: NOT CHECKED; current longest/remaining budgets not recorded; "
-        "ceilings file=259, directory=247 UTF-16 code units.",
-        "Unavailable here: original intent/revision; named/openable artifact; full commissioned denominator; "
-        "recorded parent/root/repo/git/commit state; authoritative rerun; subst.",
-    ], "unknown authorities stay condensed and never become current path measurements"
+    assert captured.out.split("Paths: ")[1].splitlines() == [
+        r"runs-parent=C:\synthetic\_runs root=external; unmeasured=0",
+        "  longest file=120 of 259; remaining=139; path=packages/sales/fabric/x.tmdl",
+        "  longest directory=100 of 247; remaining=147; path=packages/sales/fabric",
+        r'Next: python scripts/set_data_folder.py --package "C:\synthetic\_runs\001-demo\packages\sales"',
+        "Blocked by: data_binding (owner set_data_folder.py; kind command)",
+        "Unavailable here: original intent/revision; openability; recorded parent/root/repo/git/commit state; subst.",
+    ], "the owner's path budget and next command are shown, and nothing beyond them is claimed"
 
 
 @pytest.mark.parametrize(
@@ -1126,7 +1248,7 @@ def test_status_inspection_never_certifies_handoff(monkeypatch, capsys, state):
         else "Need: inspect missing/unassessable/finding observations; cause and required "
         "operator/lifecycle decision unknown." in captured.out
     ), "Need is only the fixed inspection rule, not a lifecycle or credential classifier"
-    assert "Paths: NOT CHECKED; current longest/remaining budgets not recorded" in captured.out
+    assert "Paths: runs-parent=" in captured.out and "Next: python scripts/set_data_folder.py" in captured.out
     assert "ASSEMBLED" not in captured.out and "BOUND" not in captured.out and "PASS" not in captured.out
     assert "remaining_file_utf16" not in captured.out and "999" not in captured.out
     assert captured.err == ""
@@ -1386,7 +1508,7 @@ def test_status_presentation_has_no_extra_io(monkeypatch, tmp_path, capsys, json
             'result["authority"] = "run_status.py"',
             'result["authority"] = "run_status.py"\n    result["next_action"] = "mutant"',
             "test_status_readonly_and_owner_parity",
-            "status must not route or suggest",
+            "status exposes the owner's next only as `next`",
         ),
         (
             "start_migration.py",
@@ -1413,8 +1535,8 @@ def test_status_presentation_has_no_extra_io(monkeypatch, tmp_path, capsys, json
             "t2p.py",
             '"ordinal": index,',
             '"ordinal": index, "unit": row["unit"],',
-            "test_status_customer_labels_are_withheld",
-            "status leaked customer label: PRIVATE_UNIT_CANARY_73",
+            "test_status_customer_labels_stay_in_their_fields",
+            "PRIVATE_ENGINE_CANARY_61 escaped its field",
         ),
         pytest.param(
             "t2p.py",
@@ -1428,8 +1550,8 @@ def test_status_presentation_has_no_extra_io(monkeypatch, tmp_path, capsys, json
             "t2p.py",
             '"kind": row["kind"],\n                "scope": row["scope"],',
             '"kind": row["unit"],\n                "scope": row["scope"],',
-            "test_status_customer_labels_are_withheld[False]",
-            "status leaked customer label: PRIVATE_UNIT_CANARY_73",
+            "test_status_customer_labels_stay_in_their_fields[False]",
+            "status leaked customer label: PRIVATE_ENGINE_CANARY_61",
             id="status-private-unit",
         ),
         pytest.param(

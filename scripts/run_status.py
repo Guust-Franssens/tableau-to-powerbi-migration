@@ -13,6 +13,7 @@ from __future__ import annotations
 # pylint: disable=too-many-return-statements,too-many-locals,too-many-branches
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -24,9 +25,12 @@ from datetime import datetime, timezone
 from pathlib import Path, PureWindowsPath
 from typing import Any
 
+import check_path_ceiling as ceiling
 import package_filesystem as pfs
 import stamp_tableau_provenance as prov
+import unit_ids
 from bundle_corpus import PACKAGE_MARKER, classify_target, is_reparse_entry
+from migration_bundle import ENGINE_RECEIPT
 from work_dirs import CANONICAL_SUBDIRS, REPO_ROOT, RUN_LOCATION_INTACT, check_run_location
 
 PACKAGE_SEARCH_DEPTH = 3  # Flat packages and the retained batch layouts; never an estate crawler.
@@ -169,7 +173,7 @@ class PackageObservation:
 
 @dataclass
 class UnitStatus:
-    unit: str
+    unit: str | None
     kind: str
     scope: str = "scoped"
     occurrences: list[Occurrence] = field(default_factory=list)
@@ -178,6 +182,10 @@ class UnitStatus:
     handover_sources: list[str] = field(default_factory=list)
     package: PackageObservation | None = None
     current_certification: str = CERTIFICATION_NOT_CHECKED
+    id: str | None = None  # pylint: disable=invalid-name
+    name: str | None = None
+    stage: str = "reported"
+    working_package: str = "not-started"
 
 
 def _problem(findings: list[Finding], source: str, reason: str, unit: str | None = None) -> None:
@@ -795,6 +803,140 @@ def _recorded_phases(run: Path, findings: list[Finding]) -> tuple[dict[str, str]
     return evidence, records
 
 
+def _scope_bridge(bundle: Path, units: list[UnitStatus], findings: list[Finding]) -> dict[str, Any] | None:
+    """Original names from the receipt-sealed scope bridge; the engine identity stays the join key."""
+    manifest, reason = _strict_json_file(bundle / "input_manifest.json")
+    bridge = manifest.get("scope_bridge") if reason is None else None
+    if not isinstance(bridge, dict):
+        return None
+    receipt, _reason = _strict_json_file(bundle / ENGINE_RECEIPT)
+    try:
+        digest = hashlib.sha256((bundle / "input_manifest.json").read_bytes()).hexdigest()
+    except OSError:
+        digest = None
+    if digest is None or not isinstance(receipt, dict) or receipt.get("input_manifest_sha256") != digest:
+        findings.append(Finding("SCOPE_BRIDGE_UNSEALED", "bundle/input_manifest.json", "names_not_used"))
+        return None
+    status = bridge.get("denominator_status")
+    counts = bridge.get("counts") if isinstance(bridge.get("counts"), dict) else {}
+    denominator = {
+        "status": status if status in {"established", "cannot_establish"} else "unknown",
+        "counts": {
+            key: value for key, value in counts.items() if isinstance(value, int) and not isinstance(value, bool)
+        },
+    }
+    if status != "established":
+        return denominator
+    report, _reason = _strict_json_file(bundle / "report.json")
+    rows = {(unit.kind, unit.unit): unit for unit in units}
+    for occurrence in bridge.get("occurrences") or []:
+        if not isinstance(occurrence, dict) or occurrence.get("kind") not in KNOWN_KINDS:
+            continue
+        display = occurrence.get("display")
+        name = display.get("name") if isinstance(display, dict) else None
+        if not isinstance(name, str):
+            continue
+        match = occurrence.get("match")
+        if occurrence.get("status") == "established" and isinstance(match, dict) and isinstance(report, dict):
+            collection, index = report.get(match.get("report_collection")), match.get("report_index")
+            if (
+                isinstance(collection, list)
+                and isinstance(index, int)
+                and not isinstance(index, bool)
+                and 0 <= index < len(collection)
+            ):
+                engine = collection[index].get("name") if isinstance(collection[index], dict) else None
+                if (occurrence["kind"], engine) in rows:
+                    rows[occurrence["kind"], engine].name = name
+        elif not bridge.get("issues"):
+            units.append(UnitStatus(None, occurrence["kind"], name=name, stage="not_started"))
+    return denominator
+
+
+def _unit_columns(run: Path, units: list[UnitStatus], findings: list[Finding]) -> None:
+    try:
+        index = unit_ids.read_unit_index(run) or []
+    except unit_ids.UnitIndexInvalid as exc:
+        findings.append(Finding("UNIT_INDEX_INVALID", unit_ids.INDEX_FILE_NAME, exc.reason))
+        index = []
+    allocated = {(entry["source"]["kind"], entry["id"]) for entry in index}
+    for unit in units:
+        if unit.unit is None:
+            continue
+        unit.id = unit.unit if (unit.kind, unit.unit) in allocated else None
+        unit.name = unit.name or unit.unit
+        if unit.package is not None:
+            unit.stage = "packaged"
+            unit.working_package = f"{unit.package.relative_path}/{PACKAGE_EDIT_SUBDIR}"
+        elif unit.generated_working_copy == "present":
+            unit.stage = "converted"
+
+
+def _path_budget(run: Path, states: dict[str, str]) -> dict[str, Any]:
+    """Longest live path per kind under bundle/ and packages/; a pure directory walk."""
+    longest: dict[str, dict[str, Any]] = {}
+    unknown = 0
+    for name in ("bundle", "packages"):
+        if states.get(name) != "present":
+            continue
+        measured, missing = ceiling.collect(run / name)
+        unknown += len(missing)
+        for record in measured:
+            best = longest.get(record["kind"])
+            if best is None or record["length"] > best["length"]:
+                longest[record["kind"]] = record
+    repo_runs = [os.path.normcase(part) for part in (TOOLKIT_ROOT / "_runs").parts]
+    budget: dict[str, Any] = {
+        "runs_parent": _printable(run.parent),
+        "root_kind": (
+            "repo_local" if [os.path.normcase(part) for part in run.parent.parts] == repo_runs else "external"
+        ),
+        "unknown": unknown,
+    }
+    for kind, limit in ((ceiling.KIND_FILE, ceiling.FILE_CEILING), (ceiling.KIND_DIR, ceiling.DIR_CEILING)):
+        record = longest.get(kind)
+        budget[kind] = {
+            "ceiling": limit,
+            "longest": None if record is None else record["length"],
+            "path": None if record is None else Path(record["path"]).relative_to(run).as_posix(),
+            "remaining": None if record is None else limit - record["length"],
+        }
+    return budget
+
+
+def _rerun(manifest: dict[str, Any]) -> dict[str, Any]:
+    """The front door's own rerun command, rebuilt from the run's recorded selection."""
+    import start_migration  # pylint: disable=import-outside-toplevel
+
+    scope = manifest.get("scope") if isinstance(manifest.get("scope"), dict) else {}
+    selection = scope.get("selection") if isinstance(scope.get("selection"), dict) else {}
+    front = manifest.get("front_door")
+    recorded = isinstance(front, dict) and isinstance(front.get("env"), str)
+    attribution = manifest.get("attribution") if isinstance(manifest.get("attribution"), dict) else {}
+
+    def text(value: Any) -> str | None:
+        return value if isinstance(value, str) and value else None
+
+    args = argparse.Namespace(
+        project=text(selection.get("project")),
+        workbook=text(selection.get("workbook")),
+        storage_decision=text(front.get("storage_decision")) if recorded else None,
+        session_id=text(attribution.get("session_id")),
+    )
+    env = Path(front["env"]) if recorded else start_migration.build_parser().get_default("env")
+    rerun: dict[str, Any] = {
+        "command": start_migration._front_door_command(  # pylint: disable=protected-access
+            args, env, start_migration.SHORT_RUNS_PARENT
+        ),
+        "runs_parent": str(start_migration.SHORT_RUNS_PARENT),
+        "authoritative": recorded,
+    }
+    if not recorded:
+        rerun["reason"] = "env_and_storage_decision_not_recorded"
+        rerun["note"] = "This run did not record its env file or storage decision; check both before rerunning."
+    return rerun
+
+
 def _next_action(  # pylint: disable=too-many-arguments
     run_ok: bool,
     report_scope: str,
@@ -803,22 +945,36 @@ def _next_action(  # pylint: disable=too-many-arguments
     failures: list[dict[str, Any]],
     *,
     findings: list[Finding],
+    run: Path | None = None,
+    rerun: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    affected = sorted({unit.unit for unit in units} | {package.unit or package.relative_path for package in packages})
+    affected = sorted(
+        {unit.unit for unit in units if unit.unit is not None}
+        | {package.unit or package.relative_path for package in packages}
+    )
     details: list[Any] = []
+    command = None
     if not run_ok:
         headline = "Confirm the explicitly selected local run; child evidence was not read."
+        kind, owner, gate = "human", "work_dirs.py", "run_location"
     elif any(finding.unassessable for finding in findings):
         headline = "Inspect unassessable evidence in place; preserve retained work before deciding what to do."
         details = [asdict(finding) for finding in findings if finding.unassessable]
+        kind, owner, gate = "human", "run_status.py", "evidence_unassessable"
+    elif failures and rerun is not None and any(failure.get("phase") == "path_ceiling" for failure in failures):
+        headline = "Rerun the front door under the short runs parent in a new run; the old run is retained."
+        details = failures
+        kind, command, owner, gate = "command", rerun["command"], "run_estate.py", "path_ceiling"
     elif failures:
         headline = "Inspect the recorded failed phase; preserve retained work."
         details = failures
+        kind, owner, gate = "human", "run_estate.py", str(failures[0].get("phase"))
     elif any(package.scope == "UNSCOPED_PACKAGE" for package in packages):
         headline = (
             "Preserve package-only or ambiguous package work and inspect its exact identity before associating it."
         )
         details = [asdict(package) for package in packages if package.scope == "UNSCOPED_PACKAGE"]
+        kind, owner, gate = "human", "package_unit.py", "package_association"
     elif any(package.integrity_status != "clean" for package in packages):
         headline = "Inspect retained package changes against the recorded manifest; keep the existing bytes and hashes."
         details = [
@@ -826,9 +982,14 @@ def _next_action(  # pylint: disable=too-many-arguments
             for package in packages
             if package.integrity_codes
         ]
+        kind, owner, gate = "human", "package_unit.py", "package_integrity"
     elif any(package.binding_state == "unbound" for package in packages):
         headline = "Bind the retained package with `python scripts/set_data_folder.py --package <absolute-package>`."
+        unbound = sorted(package.relative_path for package in packages if package.binding_state == "unbound")
+        target = run.joinpath(*unbound[0].split("/")) if run is not None else Path(unbound[0])
+        command = f'python scripts/set_data_folder.py --package "{target}"'
         affected = sorted(package.unit for package in packages if package.unit and package.binding_state == "unbound")
+        kind, owner, gate = "command", "set_data_folder.py", "data_binding"
     elif any(
         package.reference["status"] in {"recorded_partial", "recorded_missing", "not_recorded"} for package in packages
     ):
@@ -841,11 +1002,26 @@ def _next_action(  # pylint: disable=too-many-arguments
             for package in packages
             if package.unit and package.reference["status"] in {"recorded_partial", "recorded_missing", "not_recorded"}
         )
+        kind, owner, gate = "human", "check_reference_readiness.py", "reference_readiness"
     elif report_scope != "established":
         headline = "Inspect the engine report before treating inventory scope as established."
+        kind, owner, gate = "human", "run_estate.py", "inventory_scope"
+    elif any(unit.unit is not None and unit.package is None for unit in units):
+        headline = "Issue each unit's v2 brief, then dispatch @tableau-migrator per unit to package it."
+        affected = sorted(unit.unit for unit in units if unit.unit is not None and unit.package is None)
+        kind, owner, gate = "agent", "tableau-migrator", "not_packaged"
     else:
-        headline = "Use the actual public readiness check if certification is needed; this command did not check it."
-    return {"headline": headline, "affected_units": affected, "details": details}
+        headline = "Dispatch @tableau-migrator per unit; it checks START_READY. This command did not check it."
+        kind, owner, gate = "agent", "check_reference_readiness.py", "START_READY"
+    return {
+        "headline": headline,
+        "affected_units": affected,
+        "details": details,
+        "kind": kind,
+        "command": command,
+        "owner": owner,
+        "gate": gate,
+    }
 
 
 def _assessment_observations(
@@ -944,12 +1120,20 @@ def _assessment_observations(
                 "headline": "Inspect unassessable assessment evidence; preserve the report before deciding next steps.",
                 "affected_units": [],
                 "details": [asdict(finding) for finding in findings if finding.unassessable],
+                "kind": "human",
+                "command": None,
+                "owner": "assessment_report.py",
+                "gate": "evidence_unassessable",
             }
             if findings
             else {
                 "headline": "Review the HTML assessment and choose scope; this does not establish migration readiness.",
                 "affected_units": [],
                 "details": [],
+                "kind": "human",
+                "command": None,
+                "owner": "start_migration.py",
+                "gate": "scope_choice",
             }
         ),
     }, locations
@@ -1037,18 +1221,35 @@ def build_status(run: Path | str) -> tuple[dict[str, Any], int]:  # pylint: disa
         handovers=handovers,
     )
     failures = [record for record in records if record["failed"]]
+    denominator = _scope_bridge(path / "bundle", units, findings) if states["bundle"] == "present" else None
+    _unit_columns(path, units, findings)
+    budget = _path_budget(path, states)
+    over = any((budget[kind]["remaining"] or 0) < 0 for kind in (ceiling.KIND_FILE, ceiling.KIND_DIR))
+    path_failed = any(record.get("phase") == "path_ceiling" for record in failures)
+    budget["rerun"] = _rerun(manifest) if over or path_failed else None
     status.update(
         {
             "locations": [asdict(row) for row in _locations(path, states, discovered)],
             "canonical_subdirs": states,
             "inventory_scope": report_scope,
+            "scope_denominator": denominator,
+            "path_budget": budget,
             "child_evidence": {"bundle/pbip": pbip_state, "bundle/handover": handover_state, **phase_evidence},
             "units": [asdict(unit) for unit in units],
             "unscoped_packages": [asdict(package) for package in unscoped],
             "recorded_phases": records,
             "recorded_failures": failures,
             "findings": [asdict(finding) for finding in findings],
-            "next_action": _next_action(True, report_scope, units, packages, failures, findings=findings),
+            "next_action": _next_action(
+                True,
+                report_scope,
+                units,
+                packages,
+                failures,
+                findings=findings,
+                run=path,
+                rerun=budget["rerun"],
+            ),
         }
     )
     return status, int(report_scope != "established" or any(finding.unassessable for finding in findings))
