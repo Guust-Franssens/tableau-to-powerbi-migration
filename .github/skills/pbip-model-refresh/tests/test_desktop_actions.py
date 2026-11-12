@@ -2595,6 +2595,7 @@ def test_safe_save_runs_after_ordered_safety_checks_and_persists_verified_cache(
     output = capsys.readouterr().out
     assert "REFRESH: DATA_OK + PERSISTED" in output
     assert "NOT_PERSISTED" not in output
+    assert output.count("REFRESH_SUMMARY ") == 1, output
 
 
 @pytest.mark.parametrize("failure", ["action", "dirty", "binding", "deadline"])
@@ -2701,6 +2702,41 @@ def test_save_only_never_refreshes_and_earns_save_ok_only_on_a_clean_post_save_b
         assert calls == ["canaries", "Save"]
         assert "REFRESH: SAVE_OK" in output
         assert "DATA_OK" not in output
+        assert output.count("REFRESH_SUMMARY ") == 1, output
+
+
+def test_save_only_post_save_model_check_refuses_with_wrong_model(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The model check runs against the TMDL Save just wrote; a mismatch there exits 2, never SAVE_OK."""
+    identity_gate = refresh_pbip_model._identity_gate
+    context, _args, calls = _wire_ui_route(monkeypatch)
+    cache = tmp_path / "cache.abf"
+    cache.write_bytes(b"old synthetic cache")
+    instance = {**_ready_bridge()["instances"][0], "hasUnsavedChanges": True}
+    wired_invoke = refresh_pbip_model.invoke_desktop_action
+
+    def invoke(action: str, **kwargs) -> ActionResult:
+        if action == "Save":
+            instance["hasUnsavedChanges"] = False
+        return wired_invoke(action, **kwargs)
+
+    def model_check(_port: int, _cache: Path) -> tuple[bool, str]:
+        assert calls == ["canaries", "Save"], "the post-Save model check ran before Save"
+        return False, "controlled mismatch"
+
+    _wire_main(monkeypatch, context, instance, cache)
+    monkeypatch.setattr(refresh_pbip_model, "invoke_desktop_action", invoke)
+    monkeypatch.setattr(refresh_pbip_model, "_identity_gate", identity_gate)
+    monkeypatch.setattr(refresh_pbip_model, "same_model", model_check)
+
+    result = refresh_pbip_model.main(["--pid", "123", "--save-only", "--canaries", "Orders"])
+
+    output = capsys.readouterr().out
+    assert result == 2, output
+    assert calls == ["canaries", "Save"]
+    assert "REFRESH: WRONG_MODEL" in output
+    assert "SAVE_OK" not in output
 
 
 @pytest.mark.parametrize("refusal", ["binding", "no_data"])
