@@ -1692,7 +1692,7 @@ def _identity_gate(port: int, cache_path: Path | None) -> bool:
         return False
     print(f"  model  : {message}")
     if not ok:
-        print("REFRESH: WRONG_MODEL (refusing to refresh or persist another instance's model)")
+        print("REFRESH: WRONG_MODEL (the connected model does not match the TMDL that owns this cache)")
     return ok
 
 
