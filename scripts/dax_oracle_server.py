@@ -134,6 +134,9 @@ def make_oracle(execute: Callable[[str], list[dict]]) -> Callable[[str], dict]:
             # as an arbitrary .NET exception type that we cannot enumerate. Narrowing this would let
             # one escape, and an oracle that raises is downgraded to `not-evaluated` WITHOUT the
             # reason - so the caller loses the only diagnostic it had.
+            if str(exc) == "ADOMD_UNAVAILABLE":
+                # The bundled loader's refusal: the code alone would not say what to fix.
+                return {"error": f"ADOMD_UNAVAILABLE {getattr(exc, 'detail', '')}".strip()}
             return {"error": f"{type(exc).__name__}: {exc}"}
         if not rows:
             # Obligation 3. An empty result set is NOT zero. Returning 0 here would let a measure
@@ -155,8 +158,8 @@ def adomd_executor(port: int, pid: int | None = None) -> Callable[[str], list[di
     querying a sibling's.
     """
     sys.path.insert(0, str(SKILL_SCRIPTS))
-    # pythonnet must host CoreCLR BEFORE `import clr`, which is why loading ADOMD is deferred into a
-    # function in the skill and why importing it at module scope here would be wrong.
+    # The skill loads the ADOMD client lazily, from beside the bound Desktop (pythonnet, .NET
+    # Framework); its folder is only on sys.path after the insert above, hence the import here.
     # pylint: disable-next=import-outside-toplevel
     import probe_desktop_query as pdq  # noqa: PLC0415
 

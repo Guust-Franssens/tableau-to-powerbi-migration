@@ -1,7 +1,7 @@
 """purpose: fit a launcher's own Power BI Desktop frame to its nearest monitor's work area (#805).
 usage:   from _desktop_frame import fit_launched_frame; a launcher calls it once after resolving its PID.
 internal: true
-internal-reason: Launcher library with no CLI; no launcher calls it yet (G-WIRE wires the call).
+internal-reason: Launcher library with no CLI; `open_desktop.py` calls it once Desktop is ready.
 
 A freshly launched Desktop can open at about 636x400, where the Home ribbon collapses and no exact-name
 Refresh control exists. Only the launcher knows it owns the instance, so only the launcher may fit it:

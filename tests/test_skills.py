@@ -39,6 +39,7 @@ MD_LINK_RE = re.compile(r"\[[^\]]*\]\((?!https?:|mailto:|#)([^)\s]+)\)")
 FORWARDING_SHIMS = {
     "probe_desktop_query": ("pbip-model-refresh", "--table"),
     "refresh_pbip_model": ("pbip-model-refresh", "--ui-refresh"),
+    "open_desktop": ("pbip-model-refresh", "--check"),
     "set_ai_instructions": ("powerbi-ai-readiness", "--strict"),
     "check_ai_readiness": ("powerbi-ai-readiness", "--all"),
 }
@@ -302,10 +303,10 @@ def _imported_top_level_names(script: Path) -> set[str]:
 def test_no_bundled_script_imports_a_module_that_only_exists_in_this_repo(skill_dir: Path) -> None:
     """Static counterpart to the copy-and-run gate above, which only sees imports that EXECUTE.
 
-    Both bundled scripts import their Windows dependencies lazily, inside functions (`_load_adomd`,
-    `_load_amo`), and the bundled suite monkeypatches ADOMD/AMO rather than reaching those bodies -
-    so a repo-local import added there would run in nobody's test, pass the copy-and-run gate, and
-    break only in the repo that copied the folder. `ast.walk` sees it whatever code path it is on.
+    Bundled scripts import their Windows dependencies lazily, inside functions (`_load_adomd_from`),
+    and the bundled suite fakes pythonnet/clr rather than loading the CLR - so a repo-local import
+    added there would run in nobody's test, pass the copy-and-run gate, and break only in the repo
+    that copied the folder. `ast.walk` sees it whatever code path it is on.
     """
     bundled = {path.stem for path in (skill_dir / "scripts").glob("*.py")}
     repo_local = {path.stem for path in (REPO_ROOT / "scripts").glob("*.py")}

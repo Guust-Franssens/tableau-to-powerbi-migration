@@ -476,9 +476,8 @@ def _doctor_preflight(stdout: bytes, stderr: bytes, native: int | None) -> dict:
         "npx": ({"command_missing"}, "install_node"),
         "desktop_bridge": ({"command_missing"}, "install_desktop_bridge"),
         "desktop_install": ({"executable_missing"}, "install_desktop"),
-        "desktop_pin": ({"configured_path_missing"}, "refresh_current_process_pin"),
         "dotnet": ({"command_missing"}, "install_dotnet"),
-        "adomd_client": ({"assembly_missing"}, "restore_adomd"),
+        "adomd_client": ({"assembly_missing", "pythonnet_missing"}, "restore_adomd"),
         "fabric_tenant": ({"tenant_mismatch"}, "scope_intended_tenant"),
     }
     for blocker in detail["blockers"]:
@@ -491,8 +490,7 @@ def _doctor_preflight(stdout: bytes, stderr: bytes, native: int | None) -> dict:
         ):
             return unavailable
         reasons, remedy = allowed[blocker["id"]]
-        source = "process_environment" if blocker["id"] == "desktop_pin" else None
-        if blocker["reason"] not in reasons or blocker["remedy"] != remedy or blocker["source"] != source:
+        if blocker["reason"] not in reasons or blocker["remedy"] != remedy or blocker["source"] is not None:
             return unavailable
     return {"availability": "available", "reason": "available", **detail}
 
@@ -618,9 +616,8 @@ def _doctor_blocker_lines(blocker: dict, *, installed: bool = False) -> list[str
         "npx": "npx is not on PATH",
         "desktop_bridge": "powerbi-desktop is not on PATH",
         "desktop_install": "Power BI Desktop executable was not found",
-        "desktop_pin": "PBI_DESKTOP_PATH is configured but its target was not found",
         "dotnet": ".NET SDK is not on PATH",
-        "adomd_client": "ADOMD.NET client assembly is missing from the active NuGet cache",
+        "adomd_client": "Power BI Desktop's bundled ADOMD client could not be loaded",
         "fabric_tenant": "Fabric token does not match the explicitly intended tenant",
     }
     actions = {
@@ -644,14 +641,10 @@ def _doctor_blocker_lines(blocker: dict, *, installed: bool = False) -> list[str
         "sync_and_publish_skills": "manually synchronize installed skills and publish the intended toolkit content"
         " using setup guidance before trusting runtime results.",
         "install_desktop_bridge": "manually install @microsoft/powerbi-desktop-bridge-cli per setup guidance.",
-        "install_desktop": "manually install Power BI Desktop, then verify and pin the intended executable.",
-        "refresh_current_process_pin": "refresh the inherited PBI_DESKTOP_PATH in the process invoking doctor/Power BI."
-        " A saved User setting does not update an already-running parent/session. If that saved pin is independently"
-        " verified, reload it and rerun doctor in the SAME invocation; otherwise verify the installed executable and"
-        " repin manually per setup guidance. Do not merely persist it again with setx or remove the pin to pass.",
+        "install_desktop": "manually install Power BI Desktop, then rerun.",
         "install_dotnet": "manually install the .NET SDK per setup guidance.",
-        "restore_adomd": "manually restore the separate ADOMD.NET client package into the active NuGet cache"
-        " with a supported target framework; follow docs/operator-runbook.md.",
+        "restore_adomd": "install pythonnet into the Python that runs the toolkit; otherwise install or repair"
+        " Power BI Desktop; then rerun.",
         "scope_intended_tenant": "privately verify intended identity; scope preflight with -Subscription for"
         " a subscription in that tenant. Do not rewrite the shared Azure CLI profile just to pass.",
     }
@@ -675,11 +668,10 @@ def _doctor_blocker_lines(blocker: dict, *, installed: bool = False) -> list[str
             )
             for key, action in actions.items()
         }
-    lines = [f"Preflight blocker: {labels[blocker['id']]}; reason: {blocker['reason']}."]
-    if blocker["source"] == "process_environment":
-        lines.append("Effective source: inherited process environment. This is not a PAT diagnosis.")
-    lines.append("Action: " + actions[blocker["remedy"]])
-    return lines
+    return [
+        f"Preflight blocker: {labels[blocker['id']]}; reason: {blocker['reason']}.",
+        "Action: " + actions[blocker["remedy"]],
+    ]
 
 
 def _doctor_human(result: dict, args: argparse.Namespace | None, *, installed: bool = False) -> None:

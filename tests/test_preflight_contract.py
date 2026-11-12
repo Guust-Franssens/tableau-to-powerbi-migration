@@ -33,9 +33,8 @@ import deploy_estate as de  # noqa: E402  # pylint: disable=wrong-import-positio
 import t2p  # noqa: E402  # pylint: disable=wrong-import-position
 
 TENANT_CHECK = "Fabric token tenant"
-DESKTOP_PIN_CHECK = "PBI_DESKTOP_PATH (bridge exe pin)"
-AMO_CHECK = "AMO/TOM client (Desktop progress/ImageSave)"
-ADOMD_CHECK = "ADOMD.NET client (Desktop probe/refresh)"
+DESKTOP_PIN_CHECK = "PBI_DESKTOP_PATH (optional Desktop pin)"
+ADOMD_CHECK = "ADOMD client (bundled with Desktop)"
 
 
 def _preflight_source() -> str:
@@ -89,11 +88,8 @@ def test_known_blocking_preflight_checks_are_critical() -> None:
     than a full PowerShell harness because CI runs on Ubuntu, while the script intentionally depends on
     Windows/Power BI Desktop primitives.
 
-    ``PBI_DESKTOP_PATH (bridge exe pin)`` was on this list until #124 and is deliberately no longer
-    a FIXED entry here: it is a Desktop-only pin, and the estate pipeline never opens Desktop, so an
-    UNSET pin must not block. #86 gave it a SECOND, data-dependent tier for a DEAD pin instead of
-    putting it back on this static list - see `test_the_desktop_pin_is_critical_only_when_dead` for
-    the executed proof that unset/valid stay ``recommended`` while dead becomes ``critical``.
+    ``PBI_DESKTOP_PATH`` is deliberately not on this list: launches look up the installed Desktop, so
+    an unset or dead pin cannot stop one (see `test_the_desktop_pin_is_never_a_blocker`).
     """
     source = _preflight_source()
 
@@ -102,6 +98,7 @@ def test_known_blocking_preflight_checks_are_critical() -> None:
         "skill bundles match published plugin",
         "engine: plugin installed",
         "Power BI Desktop",
+        ADOMD_CHECK,
     ):
         _assert_add_check_tier(source, check_name, "critical")
 
@@ -109,119 +106,18 @@ def test_known_blocking_preflight_checks_are_critical() -> None:
         _assert_add_cli_tier(source, command, "critical")
 
 
-def test_the_desktop_pins_tier_comes_from_get_desktop_pin_verdict_not_a_literal() -> None:
-    """The tier must be data-dependent (#86), so a literal ``'recommended'``/``'critical'`` next to
-    the check name would be a REGRESSION, not an improvement - it would mean someone hard-coded a
-    single tier again, exactly the shape of the bug #124 fixed and #86 later refined.
+def test_the_adomd_check_runs_the_bundled_load_in_the_toolkit_python() -> None:
+    """The check is the probe's own load (`open_desktop.py --check`), not a file lookup in a cache.
 
-    A machine with the engine, both plugins, both CLIs at known-good versions, Desktop installed,
-    `az`, `uv` and ODBC 18 was once reported NOT READY over one unset variable - while
-    `run_estate.py`'s own docstring says it "never opens Power BI Desktop" (#124). That is still true
-    for UNSET; it is not true for a DEAD pin, which is why the tier now has to come from a function
-    that can see which state it is. `test_the_desktop_pin_is_critical_only_when_dead` executes that
-    function directly for all three states.
+    `test_doctor_actual_windows_child` executes both failure reasons; this pins the two calls and
+    that no NuGet lookup survives anywhere in preflight.
     """
     source = _preflight_source()
-    literal_tier = re.findall(rf"Add-Check\s+'{re.escape(DESKTOP_PIN_CHECK)}'\s+'(\w+)'", source)
-    assert literal_tier == [], (
-        f"the tier must come from Get-DesktopPinVerdict, not a literal string next to the check name: {literal_tier}"
-    )
-    assert (
-        f"Add-Check '{DESKTOP_PIN_CHECK}' $pinVerdict.Tier $pinVerdict.Ok $pinVerdict.Detail $pinVerdict.Hint" in source
-    )
-    assert "function Get-DesktopPinVerdict(" in source
-
-
-def test_amo_warns_rather_than_blocking_a_run_that_never_opens_desktop() -> None:
-    """AMO/TOM absence affects Desktop refresh/save, not the parse/convert estate pipeline (#283).
-
-    This mirrors the #124 Desktop-pin decision: the failure is real and must be visible, but not every
-    migration phase opens Desktop. ``recommended`` keeps the line in the WARN summary without spending
-    preflight's exit 1 on a dependency that is needed later.
-    """
-    _assert_add_check_tier(_preflight_source(), AMO_CHECK, "recommended")
-
-
-def test_amo_is_checked_by_dll_presence_not_by_the_dotnet_cli() -> None:
-    """`dotnet` on PATH is not proof that the AMO/TOM package exists in the active cache (#283)."""
-    source = _preflight_source()
-    amo_block = source[source.index("# --- AMO/TOM client assembly") : source.index("# --- ADOMD.NET")]
-    assert "Add-Cli 'dotnet'" not in amo_block, "AMO must be a file check, not another CLI check"
-    assert "microsoft.analysisservices.netcore.retail.amd64*" in amo_block
-    assert "Microsoft.AnalysisServices.Tabular.dll" in amo_block
-    assert "$env:NUGET_PACKAGES" in amo_block and "Join-Path $HOME '.nuget\\packages'" in amo_block
-    assert "console text is not proof" in amo_block
-
-
-def test_amo_warning_names_the_runtime_consequence_after_the_timeout_fix() -> None:
-    """The message must move the decision before work: scripted is blind; operator is visible."""
-    source = _preflight_source()
-    amo_block = source[source.index(f"Add-Check '{AMO_CHECK}'") : source.index("# --- ADOMD.NET")]
-    assert "progress reporting and liveness are unavailable" in amo_block
-    assert "scripted refresh runs blind" in amo_block
-    assert "ImageSave falls back to UI" in amo_block
-    assert "3600s absolute refresh backstop remains active" in amo_block
-    assert "operator refresh strategy" in amo_block
-    assert "Desktop''s own row counter" in amo_block
-    assert "falling back to legacy" not in amo_block
-
-
-def test_adomd_remains_separate_from_amo() -> None:
-    """The new AMO check must not weaken or replace the existing ADOMD gate."""
-    source = _preflight_source()
-    _assert_add_check_tier(source, ADOMD_CHECK, "critical")
-    adomd_block = source[source.index("# --- ADOMD.NET") : source.index("Add-Cli 'uv'")]
-    assert "microsoft.analysisservices.adomdclient.netcore*" in adomd_block
-    assert "Microsoft.AnalysisServices.AdomdClient.dll" in adomd_block
-
-
-def test_the_desktop_pin_hint_is_actionable_in_the_shell_that_reads_it() -> None:
-    """`setx` cannot fix the session that is reading the hint, so it cannot be the only advice.
-
-    `setx` writes the user profile and is inherited only by processes started later; an agent's tool
-    shells inherit an already-running parent's environment. Following the old hint verbatim therefore
-    left preflight failing in the very session that printed it. `$env:` is the form that takes effect
-    immediately, so it must lead, and any `setx` offered alongside must say it does not affect the
-    current shell.
-
-    The hint now lives inside `Get-DesktopPinVerdict` (#86 made the tier data-dependent, so the whole
-    decision - tier, detail and hint - moved into one function), not inline in the `Add-Check` call.
-    """
-    source = _preflight_source()
-    hint = source[source.index("function Get-DesktopPinVerdict(") : source.index("$desktop = $null")]
-    assert "$env:PBI_DESKTOP_PATH = " in hint, "the hint must give the form that works in THIS shell"
-    if "setx" in hint:
-        assert re.search(r"(?i)new shells|does NOT affect this one", hint), (
-            "a `setx` hint must state that it does not affect the shell reading it"
-        )
-
-
-def test_a_dead_desktop_pin_is_named_as_a_dead_pin_not_as_an_unset_pin() -> None:
-    """A stale PBI_DESKTOP_PATH is worse than unset because the bridge honours it first (#86)."""
-    source = _preflight_source()
-    assert "$desktopPathDead = $desktopPathConfigured -and -not $desktopPathValid" in source
-    assert "MSIX discovery (PBI_DESKTOP_PATH is set but dead)" in source
-    assert "PBI_DESKTOP_PATH points at" in source
-    assert "which is not on disk" in source
-    assert "The bridge honours this variable and will fail to launch" in source
-
-
-def test_a_dead_desktop_pin_is_now_critical_not_recommended() -> None:
-    """#86 overturns the *dead-pin* half of #124's invariant; the *unset* half is untouched.
-
-    #124 decided ``recommended`` for an UNSET pin, and that still holds - MSIX discovery is exactly
-    what an operator gets and expects when nothing is pinned. A DEAD pin is a different belief: the
-    operator set PBI_DESKTOP_PATH deliberately, believing a specific build is selected, and it
-    silently is not - the exact false-green class this script exists to prevent. Only the code AFTER
-    the desktop-install block (the pin decision, not the "is Desktop installed" check above it) may
-    carry a literal ``'critical'`` here, and it must not, because #86 made the tier data-dependent.
-    """
-    source = _preflight_source()
-    desktop_block = source[source.index("$desktopPathConfigured") : source.index("# --- Privacy Levels")]
-    critical_lines = [line for line in desktop_block.splitlines() if "'critical'" in line]
-    assert critical_lines == ["Add-Check 'Power BI Desktop' 'critical' ([bool]$desktop) `"], (
-        "the pin decision itself must not hard-code 'critical' - it comes from Get-DesktopPinVerdict"
-    )
+    block = source[source.index("# --- ADOMD client bundled with Desktop") : source.index("Add-Cli 'uv'")]
+    assert '& python -c "import pythonnet" 2>$null' in block
+    assert "& python (Join-Path $repoRoot 'scripts\\open_desktop.py') --check 2>$null" in block
+    assert "-DoctorId 'adomd_client' -DoctorReason $adomdReason -DoctorRemedy 'restore_adomd'" in block
+    assert "nuget" not in source.lower()
 
 
 def test_the_correctness_floor_says_where_report_version_at_import_belongs() -> None:
@@ -981,55 +877,76 @@ def test_plugin_upstream_fetch_ambiguity_and_failure_are_visible_unknown() -> No
             assert verdict["Hint"] == ""
 
 
-def _desktop_pin_verdict(
-    *,
-    configured: bool,
-    valid: bool,
-    configured_path: str = r"C:\PBI\PBIDesktop.exe",
-    installed_desktop: str = r"1.2.3.4 at C:\PBI\PBIDesktop.exe",
-    fallback_exe: str = r"C:\PBI\PBIDesktop.exe",
-) -> dict:
+def _desktop_pin_verdict(*, configured: bool, valid: bool) -> dict:
     raw = _run_ps(
         "Get-DesktopPinVerdict",
         "$v = Get-DesktopPinVerdict -Configured ([bool]::Parse($env:D_CONFIGURED)) "
-        "-Valid ([bool]::Parse($env:D_VALID)) -ConfiguredPath $env:D_PATH "
-        "-InstalledDesktop $env:D_INSTALLED -FallbackExe $env:D_FALLBACK\n"
+        "-Valid ([bool]::Parse($env:D_VALID))\n"
         "Emit ($v | ConvertTo-Json -Compress)\n",
-        {
-            "D_CONFIGURED": str(configured),
-            "D_VALID": str(valid),
-            "D_PATH": configured_path,
-            "D_INSTALLED": installed_desktop,
-            "D_FALLBACK": fallback_exe,
-        },
+        {"D_CONFIGURED": str(configured), "D_VALID": str(valid)},
     )
     return json.loads(_emitted(raw))
 
 
 @pytest.mark.skipif(_PS is None, reason="no PowerShell on PATH")
-def test_the_desktop_pin_is_critical_only_when_dead() -> None:
-    """Execute `Get-DesktopPinVerdict` for all three states (#86) - this is the settled decision.
+def test_the_desktop_pin_is_never_a_blocker() -> None:
+    """Execute `Get-DesktopPinVerdict` for all three states.
 
-    The distinguishing principle is operator BELIEF, not merely "is the pin missing": an UNSET
-    variable tells the truth - nothing is pinned, MSIX discovery is exactly what the operator gets.
-    A DEAD pin asserts that a specific build IS selected when it is not on disk, and the operator set
-    it deliberately, so they have every reason to believe it is handled. #124's unset-must-not-block
-    decision is untouched; only the dead state is new.
+    Launches look up the installed Desktop and ignore a pin whose file is missing, so unset and valid
+    are OK and a dead pin is only a WARN that says it is ignored. The check also carries no doctor id.
     """
     unset = _desktop_pin_verdict(configured=False, valid=False)
     valid = _desktop_pin_verdict(configured=True, valid=True)
     dead = _desktop_pin_verdict(configured=True, valid=False)
 
-    assert (unset["Tier"], unset["Ok"]) == ("recommended", False), "unset must stay a non-blocking WARN (#124)"
-    assert "not set" in unset["Detail"]
+    assert (unset["Tier"], unset["Ok"]) == ("recommended", True)
+    assert unset["Detail"] == "not set; the installed Desktop is looked up at each launch"
+    assert (valid["Tier"], valid["Ok"]) == ("recommended", True)
+    assert (dead["Tier"], dead["Ok"]) == ("recommended", False)
+    assert dead["Detail"] == "ignored; the installed Desktop is used"
+    assert "Unset PBI_DESKTOP_PATH" in dead["Hint"]
+    assert (
+        f"Add-Check '{DESKTOP_PIN_CHECK}' $pinVerdict.Tier $pinVerdict.Ok $pinVerdict.Detail $pinVerdict.Hint\n"
+        in _preflight_source()
+    ), "the pin check must not carry a doctor id"
 
-    assert (valid["Tier"], valid["Ok"]) == ("recommended", True), "a valid pin is OK and stays recommended-tiered"
 
-    assert (dead["Tier"], dead["Ok"]) == ("critical", False), "a dead pin must now block (#86)"
-    assert "which is not on disk" in dead["Detail"]
-    assert "re-pinned" in dead["Detail"]
-    # The hint must be the actionable, THIS-shell-first form regardless of tier.
-    assert "$env:PBI_DESKTOP_PATH = " in dead["Hint"]
+@pytest.mark.skipif(
+    os.name != "nt" or _PS is None, reason="requires Windows PowerShell/PowerShell 7 on Windows and NTFS"
+)
+def test_the_desktop_lookup_matches_open_desktop(tmp_path: Path) -> None:
+    """Execute preflight's Desktop lookup: a valid pin, else the Store install, else the classic one.
+
+    The same order as `open_desktop.find_desktop`; a pin whose file is missing is skipped.
+    """
+    source = _preflight_source()
+    lookup = source[source.index("$desktop = $null") : source.index("$pinVerdict = ")]
+    pin, store, program_files = tmp_path / "pin" / "PBIDesktop.exe", tmp_path / "store", tmp_path / "pf"
+    classic = program_files / "Microsoft Power BI Desktop" / "bin" / "PBIDesktop.exe"
+    for exe in (pin, store / "bin" / "PBIDesktop.exe", classic):
+        exe.parent.mkdir(parents=True)
+        exe.write_text("synthetic executable, never launched", encoding="utf-8")
+    cases = [
+        ({"PBI_DESKTOP_PATH": str(pin), "D_STORE": str(store)}, str(pin), "PBI_DESKTOP_PATH"),
+        (
+            {"PBI_DESKTOP_PATH": str(tmp_path / "dead.exe"), "D_STORE": str(store)},
+            str(store / "bin" / "PBIDesktop.exe"),
+            "Store install",
+        ),
+        ({"PBI_DESKTOP_PATH": str(pin.parent), "D_STORE": ""}, str(classic), "classic install"),
+    ]
+    for env, desktop, via in cases:
+        raw = _run_ps(
+            "Add-Check",
+            # Windows resets ProgramFiles for every new process, so set it inside the child.
+            "$env:ProgramFiles = $env:D_PROGRAM_FILES\n"
+            "$results = New-Object System.Collections.Generic.List[object]\n"
+            "function Get-AppxPackage { if ($env:D_STORE) { [pscustomobject]@{InstallLocation=$env:D_STORE} } }\n"
+            + lookup
+            + "\nEmit (@{desktop=$desktop; via=$desktopVia} | ConvertTo-Json -Compress)\n",
+            {**env, "D_PROGRAM_FILES": str(program_files)},
+        )
+        assert json.loads(_emitted(raw)) == {"desktop": desktop, "via": via}, env
 
 
 def _verdict(
@@ -1699,15 +1616,6 @@ def _synthetic_preflight_child(
     (root / ".mcp.json" if workspace_mcp else copilot / "mcp-config.json").write_text(
         json.dumps({"mcpServers": {"powerbi-modeling-mcp": {}}}), encoding="utf-8"
     )
-    nuget = profile / "nuget"
-    for package, dll in (
-        ("microsoft.analysisservices.netcore.retail.amd64", "Microsoft.AnalysisServices.Tabular.dll"),
-        ("microsoft.analysisservices.adomdclient.netcore.retail.amd64", "Microsoft.AnalysisServices.AdomdClient.dll"),
-    ):
-        leaf = nuget / package / "synthetic" / dll
-        leaf.parent.mkdir(parents=True)
-        if mode != "blocked":
-            leaf.write_text("synthetic assembly, never loaded", encoding="utf-8")
     desktop = root / "desktop" / "bin" / "PBIDesktop.exe"
     desktop.parent.mkdir(parents=True)
     if mode != "blocked":
@@ -1726,7 +1634,11 @@ def _synthetic_preflight_child(
         "if tool=='python':\n"
         " if args==['--version']: print('Python 3.10.0' if mode=='blocked' else 'Python 3.11.9')\n"
         " elif args[0]=='-c': sys.exit(1 if mode=='blocked' and args[1] in "
-        "('import lxml','import jsonschema') else 0)\n"
+        "('import lxml','import jsonschema','import pythonnet') else 0)\n"
+        " elif Path(args[0]).name=='open_desktop.py' and args[1:]==['--check']:\n"
+        "  if mode=='no_adomd': print('OPEN_DESKTOP: ERROR ADOMD_UNAVAILABLE PRIVATE_ADOMD_DETAIL_CANARY'); sys.exit(2)\n"
+        "  print(json.dumps({'exe_source':'Store install','desktop_version':'2.157.627.0',"
+        "'adomd_version':'19.0.0'}))\n"
         " elif Path(args[0]).name=='engine_source.py':\n"
         # Mirror engine_source._cli: the CLI registry is read from COPILOT_HOME, never a profile default.
         "  cfg=Path(os.environ['COPILOT_HOME'])/'config.json'\n"
@@ -1814,7 +1726,6 @@ def _synthetic_preflight_child(
         "LOCALAPPDATA": str(profile / "localappdata"),
         "PSModuleAnalysisCachePath": str(sidecar / "ModuleAnalysisCache"),
         "COPILOT_HOME": str(profile / "missing-copilot" if mode == "blocked" else copilot),
-        "NUGET_PACKAGES": str(nuget),
         "AZURE_CONFIG_DIR": str(root / "azure"),
         "TEMP": str(root / "scratch"),
         "TMP": str(root / "scratch"),
@@ -2000,7 +1911,6 @@ def test_windows_preflight_host_cache_boundary(tmp_path: Path, monkeypatch) -> N
                 "skill_bundles",
                 "published_skill_bundles",
                 "desktop_install",
-                "desktop_pin",
                 "adomd_client",
             },
         ),
@@ -2015,9 +1925,11 @@ def test_windows_preflight_host_cache_boundary(tmp_path: Path, monkeypatch) -> N
                 "authoring_plugin",
                 "npx",
                 "dotnet",
+                "adomd_client",
             },
         ),
         ("multiple", {"reusable_skill_plugins"}),
+        ("no_adomd", {"adomd_client"}),
     ],
 )
 def test_doctor_actual_windows_child(tmp_path: Path, mode: str, ids: set) -> None:
@@ -2031,13 +1943,13 @@ def test_doctor_actual_windows_child(tmp_path: Path, mode: str, ids: set) -> Non
     assert all(set(row) == {"id", "source", "reason", "remedy"} for row in detail["blockers"])
     assert detail["recommended_warnings"] == {"blocked": 3, "missing": 1}.get(mode, 0)
     assert child.returncode == (1 if ids else 0), "doctor and direct native exits use the same shared aggregate"
-    if mode == "blocked":
-        assert next(row for row in detail["blockers"] if row["id"] == "desktop_pin") == {
-            "id": "desktop_pin",
-            "source": "process_environment",
-            "reason": "configured_path_missing",
-            "remedy": "refresh_current_process_pin",
-        }, "dead Desktop needs the exact owner ID/source/reason/remedy tuple"
+    if "adomd_client" in ids:
+        assert next(row for row in detail["blockers"] if row["id"] == "adomd_client") == {
+            "id": "adomd_client",
+            "source": None,
+            "reason": "assembly_missing" if mode == "no_adomd" else "pythonnet_missing",
+            "remedy": "restore_adomd",
+        }, "each ADOMD failure needs the exact owner ID/reason/remedy tuple"
     safe = t2p._doctor_preflight(child.stdout.encode(), b"", child.returncode)  # pylint: disable=protected-access
     assert safe["availability"] == "available" and safe["blockers"] == detail["blockers"], (
         "facade must accept and retain every complete known owner blocker"
