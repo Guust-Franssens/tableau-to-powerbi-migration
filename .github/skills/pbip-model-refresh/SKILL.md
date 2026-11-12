@@ -125,13 +125,14 @@ stop rather than fabricate identities that match the model being checked.
 Every refresh streams flushed progress lines. They carry no verdict and change no exit code:
 
 ```
-REFRESH_STATUS elapsed=<n>s phase=<invoke|refreshing|committed|canaries|saving|done> process_jobs=<n|?> dialog=<"title"|none>
+REFRESH_STATUS elapsed=<n>s phase=<invoke|refreshing|committed|canaries|saving|done> process_jobs=<n|?> dialog=<"title"|none|?>
 REFRESH_SUMMARY total=<n>s refresh=<n>s canaries=<n>s save=<n>s|skipped
 ```
 
 `REFRESH_STATUS` prints on every change and at least every 30 s. `process_jobs` counts the engine's
 `DISCOVER_JOBS` rows whose `JOB_DESCRIPTION` is `Process` (measured: 4 to 0 during a long refresh
-while Desktop's progress popup was up); `?` means unreadable. There is no percentage and no ETA, and
+while Desktop's progress popup was up); `?` means unreadable, and `dialog=?` means the dialog check
+did not complete. There is no percentage and no ETA, and
 progress never decides success. `REFRESH_SUMMARY` prints before the verdict.
 
 1. When a refresh may take longer than about a minute, start it attached and asynchronous. You

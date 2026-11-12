@@ -57,7 +57,7 @@ MEASURED_LARGER_BUDGETS = frozenset(
     }
 )
 
-BUNDLE_TESTS = ".github/skills/pbip-model-refresh/tests/test_desktop_observer.py"
+BUNDLE_TESTS = ".github/skills/pbip-model-refresh/tests/test_canary_data_gate.py"
 
 
 def _pyproject() -> dict:
@@ -419,8 +419,8 @@ def test_xdist_deselects_contended_tests_without_being_asked() -> None:
     collection = _run_pytest(REPO_ROOT, ["-q", "--collect-only", "-m", "timing", BUNDLE_TESTS])
     assert collection.returncode == 0, collection.stdout + collection.stderr
     contended = {line for line in collection.stdout.splitlines() if line.startswith(BUNDLE_TESTS + "::")}
-    # The observer file keeps three wall-clock controls (#831 retired the GUI tier and three t0 tests).
-    assert len(contended) >= 3, f"expected the bundle's contended tests to be found, got {sorted(contended)}"
+    # The canary file keeps two wall-clock controls; the observer's went with the XMLA route.
+    assert len(contended) >= 2, f"expected the bundle's contended tests to be found, got {sorted(contended)}"
     result = _run_pytest(
         REPO_ROOT,
         ["-q", "--collect-only", "-n", "2", "--dist", "loadfile", BUNDLE_TESTS],

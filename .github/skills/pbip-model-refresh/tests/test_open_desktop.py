@@ -165,7 +165,7 @@ def _raise(exc: Exception):
         ({"_ui_bridge_status": _raise(TimeoutError())}, "timed out"),
         ({"_ui_desktop_alive": lambda pid: False}, "Desktop process gone"),
         ({"_ui_bridge_status": _raise(open_desktop.DesktopActionError("bridge refused"))}, "bridge refused"),
-        ({"_ui_bridge_status": _raise(PermissionError("C:\\Users\\someone"))}, "PermissionError"),
+        ({"_ui_bridge_status": _raise(PermissionError("D:\\private\\secret.pbip"))}, "PermissionError"),
     ],
     ids=["timeout", "gone", "bridge-error", "bridge-oserror"],
 )

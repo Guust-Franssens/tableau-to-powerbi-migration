@@ -345,6 +345,7 @@ def test_probe_query_worker_cannot_print_after_credential_verdict(monkeypatch, c
     monkeypatch.setattr(probe_desktop_query, "_credential_state", late_dialog)
     monkeypatch.setattr(probe_desktop_query, "PREFLIGHT_CREDENTIAL_POLL_SECONDS", 0.05)
     monkeypatch.setattr(probe_desktop_query, "discover_port", lambda _pid: 52001)
+    monkeypatch.setattr(probe_desktop_query, "_load_adomd", lambda _port=None: None)
     monkeypatch.setattr(probe_desktop_query, "probe", fake_probe)
 
     exit_code = probe_desktop_query.main(["--pid", "111", "--canaries", "Orders"])

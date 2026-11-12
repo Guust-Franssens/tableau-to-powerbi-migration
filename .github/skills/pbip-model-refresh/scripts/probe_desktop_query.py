@@ -72,12 +72,6 @@ _ADOMD_BY_PORT: dict[int, object] = {}
 _ADOMD_LOADED: dict[str, Path] = {}
 
 
-# Unused here: kept only because the base refresh_pbip_model still imports it; delete after integration.
-def nuget_packages_root() -> Path:
-    """Return the NuGet global-packages cache root, matching dotnet's NUGET_PACKAGES precedence."""
-    return Path(os.environ.get("NUGET_PACKAGES") or (Path.home() / ".nuget" / "packages"))
-
-
 # Desktop binds its msmdsrv port a moment AFTER the process appears, so a scoped lookup needs a
 # short retry - but a bounded one, because a miss must end in a loud failure, never a fallback.
 PORT_DISCOVERY_ATTEMPTS = 6

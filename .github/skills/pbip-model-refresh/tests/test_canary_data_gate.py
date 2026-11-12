@@ -148,6 +148,7 @@ def test_main_maps_the_tables_flag_to_the_canary_list(monkeypatch) -> None:
     """`--tables A B` reaches `probe` as ["A", "B"]; the port is the discovered one."""
     seen: dict[str, object] = {}
     monkeypatch.setattr(probe_desktop_query, "discover_port", lambda pid: 52001)
+    monkeypatch.setattr(probe_desktop_query, "_load_adomd", lambda _port=None: None)
     monkeypatch.setattr(probe_desktop_query, "probe", lambda port, tables: seen.update(port=port, tables=tables) or 0)
     assert probe_desktop_query.main(["--pid", "111", "--tables", "A", "B"]) == 0
     assert seen == {"port": 52001, "tables": ["A", "B"]}
@@ -157,6 +158,7 @@ def test_main_maps_the_legacy_single_table_flag(monkeypatch) -> None:
     """`--table X` (legacy) becomes a one-name canary list, so old callers keep a model verdict."""
     seen: dict[str, object] = {}
     monkeypatch.setattr(probe_desktop_query, "discover_port", lambda pid: 52001)
+    monkeypatch.setattr(probe_desktop_query, "_load_adomd", lambda _port=None: None)
     monkeypatch.setattr(probe_desktop_query, "probe", lambda port, tables: seen.update(tables=tables) or 0)
     assert probe_desktop_query.main(["--pid", "111", "--table", "Orders"]) == 0
     assert seen["tables"] == ["Orders"]
