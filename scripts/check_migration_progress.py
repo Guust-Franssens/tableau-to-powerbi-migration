@@ -96,7 +96,7 @@ PACKAGE_MANIFEST_NAME = "package-manifest.json"
 #: future batch convention might add without turning this into an unbounded tree walk.
 PACKAGE_SEARCH_DEPTH = 3
 
-# A Desktop model load is 60-90s and a refresh + ImageSave was measured at 93s, so a window shorter
+# A Desktop model load is 60-90s and a refresh plus Save was measured at 93s, so a window shorter
 # than this cannot distinguish "loading" from "stuck" and must not try.
 SHORT_WINDOW_MINUTES = 10
 BURST_GRACE_MULTIPLIER = 2

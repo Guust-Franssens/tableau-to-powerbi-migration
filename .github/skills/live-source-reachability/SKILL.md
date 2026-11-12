@@ -40,7 +40,7 @@ with its Desktop, bridge and client-library prerequisites; do not create a secon
 4. **Refresh it with named canaries** through the existing automatic-source procedure:
 
    ```powershell
-   python .github\skills\pbip-model-refresh\scripts\refresh_pbip_model.py --pid <pid> --ui-refresh --canaries <table> [<table> ...] --automatic-source-scope <expected-sources.json>
+   python .github\skills\pbip-model-refresh\scripts\refresh_pbip_model.py --pid <pid> --canaries <table> [<table> ...] --automatic-source-scope <expected-sources.json>
    ```
 
    - Pick named canaries covering the live sources. Each must return rows on the held model binding.
@@ -50,8 +50,8 @@ with its Desktop, bridge and client-library prerequisites; do not create a secon
    - Every agent-directed refresh uses `--automatic-source-scope` or explicitly delegates to that
      existing procedure. It fails closed on custom SQL, unsupported M, mismatched identities or
      unreadable metadata. Never drop the flag or switch refresh routes to evade a refusal.
-   - Plain `--ui-refresh` remains operator-only execution of all current M, including custom SQL.
-     No new consent flag or ceremony is introduced.
+   - A refresh without `--automatic-source-scope` remains operator-only execution of all current M,
+     including custom SQL. No new consent flag or ceremony is introduced.
 
 5. **A dialog is a human stop.** Any sign-in, permission or other Desktop dialog ends the attempt.
    The refresh refuses to act while a dialog is open.
@@ -71,7 +71,7 @@ with its Desktop, bridge and client-library prerequisites; do not create a secon
 | A dialog finding | Needs a human; the structural stop alone does not classify the dialog. | Ask once (step 5). |
 | `UI_PREFLIGHT_REFUSED` | Source scope, readiness or model identity was not established; not proof of missing credentials. | Stop; route the reported cause without bypassing qualification. |
 | `NO_DATA` (a canary returned zero rows) | The refresh ran but a canary is empty. | Check the canary choice and source filters. Not proof. |
-| `DATA_CHECK_FAILED`, `ERROR`, `TIMEOUT`, `COMPLETION_UNKNOWN`, `NOT_PERSISTED`, `WRONG_MODEL` | No real-data proof. | Stop; correct the cause and binding before a new attempt. |
+| `DATA_CHECK_FAILED`, `ERROR`, `ERROR ADOMD_UNAVAILABLE`, `TIMEOUT`, `COMPLETION_UNKNOWN`, `NOT_PERSISTED`, `WRONG_MODEL` | No real-data proof. | Stop; correct the cause and binding before a new attempt. |
 
 - Write the outcome into the unit's handover and `limitations_encountered`. An unproven live source
   is a disclosed limitation, never a silent pass.

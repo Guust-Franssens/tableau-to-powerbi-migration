@@ -23,7 +23,8 @@ Migration-start preflight is **plain**; no tooling upgrades mid-migration.
    It allocates and prints the **absolute run folder**: repo-local `_runs` by default, `--runs-parent` opt-in.
    Do not pre-allocate another run or silently widen scope.
 2. **Ask once**, reusing answers: plan/order/destination; autonomy (`standard`); fidelity bar including
-   explicit numeric comparison `none|required`; stop-or-degrade policy; refresh strategy (`scripted`).
+   explicit numeric comparison `none|required`; stop-or-degrade policy; refresh strategy (`uia` default
+   or `operator` human handoff only).
    Numeric scope has **no default**; the other defaults and modes follow the runbook.
 3. **Issue each unit's current v2 brief before packaging** at
    `<absolute-run>\assessment\briefs\<exact-unit>\migration-brief.md`, using the front door's printed
@@ -127,7 +128,7 @@ Generation: [agent architecture](docs/agent-architecture.md). Shared conventions
   live-Snowflake connectivity for **129 minutes / 298 tool calls** without ever surfacing the
   problem. Waiting is not progress.
   - **Cap it: ~2 minutes or 3 attempts, whichever comes first** — any unresponsive external system
-    (database/warehouse/gateway, MCP server, XMLA refresh, the Desktop bridge). Cap *relaunches* at 2
+    (database/warehouse/gateway, MCP server, the Desktop bridge). Cap *relaunches* at 2
     as well; "kill it and retry" is otherwise an unbounded loop.
   - **Unless the tool tells you it IS the timer** — some scripts self-bound and announce their own
     deadline. Measured: an agent applied the cap to such a script, killed it at 120 s and recorded

@@ -61,7 +61,7 @@ issued v2 consent/brief; never issue it yourself, invent a spec or silently wide
   live-Snowflake connectivity for **129 minutes / 298 tool calls** without ever surfacing the
   problem. Waiting is not progress.
   - **Cap it: ~2 minutes or 3 attempts, whichever comes first** — any unresponsive external system
-    (database/warehouse/gateway, MCP server, XMLA refresh, the Desktop bridge). Cap *relaunches* at 2
+    (database/warehouse/gateway, MCP server, the Desktop bridge). Cap *relaunches* at 2
     as well; "kill it and retry" is otherwise an unbounded loop.
   - **Unless the tool tells you it IS the timer** — some scripts self-bound and announce their own
     deadline. Measured: an agent applied the cap to such a script, killed it at 120 s and recorded
@@ -163,9 +163,13 @@ V gets artifacts/requirements/findings, not builder rationale. Oracle default-st
    ceilings. Rejustify prior labels; screenshot/static validate/engine selfcheck/`rebuilt`/Python replica/
    returned number is not fidelity proof.
 
-**#730 UNMEASURED:** supported host refresh/persist/cache/current-definition/cold-proof/capture/reload/PID
-rules outrank conflicting upstream host/`--pid`/reload guidance. No reload winner, ImageSave/UIA retirement
-or bypass. Missing host owner → block affected handoff, retain decision, never DIY.
+**Host refresh is UIA by default:** Desktop's own Refresh and guarded Save through UI Automation;
+`operator` is a human-driven Desktop handoff only, never an automated fallback, and MCP never runs a
+source refresh. Reload edited TMDL only into a clean Desktop (`hasUnsavedChanges: false`); measured, a
+dirty reload discards unsaved edits, so stop for a human. DAX-only edits: MCP Calculate or a clean
+reload, then `--save-only`. Save invocation, cache presence or mtime is not `PERSISTED` proof. Supported
+host refresh/persist/cache/current-definition/cold-proof/capture/reload/PID rules outrank conflicting
+upstream host/`--pid`/reload guidance. Missing host owner → block affected handoff, retain decision, never DIY.
 
 ## Fix, certify, then ship
 
