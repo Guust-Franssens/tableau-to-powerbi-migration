@@ -99,7 +99,10 @@ def _start(exe: Path, pbip: Path) -> int:
 
 def _launch_record(pid: int) -> str:
     """CIM CreationDate of `pid` as Windows PowerShell renders it (``/Date(<ms>)/``); "" when unread."""
-    script = f"Get-CimInstance Win32_Process -Filter 'ProcessId={pid}' | Select-Object CreationDate | ConvertTo-Json -Compress"
+    script = (
+        f"Get-CimInstance Win32_Process -Filter 'ProcessId={pid}'"
+        " | Select-Object CreationDate | ConvertTo-Json -Compress"
+    )
     try:
         out = subprocess.run(
             ["powershell.exe", "-NoProfile", "-Command", script],
