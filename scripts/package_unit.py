@@ -234,6 +234,8 @@ import reference_evidence  # noqa: E402  # pylint: disable=wrong-import-position
 import package_filesystem as pfs  # noqa: E402  # pylint: disable=wrong-import-position
 import package_role_identity as pri  # noqa: E402  # pylint: disable=wrong-import-position
 import package_data_access as data_access  # noqa: E402  # pylint: disable=wrong-import-position
+import engine_input_staging as input_staging  # noqa: E402  # pylint: disable=wrong-import-position
+import unit_ids  # noqa: E402  # pylint: disable=wrong-import-position
 import check_datamodel as m_syntax  # noqa: E402  # pylint: disable=wrong-import-position
 from bundle_corpus import is_reparse_entry  # noqa: E402  # pylint: disable=wrong-import-position
 from migration_bundle import load_bundle  # noqa: E402  # pylint: disable=wrong-import-position
@@ -1199,6 +1201,37 @@ def scope_provenance(provenance: Any, asset_sha: str | None) -> tuple[dict[str, 
         and entry["input"].get("sha256") == asset_sha
     ]
     return payload, entries
+
+
+def compact_provenance_entries(
+    entries: list[dict[str, Any]], run_dir: Path, unit: str, asset: Path | None
+) -> list[dict[str, Any]]:
+    """Name the shipped compact asset in provenance and keep the stamped name as `original_file` (#865).
+
+    `run_estate` stamps the ORIGINAL input folder, then hard-links the selected workbook into
+    `engine-input/` as `<luid>_<unit>`, so the shipped asset and its stamped `input.file` differ by
+    design. Only this run's own unit index may vouch for that one mapping, and only for rows that
+    already matched the asset's sha256. Any other difference is left unchanged for the S2
+    source-identity gate to refuse.
+    """
+    if asset is None:
+        return entries
+    try:
+        index = unit_ids.read_unit_index(run_dir)
+    except unit_ids.UnitIndexInvalid:
+        return entries
+    matches = [entry for entry in index or [] if entry["id"] == unit]
+    if len(matches) != 1:
+        return entries
+    original = PurePosixPath(matches[0]["key"]).name
+    if input_staging.staged_name(original, matches[0]["source"]["luid"], unit) != asset.name:
+        return entries
+    return [
+        {**entry, "input": {**entry["input"], "file": asset.name, "original_file": original}}
+        if entry["input"].get("file") == original
+        else entry
+        for entry in entries
+    ]
 
 
 def filename_luid(asset: Path | None) -> str | None:
@@ -5518,6 +5551,7 @@ def _assemble_unit(  # pylint: disable=too-many-locals,too-many-arguments,too-ma
         notes.append(handover_note)
 
     _payload, entries = scope_provenance(read_json(bundle / "source-provenance.json"), sha256_of(asset))
+    entries = compact_provenance_entries(entries, bundle.parent, unit, asset)
     # #480 round 6, the SECOND untrusted document, contained at its own intake for the same reason as
     # the oracle capture. Its `origin.workbook_luid` is server-supplied, and three consumers read it
     # before anything sweeps it: `shippable_provenance` ships it, `render_handover` interpolates it
