@@ -660,7 +660,7 @@ dispatch authorization and does not call or reimplement `check_reference_readine
 
 `package_role_identity.py` re-runs no-follow S1 at the S2 entry seam rather than trusting an earlier
 clearance. It reads **package-local P through `VerifiedPackage.read_verified_member`**, using the
-single provenance row matched to the held source filename/SHA. P's source SHA, workbook-origin LUID,
+single provenance row matched to the held source SHA (its `input.file` is a label, not identity). P's source SHA, workbook-origin LUID,
 exact schema, source-match state, row cardinalities and increasing ordinals must agree. The held spec
 owns topology and every physical published occurrence: P joins it one-to-one by ordinal and exact key,
 with equal counts. Optional spec LUIDs corroborate P; they never select a provider or rescue absent P.

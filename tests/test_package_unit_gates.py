@@ -1161,13 +1161,6 @@ def test_the_packager_budgets_against_those_same_two_literals() -> None:
 
 
 # --------------------------------------------------------------------------------------------
-# the scoped report, against BOTH gates - the positive control for round-1 finding 1
-
-
-# --------------------------------------------------------------------------------------------
-# The ceilings themselves. Pinned HERE, in a suite the package-unit mutation harness scored (retired in #830), because
-
-# --------------------------------------------------------------------------------------------
 # compact-ID runs (#865): the engine ships `<luid>_<unit>`, provenance stamped the original name
 # --------------------------------------------------------------------------------------------
 

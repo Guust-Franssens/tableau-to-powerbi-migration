@@ -1334,9 +1334,12 @@ def test_current_working_roles_are_exact_declarations_not_name_discovery(
         ("provenance-scope", "package_scope_mismatch"),
         ("provenance-row", "provenance_row_cardinality"),
         ("provenance-digest", "provenance_sha_disagrees_with_source"),
+        ("label-empty", "identity_type_invalid"),
+        ("label-absent", "identity_type_invalid"),
         ("spec-file", "spec_file_disagrees_with_source"),
         ("luid-namespace", "luid_namespace_mismatch"),
         ("luid-mismatch", "server_luid_contradiction"),
+        ("luid-agrees-only-with-label", "server_luid_contradiction"),
         ("luid-missing", "server_luid_unrepresented"),
         ("source-extension", "role_declaration_not_an_admissible_candidate"),
         ("source-extra", "role_ambiguous"),
@@ -1361,6 +1364,10 @@ def test_current_working_pure_identity_rules_refuse_coherent_digests_with_wrong_
         payload["inputs"] *= 2
     elif change == "provenance-digest":
         payload["inputs"][0]["input"]["sha256"] = "0" * 64
+    elif change == "label-empty":
+        payload["inputs"][0]["input"]["file"] = ""
+    elif change == "label-absent":
+        del payload["inputs"][0]["input"]["file"]
     elif change == "spec-file":
         name, payload = "migration-spec.json", json.loads(raw["migration-spec.json"])
         payload["source"]["file_name"] = "Other.twb"
@@ -1368,6 +1375,9 @@ def test_current_working_pure_identity_rules_refuse_coherent_digests_with_wrong_
         payload["inputs"][0]["origin"]["datasource_luid"] = DS_LUID
     elif change == "luid-mismatch":
         payload["inputs"][0]["origin"]["workbook_luid"] = DS_LUID
+    elif change == "luid-agrees-only-with-label":
+        payload["inputs"][0]["origin"]["workbook_luid"] = DS_LUID
+        payload["inputs"][0]["input"]["file"] = f"{DS_LUID}_Revenue.twb"
     elif change == "luid-missing":
         payload["inputs"][0]["origin"] = {}
     elif change == "source-extra":
@@ -1387,6 +1397,17 @@ def test_current_working_pure_identity_rules_refuse_coherent_digests_with_wrong_
     assert pri.read_current_source_data_handoff(
         package, expected_package_working_revision=_w_revision(_w_bytes(package))
     ) == (code, None)
+
+
+@pytest.mark.parametrize("label", [f"{DS_LUID}_Revenue.twb", "Revenue.twb"], ids=["foreign-luid", "no-luid"])
+def test_current_working_provenance_file_is_a_label_not_identity(tmp_path: Path, label: str) -> None:
+    """#865: compact-ID staging renames the asset; sha256 plus the ASSET-name LUID still identify it."""
+    package, raw = _w_package(tmp_path / "Unit")
+    payload = json.loads(raw["source-provenance.json"])
+    payload["inputs"][0]["input"]["file"] = label
+    _w_put(package, "source-provenance.json", _w_json(payload))
+    _w_redeclare(package, "source-provenance.json")
+    _w_read(package, _w_revision(_w_bytes(package)))
 
 
 @pytest.mark.parametrize(
