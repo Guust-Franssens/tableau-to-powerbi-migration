@@ -2360,6 +2360,47 @@ def test_zero_process_jobs_neither_ends_the_wait_nor_changes_the_exit_code(
         assert calls == ["Refresh"]
 
 
+@pytest.mark.parametrize("jobs", [0, OSError("unreadable")], ids=["zero", "unknown"])
+def test_idle_or_unreadable_process_jobs_never_withhold_save(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], jobs: object
+) -> None:
+    """A Save path with progress reading `0` or `?`: Save still runs and the exit code is unchanged."""
+    context, args, calls = _wire_ui_route(monkeypatch)
+
+    def read_jobs(_connection) -> int:
+        if isinstance(jobs, Exception):
+            raise jobs
+        return jobs
+
+    monkeypatch.setattr(refresh_pbip_model, "_open_progress_connection", lambda _context: SimpleNamespace())
+    monkeypatch.setattr(refresh_pbip_model, "_process_jobs", read_jobs)
+
+    result = refresh_pbip_model._ui_refresh_locked(context, Path("missing-cache.abf"), args)
+
+    output = capsys.readouterr().out
+    assert f"process_jobs={'?' if isinstance(jobs, Exception) else 0}" in output
+    assert result == 0, output
+    assert calls == ["Refresh", "canaries", "Save"]
+
+
+def test_failure_exit_still_prints_the_timing_summary(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    context, args, calls = _wire_ui_route(monkeypatch)
+    monkeypatch.setattr(refresh_pbip_model, "_wait_for_engine_completion", lambda *_args, **_kwargs: (False, None))
+
+    result = refresh_pbip_model._ui_refresh_locked(context, Path("missing-cache.abf"), args)
+
+    lines = capsys.readouterr().out.splitlines()
+    assert result == 3
+    assert calls == ["Refresh"]
+    refusal = lines.index("REFRESH: TIMEOUT - engine completion not established before the bounded deadline")
+    summaries = [line for line in lines if line.startswith("REFRESH_SUMMARY ")]
+    assert len(summaries) == 1, lines
+    assert lines.index(summaries[0]) > refusal
+    assert summaries[0].endswith("save=skipped")
+
+
 def test_no_save_and_failed_completion_never_invoke_ui_save(monkeypatch: pytest.MonkeyPatch) -> None:
     context, args, calls = _wire_ui_route(monkeypatch, no_save=True)
     assert refresh_pbip_model._ui_refresh_locked(context, Path("missing-cache.abf"), args) == 0
@@ -2652,14 +2693,54 @@ def test_save_only_never_refreshes_and_earns_save_ok_only_on_a_clean_post_save_b
     assert "Save persists everything loaded in this Desktop" in output
     if dirty_after_save:
         assert result == 1, output
-        assert calls == ["Save"]
+        assert calls == ["canaries", "Save"]
         assert "REFRESH: NOT_PERSISTED (post-Save verification unavailable: DesktopActionError)" in output
         assert "SAVE_OK" not in output
     else:
         assert result == 0, output
-        assert calls == ["Save", "canaries"]
+        assert calls == ["canaries", "Save"]
         assert "REFRESH: SAVE_OK" in output
         assert "DATA_OK" not in output
+
+
+@pytest.mark.parametrize("refusal", ["binding", "no_data"])
+def test_save_only_refuses_before_save_so_the_cache_is_untouched(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str], refusal: str
+) -> None:
+    """A wrong binding (another catalogue on the port) or empty canaries refuse before Save, never after."""
+    emit_verdict = refresh_pbip_model._emit_data_verdict
+    context, _args, calls = _wire_ui_route(monkeypatch, rows=0 if refusal == "no_data" else 1)
+    cache = tmp_path / "cache.abf"
+    cache.write_bytes(b"old synthetic cache")
+    instance = {**_ready_bridge()["instances"][0], "hasUnsavedChanges": True}
+    wired_invoke = refresh_pbip_model.invoke_desktop_action
+
+    def invoke(action: str, **kwargs) -> ActionResult:
+        if action == "Save":
+            cache.write_bytes(b"overwritten")
+        return wired_invoke(action, **kwargs)
+
+    def changed_catalogue(*_args, **_kwargs):
+        raise refresh_pbip_model.ObservationUnavailable("CATALOGUE_CHANGED")
+
+    _wire_main(monkeypatch, context, instance, cache)
+    monkeypatch.setattr(refresh_pbip_model, "invoke_desktop_action", invoke)
+    monkeypatch.setattr(refresh_pbip_model, "_emit_data_verdict", emit_verdict)
+    if refusal == "binding":
+        monkeypatch.setattr(refresh_pbip_model, "bound_call", changed_catalogue)
+
+    result = refresh_pbip_model.main(["--pid", "123", "--save-only", "--canaries", "Orders"])
+
+    output = capsys.readouterr().out
+    assert calls == ["canaries"]
+    assert cache.read_bytes() == b"old synthetic cache"
+    assert result == 1, output
+    if refusal == "no_data":
+        assert "REFRESH: NO_DATA (empty: Orders" in output
+    else:
+        assert "REFRESH: NOT_PERSISTED (UI Save was not established: ObservationUnavailable)" in output
+    assert "REFRESH_SUMMARY " in output
+    assert "SAVE_OK" not in output
 
 
 @pytest.mark.parametrize(

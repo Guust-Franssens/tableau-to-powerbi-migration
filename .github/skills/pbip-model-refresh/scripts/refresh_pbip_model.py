@@ -20,10 +20,12 @@ How it works
   skips Save only. A dialog is never clicked: it stops the run for a human (`DIALOG_NEEDS_HUMAN`).
 - Progress: `REFRESH_STATUS` lines stream on every field change and at least every 30 seconds, read
   from a separate ADOMD connection that stays readable while Desktop's refresh popup is up. Progress
-  never decides the result. `REFRESH_SUMMARY` precedes the data verdict.
-- `--save-only` (after an MCP Calculate of MCP-made DAX edits): Desktop's guarded Save of what is
-  loaded now, then the model check against the freshly written TMDL and the canaries. It never
-  refreshes and earns `REFRESH: SAVE_OK`, never a claim of fresh source data.
+  never decides the result. `REFRESH_SUMMARY` precedes the data verdict; on a refusal it follows the
+  refusal line.
+- `--save-only` (after an MCP Calculate of MCP-made DAX edits): the canaries on what is loaded now,
+  then Desktop's guarded Save, then the model check against the freshly written TMDL. Zero-row
+  canaries or a binding refusal stop before Save. It never refreshes and earns `REFRESH: SAVE_OK`,
+  never a claim of fresh source data.
 - `--verify-only`: read-only identity and canary checks; no Refresh and no Save.
 
 Cache invalidation (important)
@@ -41,6 +43,9 @@ whatever Analysis Services instance answers on the port. Two defences run before
 `--port`, if given, must equal the port derived from `--pid` (a mismatch aborts, so it can never bypass
 pid-based discovery), and `same_model()` compares the connected model's tables, columns and measures
 with the TMDL that owns the destination cache and aborts on any difference with `REFRESH: WRONG_MODEL`.
+`--save-only` runs `same_model()` after Save instead, because MCP DAX edits legitimately differ from the
+TMDL on disk; before its Save the PID, port and catalogue binding hold, and Desktop's own Save writes
+only its own model to its own file.
 File metadata cannot tell you whose rows are in the cache; only the model's own contents can.
 """
 
@@ -1178,6 +1183,7 @@ class _Progress:  # pylint: disable=too-many-instance-attributes
         self._wake = threading.Event()
         self._stop = False
         self._muted = False
+        self._finished = False
         self._thread = threading.Thread(target=self._run, name="refresh-status", daemon=True)
 
     def __enter__(self) -> _Progress:
@@ -1185,6 +1191,10 @@ class _Progress:  # pylint: disable=too-many-instance-attributes
         return self
 
     def __exit__(self, *_exc: object) -> None:
+        if not self._finished:
+            # A failure exit still gets its timing summary; it is informational and returns nothing.
+            with contextlib.suppress(Exception):
+                print(self.finish(), flush=True)
         self._muted = True
         self._close()
 
@@ -1200,7 +1210,7 @@ class _Progress:  # pylint: disable=too-many-instance-attributes
         """Show the `done` phase, stop streaming and return the summary line."""
         self.phase("done")
         self._close()
-        self._muted = True
+        self._muted = self._finished = True
         spent = self._spent
         refresh = sum(spent.get(name, 0.0) for name in ("invoke", "refreshing", "committed"))
         save = f"{spent['saving']:.0f}s" if "saving" in spent else "skipped"
@@ -1505,27 +1515,32 @@ def _ui_save_only_locked(
     *,
     deadline: float,
 ) -> int:
-    """`--save-only`: Desktop's guarded Save of what is loaded now, then model and canary checks; never Refresh.
+    """`--save-only`: canaries on what is loaded now, then Desktop's guarded Save, then the model check.
 
-    Before Save only the binding is checked: after MCP edits the live model legitimately differs from
-    disk, so `same_model` runs against the TMDL that Save just wrote.
+    Never Refresh. Everything that can refuse before Save does: the canaries read the in-memory model,
+    and `_cli_save` rechecks the binding (PID and start, its sole msmdsrv child and port, the bound
+    catalogue, the held root window). That binding is the pre-Save identity check: Save is Desktop's
+    own Save on the held window, so it writes that Desktop's model to its own file, never a sibling's.
+    `same_model` cannot run before Save, because MCP DAX edits (measures, calculated columns or tables)
+    legitimately differ from the TMDL on disk; it runs after Save against the TMDL Save just wrote.
     """
     before_stamp = cache.stat().st_mtime if cache.exists() else 0.0
     print("  disclosure: Save persists everything loaded in this Desktop, including edits not made by this run")
-    with _Progress(context, "saving") as progress:
-        refused = _cli_save(context, cache, deadline, model_gate=False)
-        if refused is not None:
-            return refused
-        if not _identity_gate(context.port, cache):
-            return 2
-        progress.phase("canaries")
+    with _Progress(context, "canaries") as progress:
         try:
             observations = probe_observations(
                 context.bound, list(args.canaries), timeout_seconds=_ui_read_budget(deadline)
             )
         except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
-            return _ui_stop(exc, "Post-Save", f"DATA_CHECK_FAILED ({type(exc).__name__}: {exc})", 2)
+            return _ui_stop(exc, "Pre-Save", f"DATA_CHECK_FAILED ({type(exc).__name__}: {exc})", 2)
         results = [(item.table, item.returned_rows) for item in observations]
+        if all(rows > 0 for _, rows in results):
+            progress.phase("saving")
+            refused = _cli_save(context, cache, deadline, model_gate=False)
+            if refused is not None:
+                return refused
+            if not _identity_gate(context.port, cache):
+                return 2
         print(progress.finish())
     return _emit_data_verdict(cache, before_stamp, args, results, False)
 
@@ -1714,8 +1729,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--save-only",
         action="store_true",
-        help="After an MCP Calculate of MCP-made edits: Desktop's guarded Save of what is loaded now, then "
-        "the model check and canaries. Never refreshes; requires --canaries; earns SAVE_OK",
+        help="After an MCP Calculate of MCP-made edits: canaries on what is loaded now, then Desktop's guarded "
+        "Save, then the model check. Never refreshes; requires --canaries; earns SAVE_OK",
     )
     parser.add_argument(
         "--ui-refresh",
@@ -1829,7 +1844,8 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-retu
         results, implicit = row_counts(port, _canary_tables(args))
         return _emit_data_verdict(cache, before_stamp, args, results, implicit)
     # Gate on identity before Refresh: refreshing a sibling's model is a self-consistent false positive.
-    # `--save-only` checks the model only after Save, because MCP edits legitimately differ from disk.
+    # `--save-only` checks the model only after Save, because MCP edits legitimately differ from disk;
+    # its canaries and the PID/port/catalogue binding still refuse before Save.
     if not args.save_only and not _identity_gate(port, cache):
         return 2
     try:

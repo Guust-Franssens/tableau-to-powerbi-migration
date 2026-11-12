@@ -133,7 +133,8 @@ REFRESH_SUMMARY total=<n>s refresh=<n>s canaries=<n>s save=<n>s|skipped
 `DISCOVER_JOBS` rows whose `JOB_DESCRIPTION` is `Process` (measured: 4 to 0 during a long refresh
 while Desktop's progress popup was up); `?` means unreadable, and `dialog=?` means the dialog check
 did not complete. There is no percentage and no ETA, and
-progress never decides success. `REFRESH_SUMMARY` prints before the verdict.
+progress never decides success. `REFRESH_SUMMARY` prints before the verdict, and after the refusal
+line when a run stops early (refusal, dialog, `NO_DATA`, timeout).
 
 1. When a refresh may take longer than about a minute, start it attached and asynchronous. You
    started it, so you know the tool's PID.
@@ -156,8 +157,10 @@ A DAX-only edit never needs a source refresh:
 - DAX edited through live MCP: MCP Calculate, then `--save-only`.
 - DAX edited in TMDL files: reload a clean Desktop (next section), then `--save-only`.
 
-`--save-only --pid <pid> --canaries <table> ...` never refreshes. It runs the guarded Save, prints
-that Save persists everything loaded in that Desktop (not only your edit), and ends `REFRESH: SAVE_OK`.
+`--save-only --pid <pid> --canaries <table> ...` never refreshes. It runs the canaries on what is
+loaded, then the guarded Save, prints that Save persists everything loaded in that Desktop (not only
+your edit), and ends `REFRESH: SAVE_OK`. Empty canaries stop with `NO_DATA` before Save. The
+`WRONG_MODEL` model check runs after Save against the TMDL it wrote, because MCP edits differ from disk.
 MCP may Calculate MCP-made DAX and author metadata; it never runs a source refresh.
 
 ### Reload edited TMDL into a clean Desktop (#730, #863)
