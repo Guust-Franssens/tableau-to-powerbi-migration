@@ -1,57 +1,30 @@
 """
-purpose: Refresh a local PBIP model in Power BI Desktop and PERSIST the result, so the next agent
-         (and the next Desktop open) sees real data instead of an empty model.
-usage:   python .github/skills/pbip-model-refresh/scripts/refresh_pbip_model.py
-             [--pid <pbidesktop-pid>] [--canaries "A" "B"] [--tables "A" "B"]
-             [--calculate-only] [--no-save] [--ui-refresh]
+purpose: Refresh a local PBIP model through Power BI Desktop's own Refresh, persist it through
+         Desktop's own guarded Save, and prove the data is really there, so the next agent (and the
+         next Desktop open) sees real data instead of an empty model.
+usage:   python .github/skills/pbip-model-refresh/scripts/refresh_pbip_model.py --pid <pbidesktop-pid>
+             [--canaries "A" "B"] [--no-save] [--automatic-source-scope EXPECTED_SOURCES_JSON]
+             [--verify-only | --save-only]
          (ships inside the `pbip-model-refresh` skill; run it by its path from wherever the folder
           was copied. `scripts/refresh_pbip_model.py` in this repo is a forwarding shim.)
 
-Why this exists
----------------
-Two separate gaps kept biting real migrations:
+WARNING: the default refresh executes ALL current M of the model, including native/custom SQL, with
+possible source-side cost. `--no-save` prevents Save, NOT source execution. Automatic callers add
+`--automatic-source-scope <file>` together with `--canaries`.
 
-1. **The refresh itself was hand-rolled every time.** The only working path against a local PBIP is
-   TOM/XMLA over the child `msmdsrv` port, which means: discover the port, load ADOMD.NET, resolve
-   the catalog GUID, then send a TMSL `refresh`. Re-deriving that per migration is slow and easy to
-   get subtly wrong.
-
-2. **The refresh was not persisted.** Power BI Desktop caches a PBIP's data in
-   `<Name>.SemanticModel/.pbi/cache.abf` (gitignored, it is data), and an XMLA refresh alone only
-   populates the *in-memory* model - so if nothing writes that cache, the next agent opens an empty
-   model and has to refresh again (hitting the credential prompt all over again).
-
-   **There IS a programmatic save: AMO `Server.ImageSave(databaseId, stream)`.** This writes the
-   cache file directly, so no UI is involved and the flow works headless.
-
-   Finding it required disbelieving a plausible answer. The Power BI product group's guidance is
-   that the Modeling MCP never touches the Desktop Bridge - Desktop hosts a local Analysis Services
-   instance, the MCP matches it by open file name and connects to `localhost:<port>`, so every
-   modeling tool acts on the in-memory engine - and that *"writing that state back to the .pbip /
-   cache.abf file is a separate Save action that only the Desktop UI performs."* True of the
-   MCP/Bridge surface, but NOT of the engine: probing it showed a TMSL `backup` is refused only
-   because Desktop runs Analysis Services in **Diskless mode** (*"Backup/Restore ... not
-   supported"*), while that same configuration sets `EnableDisklessTMImageSave=1`. AMO exposes the
-   corresponding call, and it works.
-
-   **Proven end to end 2026-07-30, with the control that rules out a silent re-refresh:** delete
-   `cache.abf` -> refresh in memory -> `ImageSave` -> **kill Desktop with -Force** (no save prompt)
-   -> **rename the source data folder away** -> reopen -> `DATA_OK` with real rows. With the source
-   absent, that data can only have come from the cache. Output is ~113-114 KB, matching Desktop's
-   own save (114.8 KB).
-
-   !! **That proof holds ONLY when the project's `compatibilityLevel` matches the live database's.**
-   Root-caused 2026-08-07: Desktop silently runs the database ABOVE the declared level (measured live
-   `1606` vs a declared `1604`), and `ImageSave` serialises the live one - so on a mismatched bundle
-   the reopen fails with a CompatibilityLevel *downgrade* error and no visible message. That is why
-   the original run succeeded and later ones did not: the difference was the bundle, not the method.
-   `image_save()` aligns `database.tmdl` to the live level as part of saving, which is what
-   Desktop's own Save does. See the `--save` warning below.
-
-   Two implementation notes: the AMO client raises *"The server sent an unrecognizable response"*
-   while writing the file correctly, so success is judged by the FILE (exists, non-empty, newly
-   written), never by the absence of an exception; and `database_operations ExportToTmdlFolder`
-   persists model *definition* changes but carries no rows, so it cannot substitute for this.
+How it works
+------------
+- Default: check the bridge, the observer and the model identity, invoke Desktop's own Refresh through
+  UI Automation, wait for typed engine completion (every source partition refreshed after the Invoke),
+  run the canaries, then Desktop's own guarded Save, then print one `REFRESH:` verdict. `--no-save`
+  skips Save only. A dialog is never clicked: it stops the run for a human (`DIALOG_NEEDS_HUMAN`).
+- Progress: `REFRESH_STATUS` lines stream on every field change and at least every 30 seconds, read
+  from a separate ADOMD connection that stays readable while Desktop's refresh popup is up. Progress
+  never decides the result. `REFRESH_SUMMARY` precedes the data verdict.
+- `--save-only` (after an MCP Calculate of MCP-made DAX edits): Desktop's guarded Save of what is
+  loaded now, then the model check against the freshly written TMDL and the canaries. It never
+  refreshes and earns `REFRESH: SAVE_OK`, never a claim of fresh source data.
+- `--verify-only`: read-only identity and canary checks; no Refresh and no Save.
 
 Cache invalidation (important)
 ------------------------------
@@ -63,26 +36,20 @@ then save. Anything that rewrites TMDL afterwards - including the host repo's sa
 
 Binding to the right instance (parallel batches)
 ------------------------------------------------
-The destination is resolved from the pid (`cache_file`), but the DATA comes from whatever Analysis
-Services instance answers on `port`. If those two ever disagree - a widened port lookup, or a
-`--port` pointed at another instance - this would write a **sibling migration's model into your own
-correct `cache.abf`**, and file metadata could not catch it: `image_save` can only check that the
-file exists, is non-empty and is newly written, and `row_counts` queries that same wrong port, so
-both signals agree and both are wrong. Two defences run BEFORE the refresh: `--port`, if given, must
-equal the port derived from the pid (a mismatch aborts, so it can never bypass pid-based discovery),
-and `same_model()` compares the connected model's tables with the TMDL that owns the destination
-cache and aborts on any difference with `REFRESH: WRONG_MODEL`. File metadata fundamentally cannot
-tell you whose rows are in the blob; only the model's own contents can.
+The destination cache is resolved from the file Desktop has open for `--pid`, but the DATA comes from
+whatever Analysis Services instance answers on the port. Two defences run before any Refresh or Save:
+`--port`, if given, must equal the port derived from `--pid` (a mismatch aborts, so it can never bypass
+pid-based discovery), and `same_model()` compares the connected model's tables, columns and measures
+with the TMDL that owns the destination cache and aborts on any difference with `REFRESH: WRONG_MODEL`.
+File metadata cannot tell you whose rows are in the cache; only the model's own contents can.
 """
 
 from __future__ import annotations
 
-# pylint: disable=too-many-lines
-
 import argparse
+import contextlib
 import ctypes
 import hashlib
-import inspect
 import json
 import math
 import os
@@ -92,10 +59,7 @@ import subprocess
 import sys
 import threading
 import time
-import uuid
-from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
@@ -104,58 +68,37 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # ruff: noqa: E402  (the sys.path insert above must precede this import)
 # pylint: disable=wrong-import-position
 from probe_desktop_query import (
+    AdomdUnavailable,
     BoundDesktop,
     DesktopIdentity,
     ObservationUnavailable,
     _load_adomd,
-    _observation_errors,
-    _validate_observation_request,
     bind_desktop,
     bound_call,
     column_names,
-    desktop_identity,
     discover_port,
     first_table,
     is_auto_date_table_name,
     measure_names,
-    nuget_packages_root,
     probe_observations,
-    recheck_bound,
     table_names,
 )
 from _desktop_actions import (
     ACTION_CHILD_TIMEOUT_SECONDS,
+    ActionResult,
     CompletionResult,
     DesktopActionError,
     PartitionSnapshot,
+    _scope_reads,
     check_automatic_source_scope,
     check_baseline,
     check_completion,
-    count_refreshed,
     invoke_desktop_action,
     read_partition_snapshot,
 )
+from _source_scope import SourceScopeError, check_source_scope, load_expected_sources
 
-# Cache-file integrity + atomic staged-write/rollback primitives live in _abf so this module
-# stays under its line cap; re-exported here so callers and tests reach them via refresh_pbip_model.
-from _abf import (  # noqa: F401  # pylint: disable=unused-import
-    _ABF_BLOCK_MAGIC,
-    _ABF_MAX_BLOCK_BYTES,
-    _ABF_PREAMBLE,
-    CompatRollbackError,
-    ImageObservation,
-    _ImageInstallation,
-    _abf_rejection_reason,
-    _checked_image,
-    _cleanup_staging,
-    _is_complete_abf,
-    _restore_rollback_snapshot,
-    _snapshot_rollback_paths,
-    _staged_image_write,
-    _staging_path,
-)
-
-# Per-model interprocess lock for the persist transaction, in its own module for the same reason;
+# Per-model interprocess lock that serializes one model's UI Refresh/Save, in its own module;
 # re-exported so callers and tests reach it via refresh_pbip_model.
 from _lock import (  # noqa: F401  # pylint: disable=unused-import
     LockUnavailable,
@@ -163,8 +106,8 @@ from _lock import (  # noqa: F401  # pylint: disable=unused-import
     model_lock,
 )
 
-# The verdict/reporting layer lives in _verdict for the same line-cap reason as _abf and _lock;
-# re-exported here so callers and tests reach it via refresh_pbip_model.
+# The verdict/reporting layer lives in _verdict to keep this module under its line cap; re-exported
+# here so callers and tests reach it via refresh_pbip_model.
 from _verdict import (  # noqa: F401  # pylint: disable=unused-import
     _canary_tables,
     _emit_data_verdict,
@@ -180,10 +123,6 @@ from _desktop_observer import (
     DialogFoundError,
     observe,
     emit_observation,
-    join_with_credential_poll,
-    print_refresh_banner,
-    print_refresh_heartbeat,
-    print_refresh_unknown_banner,
     raise_terminal_detection,
     print_operation_refusal,
     dialog_stop_detail,
@@ -194,24 +133,13 @@ from _desktop_observer import (
 
 @dataclass(frozen=True, slots=True)
 class RefreshObservation:
-    """The XMLA request that returned, not an assertion that all data sources loaded."""
+    """Desktop's own whole-model Refresh, completed per typed partition evidence; rows are not asserted."""
 
     catalogue: str
     refresh_type: Literal["full", "calculate"]
     scope: Literal["database", "tables"]
     tables: tuple[str, ...]
     identity: DesktopIdentity
-
-
-@dataclass(frozen=True, slots=True)
-class PersistenceObservation:
-    """Native ImageSave selection and checked readback; durable commitment remains unestablished."""
-
-    catalogue: str
-    compatibility_level: int
-    image: ImageObservation
-    identity: DesktopIdentity
-    method: Literal["AMO_ImageSave"] = "AMO_ImageSave"
 
 
 @dataclass(frozen=True, slots=True)
@@ -235,7 +163,7 @@ class SaveObservation:
 
 @dataclass(frozen=True, slots=True)
 class UIRefreshContext:
-    """The held Desktop/model identity shared by one explicit UI refresh operation."""
+    """The held Desktop/model identity shared by one UI refresh or save operation."""
 
     pid: int
     port: int
@@ -243,35 +171,13 @@ class UIRefreshContext:
     root_hwnd: int
 
 
-# How long a persist waits for a CONCURRENT persist of the same model to finish before giving up
-# (issue #114). A persist writes ~114 KB and takes seconds, so a live peer clears well within this;
-# the wait only bites a genuinely stuck LIVE holder (a dead holder's lock is reclaimed at once, never
-# waited on). On timeout `_persist_image` raises `ModelLockTimeout` and `_refresh_and_save` REFUSES to
-# persist (`NOT_PERSISTED`), naming the concurrent run.
+# How long a UI Refresh/Save waits for a CONCURRENT run on the same model to release the per-model
+# lock (issue #114). A dead holder's lock is reclaimed at once, never waited on. On timeout the CLI
+# refuses with `NOT_PERSISTED` and the API raises `ModelLockTimeout`, before any Desktop action.
 PERSIST_LOCK_TIMEOUT_SECONDS = 120.0
-REFRESH_TYPE_FULL = "full"
-REFRESH_TYPE_CALCULATE = "calculate"
-REFRESH_TYPES = {REFRESH_TYPE_FULL, REFRESH_TYPE_CALCULATE}
-
-# Legacy XMLA refresh ceiling used when progress tracing is explicitly disabled or for calculate-only
-# refreshes. Trace setup failures keep the absolute wall-clock backstop instead of returning here.
-REFRESH_TIMEOUT_SECONDS = 300
-
-# A server-level AMO trace observes ProgressReport* events from the separate ADOMD refresh session.
-# Liveness is deliberately NON-FATAL: local CSV refreshes showed ~2.1s gaps, but we have no evidence
-# for remote first-row latency. Killing on this timer would false-positive a healthy slow source.
-REFRESH_PROGRESS_LIVENESS_SECONDS = 120.0
-REFRESH_PROGRESS_THROTTLE_SECONDS = 2.0
-# The traced-mode fatal backstop. It must be comfortably above measured 700-750s customer Snowflake
-# refreshes; liveness only reports silence before this backstop fires.
+# The whole-operation deadline. It must be comfortably above measured 700-750s customer Snowflake
+# refreshes.
 REFRESH_ABSOLUTE_TIMEOUT_SECONDS = 3600.0
-
-# Grace on top of the XMLA ceiling before the legacy outer wall clock gives up. The XMLA layer honours
-# `CommandTimeout` precisely for a genuinely slow *query*, so letting it fire first yields a far
-# better error ("The XML for Analysis request timed out ... Timeout value: N sec") than a generic
-# wall-clock abort. The outer bound only exists to catch the case XMLA provably cannot interrupt:
-# a mashup engine parked on a sign-in modal in another process.
-REFRESH_WALL_CLOCK_GRACE_SECONDS = 30
 REFRESH_CREDENTIAL_POLL_SECONDS = POLL_INTERVAL_SECONDS
 REFRESH_HEARTBEAT_SECONDS = 30.0
 # After a UI Refresh completes or a UI Save returns, Desktop's own popup can linger briefly. The UI
@@ -289,15 +195,6 @@ TABLE_DECL_RE = re.compile(r"^table\s+(?:'([^']+)'|(\S+))", re.MULTILINE)
 # or `measure Total = SUM(...)`) yields just the name, never the expression that follows.
 COLUMN_DECL_RE = re.compile(r"^\s*column\s+(?:'([^']+)'|([^=\s]+))", re.MULTILINE)
 MEASURE_DECL_RE = re.compile(r"^\s*measure\s+(?:'([^']+)'|([^=\s]+))", re.MULTILINE)
-GENERATED_ARTIFACTS_KEY = "generated_artifacts"
-GENERATED_EDIT_DECLARATIONS = Path("_build") / "generated-edit-declarations.json"
-GENERATED_EDIT_DECLARATIONS_DIR = Path("_build") / "generated-edit-declarations"
-
-
-# The credential arbiter that settles a refresh TIMEOUT (slow source vs. sign-in modal). Resolved
-# relative to THIS file so the runtime recovery instruction always points at the copy that ships
-# INSIDE the bundle - it must not name a path that only exists in the host repo (issue #118).
-CREDENTIAL_PROBE = Path(__file__).resolve().parent / "probe_desktop_query.py"
 
 
 def _credential_state(
@@ -336,8 +233,10 @@ def _in_flight_credential_state(
 
 
 def _raise_if_blocked(pid: int, state: Observation) -> None:
-    """Any blocking dialog or a gone process stops the operation before it starts."""
+    """Any blocking dialog, a gone process or a window-less Desktop stops the operation before it starts."""
     raise_terminal_detection(pid, state)
+    if state.desktop_unready is not None:
+        raise DesktopUnreadyError(pid, state.desktop_unready)
 
 
 def _emit_dialog_finding(pid: int, finding: DialogFinding) -> None:
@@ -370,379 +269,6 @@ def _emit_desktop_unready(pid: int, reason: str) -> None:
     """Use the shared local window/session diagnostic, retaining the caller's exit band."""
     # pylint: disable=unused-argument
     print_operation_refusal("REFRESH", pid, "DESKTOP_UNREADY")
-
-
-def _catalog_id(conn) -> str:
-    """The database GUID a TMSL command must name, read from the server's own catalog DMV."""
-    cmd = conn.CreateCommand()
-    cmd.CommandText = "SELECT [CATALOG_NAME] FROM $SYSTEM.DBSCHEMA_CATALOGS"
-    reader = cmd.ExecuteReader()
-    try:
-        if not reader.Read():
-            raise RuntimeError("no catalog found on the Desktop Analysis Services instance")
-        return str(reader.GetValue(0))
-    finally:
-        reader.Close()
-
-
-# pylint: disable=too-many-arguments,too-many-branches,too-many-locals,too-many-statements
-def _join_refresh_worker(
-    worker: threading.Thread,
-    *,
-    desktop_pid: int | None,
-    initial_state: Observation | None,
-    total_timeout: float,
-    progress_monitor: RefreshProgressMonitor | None,
-    observation_mode: bool = False,
-    completed_at: Callable[[], float | None] | None = None,
-) -> bool:
-    """Poll Desktop with the in-flight detector in BOTH wait branches; any dialog stops the wait."""
-    deadline = time.monotonic() + total_timeout
-
-    def detector(pid: int) -> Observation:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise TimeoutError("observation deadline exhausted before start")
-        return _in_flight_credential_state(
-            pid,
-            expected_process_start=initial_state.process_started_at if initial_state else None,
-            timeout_s=min(8.0, remaining),
-        )
-
-    return _wait_refresh_worker(
-        worker,
-        desktop_pid=desktop_pid,
-        initial_state=initial_state,
-        total_timeout=total_timeout,
-        progress_monitor=progress_monitor,
-        observation_mode=observation_mode,
-        detector=detector,
-        deadline=deadline,
-        completed_at=completed_at,
-    )
-
-
-def _wait_refresh_worker(
-    worker: threading.Thread,
-    *,
-    desktop_pid: int | None,
-    initial_state: Observation | None,
-    total_timeout: float,
-    progress_monitor: RefreshProgressMonitor | None,
-    observation_mode: bool,
-    detector: Callable[[int], Observation],
-    deadline: float,
-    completed_at: Callable[[], float | None] | None = None,
-) -> bool:
-    """Wait for the refresh thread, with credential polling and optional progress liveness.
-
-    Both branches use the IN-FLIGHT detector and latch non-terminal findings until the deadline
-    (#376 review, finding 1). They used not to: the no-trace branch overrode
-    ``join_with_credential_poll``'s correct default with the t=0 ``_credential_state``, and the
-    progress branch called the t=0 raise helper - so Power BI's own progress dialog aborted the very
-    refresh it was reporting on, with no ``in_flight`` argument reaching the detector at all.
-    """
-    if desktop_pid is None and progress_monitor is None:
-        worker.join(max(0.0, deadline - time.monotonic()))
-        return not worker.is_alive() and time.monotonic() < deadline
-    return join_with_credential_poll(
-        worker,
-        pid=desktop_pid,
-        total_timeout=total_timeout,
-        heartbeat_seconds=REFRESH_HEARTBEAT_SECONDS,
-        poll_seconds=REFRESH_CREDENTIAL_POLL_SECONDS,
-        detector=detector,
-        initial_state=initial_state,
-        deadline=deadline,
-        before_wait=progress_monitor.print_liveness_warning_if_due if progress_monitor else None,
-        wait_limit=progress_monitor.seconds_until_liveness_warning if progress_monitor else None,
-        heartbeat=progress_monitor.print_evidence_heartbeat
-        if progress_monitor
-        else (None if observation_mode else print_refresh_heartbeat),
-        notices=not observation_mode,
-        completed_at=completed_at,
-    )
-
-
-# pylint: disable=too-many-arguments,too-many-locals,too-many-statements
-def refresh(
-    port: int,
-    tables: list[str] | None,
-    timeout_sec: int = REFRESH_TIMEOUT_SECONDS,
-    *,
-    refresh_type: str = REFRESH_TYPE_FULL,
-    desktop_pid: int | None = None,
-    initial_state: Observation | None = None,
-    progress_enabled: bool = True,
-    progress_liveness_sec: float = REFRESH_PROGRESS_LIVENESS_SECONDS,
-    absolute_timeout_sec: float = REFRESH_ABSOLUTE_TIMEOUT_SECONDS,
-    bound: BoundDesktop | None = None,
-    observations: list[RefreshObservation] | None = None,
-    return_observation: bool = False,
-) -> tuple[bool, str] | RefreshObservation:
-    """Send a TMSL refresh over XMLA; return the legacy tuple or one bound observation.
-
-    ``return_observation`` requires an exact bool. True returns only this invocation's immutable
-    facts after the worker and teardown finish, or raises a closed, detail-free refusal. Retired
-    ``observations`` sinks reject every non-None value before I/O; no collector can carry authority.
-
-    Refreshing named tables is preferred over the whole database: a full refresh can hang for
-    minutes on a large table that no report even uses. ``refresh_type='calculate'`` is an opt-in
-    DAX-only path: it recalculates formulas/relationships/hierarchies without re-reading source rows.
-    For full refreshes, the server-level AMO progress trace reports row-count evidence and non-fatal
-    silence warnings; if it cannot start, this function keeps the absolute wall-clock backstop and
-    loses only trace-dependent row-count and liveness output.
-
-    **The legacy timeout is real, but it does NOT bound the case it was added for.** Measured 2026-08-01,
-    both halves, each with the timeout verified on readback:
-
-    - ✅ It works at the XMLA layer. An expensive `EVALUATE` under `CommandTimeout = 1` / `5` raised
-      `AdomdErrorResponseException: The XML for Analysis request timed out ... Timeout value: N sec`
-      after 1.2 s / 6.0 s. Honoured, and precisely.
-    - ❌ It does not interrupt a credential wait. A one-table refresh against a Databricks source with
-      no cached credential, `CommandTimeout = 45`, ran **past 150 s** (hard wall-clock guard hit, call
-      never returned). Desktop stayed `Responding` throughout and no `cache.abf` was written.
-      ⚠️ Inferred mechanism: the mashup engine parks in a synchronous wait on a UI dialog in another
-      process, which the server cannot preempt the way it aborts a running query.
-
-    So it cuts short a source that is merely *slow*, and never one that is waiting on a human.
-    **Hence the outer wall clock below.** This used to say "the caller must run its own clock", and
-    that was a real defect dressed up as documentation: the retired `probe_live_source.py` did wrap it
-    (`subprocess.run(..., timeout=...)`), but every *direct* caller inherited nothing. Measured
-    2026-08-05, a direct `--pid` call against a never-authenticated Azure SQL server sat blocked on a
-    modal for **956 s** while `REFRESH_TIMEOUT_SECONDS = 300` never fired — and the caller who forgot
-    to wrap it was this repo's own agent. A rule an agent must remember is not a bound; a bound is a
-    bound.
-
-    The ADOMD call runs on a **daemon** thread so that a parked mashup engine — which genuinely
-    cannot be preempted — no longer keeps the *process* alive. We cannot cancel that work, but we can
-    always return control and a verdict, which is all any caller needs.
-
-    Historical note, because it nearly went in the other direction: an earlier attempt to measure this
-    was run against the *stale plugin copy* of this file, which had no timeout at all. It "ran past
-    90 s" because there was no 90. Never take a timing measurement against a bundle preflight reports
-    as STALE.
-    """
-    _validate_observation_request(return_observation, observations)
-    with _observation_errors(return_observation, preserve=(CompatRollbackError, ModelLockTimeout)):
-        return _refresh(
-            port,
-            tables,
-            timeout_sec,
-            refresh_type=refresh_type,
-            desktop_pid=desktop_pid,
-            initial_state=initial_state,
-            progress_enabled=progress_enabled,
-            progress_liveness_sec=progress_liveness_sec,
-            absolute_timeout_sec=absolute_timeout_sec,
-            bound=bound,
-            return_observation=return_observation,
-        )
-
-
-def _refresh(
-    port: int,
-    tables: list[str] | None,
-    timeout_sec: int,
-    *,
-    refresh_type: str,
-    desktop_pid: int | None,
-    initial_state: Observation | None,
-    progress_enabled: bool,
-    progress_liveness_sec: float,
-    absolute_timeout_sec: float,
-    bound: BoundDesktop | None,
-    return_observation: bool,
-) -> tuple[bool, str] | RefreshObservation:
-    """Run the existing refresh lifecycle with invocation-private results."""
-    if refresh_type not in REFRESH_TYPES:
-        raise ValueError(f"unsupported refresh type {refresh_type!r}; expected one of {sorted(REFRESH_TYPES)}")
-    if return_observation and bound is None:
-        raise ObservationUnavailable("IDENTITY_UNESTABLISHED")
-    if bound is not None and (bound.identity.port != port or bound.identity.pid != desktop_pid):
-        raise ObservationUnavailable("WRONG_PID_PORT")
-    targets = tuple(tables or ())
-
-    result: dict[str, tuple[bool, str] | BaseException | RefreshObservation] = {}
-    finished: dict[str, float] = {}
-    progress_monitor: RefreshProgressMonitor | None = None
-    command_timeout = timeout_sec
-    total_timeout = timeout_sec + REFRESH_WALL_CLOCK_GRACE_SECONDS
-    untraced_absolute_backstop = False
-    if desktop_pid is not None:
-        state = initial_state or (
-            _credential_state(desktop_pid, expected_process_start=bound.identity.process_start)
-            if bound
-            else _credential_state(desktop_pid)
-        )
-        if bound is not None and state.process_started_at not in {None, bound.identity.process_start}:
-            raise ObservationUnavailable("PID_REUSED")
-        _raise_if_blocked(desktop_pid, state)
-        initial_state = state
-    if progress_enabled and refresh_type == REFRESH_TYPE_FULL:
-        command_timeout = max(1, int(absolute_timeout_sec))
-        total_timeout = absolute_timeout_sec
-        untraced_absolute_backstop = True
-        try:
-            if return_observation:
-                progress_monitor = _start_refresh_progress_trace(port, progress_liveness_sec, observation_mode=True)
-            else:
-                progress_monitor = _start_refresh_progress_trace(port, progress_liveness_sec)
-            untraced_absolute_backstop = False
-            print(
-                f"[progress] enabled: no progress event for {progress_liveness_sec:.1f}s prints a warning "
-                f"(absolute backstop {absolute_timeout_sec:.0f}s)",
-                flush=True,
-            )
-        except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
-            if return_observation:
-                print("[progress] unavailable (TOOL_UNAVAILABLE); absolute backstop retained", file=sys.stderr)
-            else:
-                print(
-                    f"[progress] unavailable ({type(exc).__name__}: {exc}). Row counts and the liveness "
-                    "warning are OFF for this run; you cannot tell a slow refresh from a stuck one. "
-                    f"The {absolute_timeout_sec:.0f}s absolute backstop still applies. To regain visibility: "
-                    "restore the AMO package (Microsoft.AnalysisServices.NetCore.retail.amd64), or use "
-                    "the operator refresh strategy and watch Desktop's own row counter.",
-                    file=sys.stderr,
-                    flush=True,
-                )
-    if desktop_pid is not None and not return_observation:
-        state = initial_state or Observation()
-        if progress_monitor is None:
-            if untraced_absolute_backstop:
-                if state.unknown_reason:
-                    print(
-                        f"Blocking-dialog check on PID {desktop_pid} is UNKNOWN ({state.unknown_reason}). "
-                        f"Refreshing without progress trace, bounded by absolute backstop "
-                        f"{absolute_timeout_sec:.0f}s. DO NOT kill this process - at the deadline it "
-                        "re-checks and prints one final machine-readable verdict line. Killing it early "
-                        "yields NO verdict.",
-                        flush=True,
-                    )
-                else:
-                    print(
-                        f"No blocking dialog on PID {desktop_pid}. Refreshing without progress trace, "
-                        f"bounded by absolute backstop {absolute_timeout_sec:.0f}s. DO NOT kill this "
-                        "process - at the deadline it re-checks and prints one final machine-readable "
-                        "verdict line. Killing it early yields NO verdict.",
-                        flush=True,
-                    )
-            elif state.unknown_reason:
-                print_refresh_unknown_banner(
-                    desktop_pid, timeout_sec, REFRESH_WALL_CLOCK_GRACE_SECONDS, state.unknown_reason
-                )
-            else:
-                print_refresh_banner(
-                    desktop_pid,
-                    timeout_sec,
-                    REFRESH_WALL_CLOCK_GRACE_SECONDS,
-                    operation=refresh_type,
-                )
-        elif state.unknown_reason:
-            print(
-                f"Blocking-dialog check on PID {desktop_pid} is UNKNOWN ({state.unknown_reason}). "
-                f"Refreshing with progress liveness {progress_liveness_sec:.1f}s and absolute "
-                f"backstop {absolute_timeout_sec:.0f}s.",
-                flush=True,
-            )
-        else:
-            print(
-                f"No blocking dialog on PID {desktop_pid}. Refreshing with progress liveness "
-                f"{progress_liveness_sec:.1f}s and absolute backstop {absolute_timeout_sec:.0f}s.",
-                flush=True,
-            )
-
-    def _run() -> None:
-        conn = None
-        try:
-            try:
-                adomd_connection = _load_adomd(port)
-                selection = f";Initial Catalog={bound.catalogue};Connect Timeout=30" if bound is not None else ""
-                conn = adomd_connection(f"Data Source=localhost:{port}{selection}")
-                conn.Open()
-                if bound is not None:
-                    recheck_bound(bound, conn, observation_mode=return_observation)
-                catalog = bound.catalogue if bound is not None else _catalog_id(conn)
-                objects = [{"database": catalog, "table": t} for t in targets] if targets else [{"database": catalog}]
-                cmd = conn.CreateCommand()
-                cmd.CommandText = json.dumps({"refresh": {"type": refresh_type, "objects": objects}})
-                cmd.CommandTimeout = command_timeout
-                cmd.ExecuteNonQuery()
-                if bound is not None:
-                    recheck_bound(bound, conn, observation_mode=return_observation)
-                    result["observation"] = RefreshObservation(
-                        catalog, refresh_type, "tables" if targets else "database", targets, bound.identity
-                    )
-                target = "/".join(targets) if targets else "entire database"
-                verb = "calculated" if refresh_type == REFRESH_TYPE_CALCULATE else "refreshed"
-                result["ok"] = (True, f"{verb} {target} (catalog {catalog})")
-            finally:
-                if conn is not None:
-                    try:
-                        conn.Close()
-                    except Exception:  # noqa: BLE001  # pylint: disable=broad-exception-caught
-                        pass
-        except BaseException as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
-            # Everything the worker can raise has to be handed back, not left to die on the thread:
-            # `main` classifies on the exception text, and an unhandled thread exception would reach
-            # it as "worker returned no result" - a generic failure masking a specific, actionable one.
-            result["ok"] = exc
-        finally:
-            finished["at"] = time.monotonic()
-
-    worker = threading.Thread(target=_run, name="xmla-refresh", daemon=True)
-    try:
-        worker.start()
-        if progress_monitor is not None:
-            progress_monitor.mark_refresh_started()
-        completed = _join_refresh_worker(
-            worker,
-            desktop_pid=desktop_pid,
-            initial_state=initial_state,
-            total_timeout=total_timeout,
-            progress_monitor=progress_monitor,
-            observation_mode=return_observation,
-            completed_at=lambda: finished.get("at"),
-        )
-        if not completed or worker.is_alive():
-            raise TimeoutError(
-                f"refresh did not return within {total_timeout}s "
-                f"(XMLA CommandTimeout was {command_timeout}s; cause unestablished)"
-            )
-    finally:
-        if progress_monitor is not None:
-            try:
-                progress_monitor.close()
-            except Exception:  # pylint: disable=broad-exception-caught
-                if not return_observation:
-                    raise
-                print("[progress] teardown unavailable (TOOL_UNAVAILABLE)")
-
-    outcome = result.get("ok")
-    if isinstance(outcome, BaseException):
-        raise outcome
-    if outcome is None:  # pragma: no cover - defensive; the worker always records something
-        raise RuntimeError("refresh worker returned no result")
-    return result["observation"] if return_observation else outcome
-
-
-# pylint: enable=too-many-arguments,too-many-statements
-
-
-def _bridge_status() -> dict:
-    """The Desktop Bridge's view of the running instances, including `hasUnsavedChanges`."""
-    result = subprocess.run(
-        ["npx", "--yes", "@microsoft/powerbi-desktop-bridge-cli", "status"],
-        capture_output=True,
-        text=True,
-        check=False,
-        shell=True,
-    )
-    try:
-        return json.loads(result.stdout)
-    except json.JSONDecodeError:
-        return {}
 
 
 def _ui_desktop_alive(pid: int) -> bool:
@@ -885,7 +411,7 @@ def _ui_bridge_command() -> list[str]:
     return [str(Path(launcher).resolve())]
 
 
-def _ui_bridge_status(  # pylint: disable=too-many-statements,too-many-locals
+def _ui_bridge_status(  # pylint: disable=too-many-statements,too-many-locals,too-many-branches
     command: list[str], pid: int, deadline: float
 ) -> dict:
     """One contained exact-PID status RPC under the caller's original deadline."""
@@ -1063,771 +589,6 @@ def _ui_bridge_preflight(pid: int, deadline: float) -> dict | None:
     return None
 
 
-def _instances() -> list[dict]:
-    return _bridge_status().get("instances", [])
-
-
-def _instance(pid: int | None) -> dict | None:
-    """The bridge's record for `pid` - or, with no pid, the ONLY instance (never an arbitrary one).
-
-    Returning the first instance for `pid is None` is fine interactively but ambiguous in a parallel
-    batch: it silently binds the run to whichever Desktop the bridge happened to list first.
-    """
-    instances = _instances()
-    if pid is not None:
-        return next((inst for inst in instances if inst.get("pid") == pid), None)
-    return instances[0] if len(instances) == 1 else None
-
-
-def amo_dll_glob() -> str:
-    """Glob pattern that can locate AMO/TOM in the active NuGet global-packages cache."""
-    return str(nuget_packages_root() / "**" / "netcoreapp*" / "Microsoft.AnalysisServices*.dll")
-
-
-def _load_amo():
-    """Load AMO (Microsoft.AnalysisServices.Tabular) for the ImageSave path.
-
-    Same CoreCLR-hosting constraint as `_load_adomd`: pythonnet must host CoreCLR before `import clr`.
-    """
-    # pylint: disable=import-outside-toplevel,import-error
-    import glob
-
-    from pythonnet import load
-
-    load("coreclr")
-    import clr
-
-    for dll in glob.glob(amo_dll_glob(), recursive=True):
-        if "resources" in dll.lower():
-            continue
-        try:
-            # pylint: disable-next=no-member  # clr's members are generated at runtime by pythonnet
-            clr.AddReference(dll)
-        except Exception:  # noqa: BLE001  # pylint: disable=broad-exception-caught
-            continue
-    from Microsoft.AnalysisServices.Tabular import Server  # noqa: PLC0415
-
-    return Server
-
-
-PROGRESS_TRACE_COLUMNS = [
-    "EventClass",
-    "CurrentTime",
-    "IntegerData",
-    "ProgressTotal",
-    "ObjectName",
-    "ObjectPath",
-    "DatabaseName",
-    "SessionID",
-    "ConnectionID",
-    "RequestID",
-    "TextData",
-]
-PROGRESS_TRACE_EVENTS = [
-    "ProgressReportBegin",
-    "ProgressReportCurrent",
-    "ProgressReportEnd",
-    "ProgressReportError",
-]
-_TRACE_REJECTION_RE = re.compile(r"event Id=(\d+) does not contain the column Id=(\d+)")
-_TABLE_TEXT_RE = re.compile(r"Reading data for the '([^']+)' table")
-
-
-def _enum_int(member) -> int | None:
-    """Best-effort integer value for a pythonnet enum member."""
-    for attempt in (lambda: int(member), lambda: int(member.value__)):
-        try:
-            return attempt()
-        except Exception:  # noqa: BLE001  # pylint: disable=broad-exception-caught
-            continue
-    return None
-
-
-def _amo_events(trace):
-    """Return AMO Trace.Events by declared type, avoiding Component.Events shadowing."""
-    for prop in trace.GetType().GetProperties():
-        if prop.Name == "Events" and "TraceEventCollection" in prop.PropertyType.Name:
-            return prop.GetValue(trace, None)
-    raise RuntimeError("no TraceEventCollection-typed Events property on " + str(trace.GetType()))
-
-
-def _trace_column_value(args, trace_column, name: str) -> str | None:
-    """Read one trace column, tolerating events that do not carry it."""
-    try:
-        value = args[getattr(trace_column, name)]
-    except Exception:  # noqa: BLE001  # pylint: disable=broad-exception-caught
-        return None
-    return None if value is None else str(value)
-
-
-class RefreshProgressMonitor:  # pylint: disable=too-many-instance-attributes
-    """Server-level AMO progress trace with throttled human-readable row-count output."""
-
-    def __init__(  # pylint: disable=too-many-arguments
-        self,
-        trace=None,
-        server=None,
-        trace_column=None,
-        *,
-        liveness_seconds: float = REFRESH_PROGRESS_LIVENESS_SECONDS,
-        throttle_seconds: float = REFRESH_PROGRESS_THROTTLE_SECONDS,
-        clock=time.monotonic,
-        printer=print,
-        current_event_values: set[str] | None = None,
-        observation_mode: bool = False,
-    ) -> None:
-        self.trace = trace
-        self.server = server
-        self.trace_column = trace_column
-        self.liveness_seconds = liveness_seconds
-        self.throttle_seconds = throttle_seconds
-        self.clock = clock
-        self.printer = (lambda *_args, **_kwargs: None) if observation_mode else printer
-        self._observation_mode = observation_mode
-        self._lock = threading.Lock()
-        self._started_at = clock()
-        self._last_event_at = self._started_at
-        self._last_event_label = "trace start"
-        self._last_print_by_object: dict[str, float] = {}
-        self._latest_rows_by_object: dict[str, int] = {}
-        self._last_row_object: str | None = None
-        self._last_liveness_warning_at: float | None = None
-        self._current_event_values = current_event_values or {"ProgressReportCurrent"}
-
-    def mark_refresh_started(self) -> None:
-        """Start the liveness clock from the refresh request, not trace construction."""
-        with self._lock:
-            self._started_at = self.clock()
-            self._last_event_at = self._started_at
-            self._last_event_label = "refresh start"
-
-    def record_trace_event(self, values: dict[str, str | None]) -> None:
-        """Record one ProgressReport* event and emit a coalesced row-count line when useful."""
-        now = self.clock()
-        label = values.get("ObjectName") or _object_from_text(values.get("TextData")) or "refresh"
-        event_class = values.get("EventClass") or "ProgressReport"
-        row_count = _positive_int(values.get("IntegerData"))
-        message = None
-        with self._lock:
-            self._last_event_at = now
-            self._last_event_label = str(label)
-            self._last_liveness_warning_at = None
-            if str(event_class) in self._current_event_values and row_count is not None:
-                self._latest_rows_by_object[str(label)] = row_count
-                self._last_row_object = str(label)
-                message = self._format_row_progress_locked(str(label), row_count, now)
-        if message:
-            self.printer(message, flush=True)
-
-    def seconds_until_liveness_warning(self) -> float:
-        """Seconds until the next non-fatal liveness warning should be emitted."""
-        with self._lock:
-            since_event = self.clock() - self._last_event_at
-            if since_event < self.liveness_seconds:
-                return self.liveness_seconds - since_event
-            if self._last_liveness_warning_at is None:
-                return 0.0
-            return max(0.0, self.liveness_seconds - (self.clock() - self._last_liveness_warning_at))
-
-    def print_liveness_warning_if_due(self) -> None:
-        """Warn, but never abort, when trace events go quiet beyond the liveness window."""
-        now = self.clock()
-        message = None
-        with self._lock:
-            quiet_for = now - self._last_event_at
-            last_warned = self._last_liveness_warning_at
-            if quiet_for >= self.liveness_seconds and (
-                last_warned is None or now - last_warned >= self.liveness_seconds
-            ):
-                self._last_liveness_warning_at = now
-                message = (
-                    f"[progress] no progress event for {quiet_for:.1f}s — still waiting "
-                    f"(last event: {self._last_event_label}; absolute backstop still applies)"
-                )
-        if message:
-            self.printer(message, flush=True)
-
-    def print_evidence_heartbeat(self, elapsed: float, total: float) -> None:
-        """Print the heartbeat for traced refreshes, using row-count evidence when available."""
-        now = self.clock()
-        with self._lock:
-            if self._last_row_object is not None:
-                row_count = self._latest_rows_by_object[self._last_row_object]
-                message = self._format_row_progress_locked(self._last_row_object, row_count, now)
-            else:
-                message = (
-                    f"[progress] waiting for first row-count event, {int(elapsed)}s / {int(total)}s "
-                    f"(liveness {self.liveness_seconds:.0f}s)"
-                )
-        if message:
-            self.printer(message, flush=True)
-
-    def _format_row_progress_locked(self, label: str, row_count: int, now: float) -> str | None:
-        """Return a throttled row-count progress line. Caller must hold ``_lock``."""
-        previous = self._last_print_by_object.get(label, -1.0e9)
-        if now - previous < self.throttle_seconds:
-            return None
-        self._last_print_by_object[label] = now
-        elapsed = now - self._started_at
-        return f"[progress] {label}: {row_count:,} rows read ({elapsed:.1f}s)"
-
-    def handle_event(self, _sender, args) -> None:  # noqa: ANN001
-        """AMO Trace.OnEvent handler."""
-        values = {column: _trace_column_value(args, self.trace_column, column) for column in PROGRESS_TRACE_COLUMNS}
-        self.record_trace_event(values)
-
-    def seconds_since_last_event(self) -> float:
-        """Seconds since any ProgressReport* event was observed."""
-        with self._lock:
-            return self.clock() - self._last_event_at
-
-    def last_event_label(self) -> str:
-        """Object or phase named by the most recent progress trace event."""
-        with self._lock:
-            return self._last_event_label
-
-    def close(self) -> None:
-        """Stop and drop the trace without masking the refresh outcome."""
-        if self.trace is not None:
-            try:
-                self.trace.Stop()
-            except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
-                detail = "TOOL_UNAVAILABLE" if self._observation_mode else f"{type(exc).__name__}: {exc}"
-                print(f"[progress] trace stop failed ({detail})")
-            try:
-                self.trace.Drop()
-            except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
-                detail = "TOOL_UNAVAILABLE" if self._observation_mode else f"{type(exc).__name__}: {exc}"
-                print(f"[progress] trace drop failed ({detail})")
-        if self.server is not None:
-            try:
-                self.server.Disconnect()
-            except Exception:  # noqa: BLE001  # pylint: disable=broad-exception-caught
-                pass
-
-
-def _object_from_text(text: str | None) -> str | None:
-    """Extract the table name from Desktop's progress text."""
-    if not text:
-        return None
-    match = _TABLE_TEXT_RE.search(text)
-    return match.group(1) if match else None
-
-
-def _positive_int(value: str | None) -> int | None:
-    """Return a positive integer trace value, or None for missing/zero/non-numeric values."""
-    try:
-        parsed = int(value) if value is not None else 0
-    except ValueError:
-        return None
-    return parsed if parsed > 0 else None
-
-
-def _load_amo_trace_types():
-    """Load AMO and return the trace types used for server-level progress monitoring."""
-    server_type = _load_amo()
-    from Microsoft.AnalysisServices import (  # noqa: PLC0415  # pylint: disable=import-outside-toplevel,import-error
-        TraceColumn,
-        TraceEventClass,
-    )
-    from Microsoft.AnalysisServices.Tabular import (  # noqa: PLC0415  # pylint: disable=import-outside-toplevel,import-error
-        TraceEvent,
-    )
-
-    return server_type, TraceColumn, TraceEventClass, TraceEvent
-
-
-def _progress_event_values(trace_event_class, event_name: str) -> set[str]:
-    """Accepted EventClass wire values for one AMO trace event."""
-    values = {event_name}
-    enum_value = _enum_int(getattr(trace_event_class, event_name))
-    if enum_value is not None:
-        values.add(str(enum_value))
-    return values
-
-
-def _add_progress_events(
-    trace, trace_event_class, trace_column, trace_event_type, wanted: dict[str, list[str]]
-) -> None:
-    """Populate a trace with the current per-event candidate columns."""
-    events = _amo_events(trace)
-    events.Clear()
-    for event_name in PROGRESS_TRACE_EVENTS:
-        event = trace_event_type(getattr(trace_event_class, event_name))
-        for column in wanted[event_name]:
-            event.Columns.Add(getattr(trace_column, column))
-        events.Add(event)
-
-
-def _negotiate_progress_trace_columns(trace, trace_event_class, trace_column, trace_event_type) -> None:
-    """Drop only the trace columns the server rejects, then update the trace."""
-    column_ids = {}
-    event_ids = {}
-    for column in PROGRESS_TRACE_COLUMNS:
-        value = _enum_int(getattr(trace_column, column, None))
-        if value is not None:
-            column_ids[column] = value
-    for event_name in PROGRESS_TRACE_EVENTS:
-        value = _enum_int(getattr(trace_event_class, event_name))
-        if value is not None:
-            event_ids[event_name] = value
-    wanted = {event_name: list(PROGRESS_TRACE_COLUMNS) for event_name in PROGRESS_TRACE_EVENTS}
-    for _attempt in range(len(PROGRESS_TRACE_COLUMNS) * len(PROGRESS_TRACE_EVENTS) + 5):
-        _add_progress_events(trace, trace_event_class, trace_column, trace_event_type, wanted)
-        try:
-            trace.Update()
-            return
-        except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
-            dropped = False
-            for event_id_text, column_id_text in _TRACE_REJECTION_RE.findall(str(exc)):
-                event_name = next((name for name, value in event_ids.items() if value == int(event_id_text)), None)
-                column = next((name for name, value in column_ids.items() if value == int(column_id_text)), None)
-                if event_name is None or column is None or column not in wanted[event_name]:
-                    continue
-                wanted[event_name].remove(column)
-                dropped = True
-            if not dropped:
-                raise
-    raise RuntimeError("progress trace column negotiation did not converge")
-
-
-def _start_refresh_progress_trace(
-    port: int, liveness_seconds: float, *, observation_mode: bool = False
-) -> RefreshProgressMonitor:
-    """Start a server-level progress trace, or raise so the caller can safely degrade."""
-    server_type, trace_column, trace_event_class, trace_event_type = _load_amo_trace_types()
-    server = server_type()
-    trace = None
-    try:
-        server.Connect(f"Data Source=localhost:{port}")
-        name = f"pbip-refresh-progress-{os.getpid()}-{int(time.time())}"
-        trace = server.Traces.Add(name, name)
-        _negotiate_progress_trace_columns(trace, trace_event_class, trace_column, trace_event_type)
-        monitor = RefreshProgressMonitor(
-            trace,
-            server,
-            trace_column,
-            liveness_seconds=liveness_seconds,
-            current_event_values=_progress_event_values(trace_event_class, "ProgressReportCurrent"),
-            observation_mode=observation_mode,
-        )
-        trace.OnEvent += monitor.handle_event
-        setattr(trace, "_py_progress_handler", monitor.handle_event)  # noqa: B010
-        trace.Start()
-        return monitor
-    except Exception:
-        if trace is not None:
-            try:
-                trace.Drop()
-            except Exception:  # noqa: BLE001  # pylint: disable=broad-exception-caught
-                pass
-        try:
-            server.Disconnect()
-        except Exception:  # noqa: BLE001  # pylint: disable=broad-exception-caught
-            pass
-        raise
-
-
-_COMPAT_RE = re.compile(r"^(?P<indent>\s*)compatibilityLevel:\s*(?P<level>\d+)\s*$", re.M)
-
-
-def sha256_file(path: Path) -> str:
-    """Hash a file for generated-edit declaration evidence."""
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _bundle_root_for(path: Path) -> Path | None:
-    """Nearest ancestor carrying the engine-run manifest."""
-    for parent in (path, *path.parents):
-        if (parent / "input_manifest.json").is_file():
-            return parent
-    return None
-
-
-def _generated_artifact_run(bundle: Path) -> dict | None:
-    """The run identity generated by ``run_estate.py``, if present."""
-    try:
-        manifest = json.loads((bundle / "input_manifest.json").read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    generated = manifest.get(GENERATED_ARTIFACTS_KEY) if isinstance(manifest, dict) else None
-    if not isinstance(generated, dict) or generated.get("version") != 1 or not generated.get("run_id"):
-        return None
-    return generated
-
-
-def _append_generated_edit_declaration(
-    bundle: Path,
-    target: Path,
-    baseline_sha256: str,
-    expected_sha256: str,
-    reason: str,
-) -> Path | None:
-    """Declare this tool's intentional generated-artifact rewrite for ``--tamper``."""
-    generated = _generated_artifact_run(bundle)
-    if generated is None:
-        return None
-    rel_target = target.relative_to(bundle).as_posix()
-    declaration = {
-        "version": 1,
-        "run_id": generated["run_id"],
-        "kind": "changed",
-        "target": rel_target,
-        "baseline_sha256": baseline_sha256,
-        "expected_sha256": expected_sha256,
-        "script_identity": "pbip-model-refresh/refresh_pbip_model.py",
-        "script_sha256": sha256_file(Path(__file__).resolve()),
-        "reason": reason,
-        "recorded_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-    }
-    declaration_dir = bundle / GENERATED_EDIT_DECLARATIONS_DIR
-    declaration_dir.mkdir(parents=True, exist_ok=True)
-    safe_target = re.sub(r"[^A-Za-z0-9_.-]+", "_", rel_target)[-80:]
-    final_path = (
-        declaration_dir
-        / f"{datetime.now(timezone.utc):%Y%m%dT%H%M%S%fZ}-{os.getpid()}-{safe_target}-{uuid.uuid4().hex}.json"
-    )
-    staging_path = final_path.with_name(final_path.name + f".{uuid.uuid4().hex}.tmp")
-    try:
-        staging_path.write_text(json.dumps(declaration, indent=2) + "\n", encoding="utf-8")
-        os.replace(staging_path, final_path)
-    finally:
-        if staging_path.exists():
-            staging_path.unlink()
-    return final_path
-
-
-def read_declared_compatibility(model_dir: Path) -> tuple[int | None, Path | None]:
-    """The ``compatibilityLevel`` declared in ``definition/database.tmdl``, or ``(None, None)``."""
-    path = model_dir / "definition" / "database.tmdl"
-    if not path.exists():
-        return None, None
-    match = _COMPAT_RE.search(path.read_text(encoding="utf-8"))
-    return (int(match.group("level")), path) if match else (None, path)
-
-
-def align_declared_compatibility(path: Path, level: int) -> None:
-    """Rewrite ``database.tmdl``'s declared level. **Never** writes a BOM.
-
-    Desktop's project reader hard-rejects a UTF-8 BOM (`UTF8EncodingThrowOnBOM.CheckBom` ->
-    "Only text with UTF8 encoding without BOM is supported"), and the file simply does not open --
-    so this uses plain ``utf-8`` and the caller re-asserts BOM-free afterwards.
-    """
-    text = path.read_text(encoding="utf-8")
-    new_text = _COMPAT_RE.sub(lambda m: f"{m.group('indent')}compatibilityLevel: {level}", text, count=1)
-    path.write_text(new_text, encoding="utf-8", newline="")
-
-
-def _align_compatibility(
-    model_dir: Path | None,
-    live_level: int,
-    *,
-    defer_declaration: bool = False,
-) -> str | tuple[str | None, tuple[Path, Path, str, str, str] | None] | None:
-    """Make ``database.tmdl`` declare the level the live database is actually running at.
-
-    Returns a note describing the change, or ``None`` when nothing needed doing.
-
-    **This is not optional and there is no flag for it**, because there is no useful other
-    behaviour: a cache is only loadable when its level matches the project's, so refusing to align
-    would just be a `--save` that cannot save. It is also exactly what Desktop's own Save does
-    (measured: `1604 -> 1606` written at the same timestamp as `cache.abf`). An earlier version made
-    it opt-in behind `--align-compat`; that was ceremony rather than safety, since the only response
-    to the refusal is to re-run with the flag.
-
-    The edit is written eagerly, but the caller (:func:`_persist_image`) treats it as **provisional**:
-    it snapshots the files this can touch first and rolls them back if the ImageSave that follows
-    fails, so a mid-failure never leaves ``database.tmdl`` bumped for a cache that was not written.
-    """
-    if model_dir is None:
-        return (None, None) if defer_declaration else None
-    declared, declared_path = read_declared_compatibility(model_dir)
-    if declared is None or declared == live_level:
-        return (None, None) if defer_declaration else None
-    before_hash = sha256_file(declared_path)
-    align_declared_compatibility(declared_path, live_level)
-    after_hash = sha256_file(declared_path)
-    reason = f"Desktop raised compatibilityLevel {declared} -> {live_level} during ImageSave"
-    bundle = _bundle_root_for(model_dir)
-    pending = (bundle, declared_path, before_hash, after_hash, reason) if bundle is not None else None
-    if pending is not None and not defer_declaration:
-        _append_generated_edit_declaration(*pending)
-    note = f"aligned {declared_path.name} {declared} -> {live_level} (Desktop runs the model at {live_level})"
-    return (note, pending) if defer_declaration else note
-
-
-def _compat_rollback_paths(model_dir: Path | None) -> list[Path]:
-    """The files an alignment can touch, so a failed persist can restore them exactly.
-
-    Only ``database.tmdl`` is provisional now. The generated-edit declaration is written after a
-    successful cache commit, so rollback must not snapshot a shared declaration directory and risk
-    deleting a sibling writer's record.
-    """
-    if model_dir is None:
-        return []
-    return [model_dir / "definition" / "database.tmdl"]
-
-
-def _is_benign_imagesave_response_error(exc: BaseException) -> bool:
-    """AMO's ImageSave raises even after a fully correct write - only THAT error is benign.
-
-    Measured: the client throws "The server sent an unrecognizable response" while the backup is
-    written correctly, so a save cannot be judged by the absence of an exception. But every OTHER
-    failure (disk full, permission denied, the stream closing mid-write) MUST propagate, or a partial
-    write is mistaken for success and destroys the existing cache - the precise #113 defect. Matching
-    only the known message fails SAFE if the wording ever changes: a real write is treated as failed
-    (reported NOT_PERSISTED), never a partial write treated as a success.
-    """
-    return "unrecognizable response" in str(exc).lower()
-
-
-def _persist_image(  # pylint: disable=too-many-arguments
-    cache_path: Path,
-    model_dir: Path | None,
-    live_level: int,
-    write_image,
-    lock_timeout: float = PERSIST_LOCK_TIMEOUT_SECONDS,
-    *,
-    on_observation=None,
-    return_observation: bool = False,
-    final_check=None,
-) -> tuple[bool, str] | ImageObservation:
-    """Align compat, stage the cache write, and restore metadata only when no installation occurred.
-
-    Pure-Python (no .NET), so the guarantees are unit-testable without a live AS instance.
-    ``write_image(staging_path)`` performs the actual engine write. A returned replace establishes
-    installation independently of optional observation work; it does not prove durability. A raised
-    replace with a vanished stage is ambiguous, never success, and stops without rolling metadata
-    back underneath a possibly installed cache. Otherwise a failed write restores the snapshot.
-
-    The ENTIRE transaction (snapshot -> align -> write -> commit-or-rollback) runs under a per-model
-    interprocess lock (issue #114). Two runs against one model share BOTH the staging file (now given
-    a private per-run name) AND the provisional compatibility edit on ``database.tmdl``; a hostile
-    interleaving of the compat edit alone leaves the project declaring a level no present cache
-    matches. The lock serialises the whole transaction so no interleaving is possible; a dead holder's
-    lock is reclaimed rather than blocking forever, and a live holder that overruns ``lock_timeout``
-    surfaces as :class:`ModelLockTimeout` rather than an unbounded wait.
-    """
-    _validate_observation_request(return_observation, on_observation)
-    with _observation_errors(return_observation, preserve=(CompatRollbackError, ModelLockTimeout)):
-        try:
-            cache_path.parent.mkdir(parents=True, exist_ok=True)
-        except OSError as error:  # no folder means no lock file: refuse like one (#799)
-            raise LockUnavailable(f"{type(error).__name__} [Errno {error.errno}]") from None
-        lock_path = cache_path.with_name(cache_path.name + ".lock")
-        with model_lock(lock_path, timeout=lock_timeout):
-            observation = _persist_image_locked(
-                cache_path,
-                model_dir,
-                live_level,
-                write_image,
-                return_observation=return_observation,
-                final_check=final_check,
-            )
-        return observation
-
-
-def _persist_image_locked(  # pylint: disable=too-many-arguments
-    cache_path: Path,
-    model_dir: Path | None,
-    live_level: int,
-    write_image,
-    *,
-    on_observation=None,
-    return_observation: bool = False,
-    final_check=None,
-) -> tuple[bool, str] | ImageObservation:
-    """The persist transaction itself, run while the per-model lock is held (see :func:`_persist_image`).
-
-    ``KeyboardInterrupt`` handling is the subtle part (issue #113 route 2). The commit-detection and
-    rollback below MUST run even when the write is interrupted, or a Ctrl+C during alignment/ImageSave
-    leaves ``database.tmdl`` bumped for a cache that was never written - the same brick, different
-    route. So the write is guarded with ``except BaseException`` (``KeyboardInterrupt`` is NOT an
-    ``Exception``), the interrupt is stashed in ``write_error``, and it is re-raised only AFTER a clean
-    rollback. If the rollback itself fails, :class:`CompatRollbackError` is raised INSTEAD (chained
-    from the interrupt): a bricked project matters more than a tidy Ctrl+C.
-    """
-    _validate_observation_request(return_observation, on_observation)
-    rollback_paths = _compat_rollback_paths(model_dir)
-    snapshot = _snapshot_rollback_paths(rollback_paths)
-    staging = _staging_path(cache_path)
-    installation = _ImageInstallation()
-    intended = None
-    write_error: BaseException | None = None
-    pending_declaration: tuple[Path, Path, str, str, str] | None = None
-    try:
-        aligned, pending_declaration = _align_compatibility(model_dir, live_level, defer_declaration=True)
-        if aligned and not return_observation:
-            print(f"  save   : {aligned}")
-        intended = _staged_image_write(
-            cache_path, write_image, staging, installation=installation, return_observation=return_observation
-        )
-    except BaseException as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught  # KeyboardInterrupt must NOT bypass rollback; commit judged below by the filesystem
-        write_error = exc
-
-    if installation.installed:
-        _cleanup_staging(staging)
-        if pending_declaration is not None:
-            _append_generated_edit_declaration(*pending_declaration)
-        if return_observation:
-            if write_error is not None:
-                raise write_error
-            installed = _checked_image(cache_path)
-            if installed != intended:
-                raise CompatRollbackError("installed cache differs from the intended image; observation unavailable")
-            if final_check is not None:
-                final_check()
-            return ImageObservation(intended[0], intended[1], installed[0], installed[1])
-        size_note = f"{installation.size / 1024:.1f} KB, "
-        return True, f"persisted via AMO ImageSave ({size_note}compatibilityLevel {live_level})"
-
-    if installation.ambiguous:
-        raise CompatRollbackError(
-            "cache replacement raised with an unestablished outcome; alignment retained; do NOT fall back to UI Save"
-        ) from write_error
-
-    # The cache was NOT installed, so the provisional alignment must come back exactly.
-    _cleanup_staging(staging)
-    failures = _restore_rollback_snapshot(snapshot)
-    if failures:
-        raise CompatRollbackError(
-            "compatibility rollback FAILED for "
-            + ", ".join(str(path) for path in failures)
-            + " - database.tmdl no longer matches the cache; restore it from source control before retrying"
-        ) from write_error
-    if write_error is not None:
-        # A real write/replace failure OR an interrupt, WITH a clean rollback: the project is
-        # consistent again, so re-raise. For an interrupt this honours the Ctrl+C; for an ordinary
-        # ImageSave failure the caller reports NOT_PERSISTED; there is no UI fallback.
-        raise write_error
-    if return_observation:
-        raise ObservationUnavailable("TOOL_UNAVAILABLE")
-    return False, "ImageSave did not produce a complete cache file (compatibility alignment rolled back)"
-
-
-def image_save(  # pylint: disable=too-many-arguments
-    port: int,
-    cache_path: Path,
-    model_dir: Path | None = None,
-    *,
-    bound: BoundDesktop | None = None,
-    on_persist=None,
-    return_observation: bool = False,
-) -> tuple[bool, str] | PersistenceObservation:
-    """Return the legacy save tuple, or this invocation's bound ImageSave/readback observation.
-
-    An exact True opts into closed errors and requires a binding. The retired ``on_persist`` sink
-    refuses all non-None values. Nothing is published until finalization, the two bounded cache
-    passes, compatibility declaration, final recheck, lock exit and AMO teardown have completed.
-    This is neither a durable-write barrier nor proof of a cold reopen.
-    """
-    _validate_observation_request(return_observation, on_persist)
-    with _observation_errors(return_observation, preserve=(CompatRollbackError, ModelLockTimeout)):
-        return _image_save(port, cache_path, model_dir, bound=bound, return_observation=return_observation)
-
-
-def _image_save(
-    port: int,
-    cache_path: Path,
-    model_dir: Path | None,
-    *,
-    bound: BoundDesktop | None,
-    return_observation: bool,
-) -> tuple[bool, str] | PersistenceObservation:
-    """Persist the in-memory model to ``<Name>.SemanticModel/.pbi/cache.abf`` via AMO ``ImageSave``.
-
-    ⚠️ **A cache is only loadable if its compatibility level MATCHES the project's**, so this
-    ALIGNS ``database.tmdl`` to the live level as part of saving -- exactly what Desktop's own Save
-    does. Root-caused 2026-08-07: Desktop silently runs the database ABOVE the declared level (we
-    measured live ``1606`` against a ``database.tmdl`` of ``1604``, server default ``1700``).
-    ``ImageSave`` serialises the *live* database, so without the alignment the cache is a 1606 image
-    in a 1604 project and the reopen hits Desktop's own **"Tabular databases do not support
-    CompatibilityLevel downgrade"** -- which surfaces with NO visible message, only an
-    ``Untitled - Power BI Desktop`` window and a bridge ``Host is not ready to accept operations``.
-
-    ⚠️ **Saving therefore EDITS the deployable artifact.** ``database.tmdl`` is part of what gets
-    deployed, and this raises its declared level. If a downstream target cannot accept the higher
-    level, pass ``--no-save`` -- refresh-in-memory-persist-nothing exists exactly for the
-    validate-then-deploy path, and leaves the project byte-identical.
-
-    The write is **staged and swapped atomically** and the compatibility alignment is **rolled back
-    on failure** (see :func:`_persist_image` / :func:`_staged_image_write`), so a mid-failure can
-    neither destroy an existing good cache nor leave ``database.tmdl`` bumped for a cache that was
-    never written. Note the client throws "The server sent an unrecognizable response" while writing
-    correctly, so success is judged by the FILE, never by the absence of an exception.
-    """
-    if return_observation and bound is None:
-        raise ObservationUnavailable("IDENTITY_UNESTABLISHED")
-    if bound is not None:
-        if bound.identity.port != port:
-            raise ObservationUnavailable("WRONG_PID_PORT")
-        if desktop_identity(bound.identity.pid) != bound.identity:
-            raise ObservationUnavailable("PID_REUSED")
-    server_type = _load_amo()
-    from System.IO import FileAccess, FileMode, FileStream  # noqa: PLC0415  # pylint: disable=import-outside-toplevel,import-error
-
-    server = server_type()
-    server.Connect(f"Data Source=localhost:{port}")
-    try:
-        if bound is None:
-            database = server.Databases[0]  # Legacy path; it never emits a PersistenceObservation.
-        else:
-            databases = list(server.Databases)
-            if len(databases) != 1:
-                raise ObservationUnavailable("CATALOGUE_UNESTABLISHED")
-            database = databases[0]
-            if str(database.ID) != bound.catalogue:
-                raise ObservationUnavailable("CATALOGUE_CHANGED")
-        live_level = int(database.CompatibilityLevel)
-
-        def write_image(staging: Path) -> None:
-            stream = FileStream(str(staging), FileMode.Create, FileAccess.Write)
-            try:
-                # The observed argument is the held binding, not a later value of the mutable AMO ID.
-                server.ImageSave(database.ID if bound is None else bound.catalogue, stream)
-            except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
-                # AMO's response parser trips even on a fully correct write, so ONLY that specific
-                # error is swallowed; the staged-file check in _staged_image_write is the real
-                # evidence. Every other failure (disk full, permission, the stream dying mid-write)
-                # is re-raised so a partial write cannot be mistaken for a success and overwrite the
-                # existing good cache (#113).
-                if not _is_benign_imagesave_response_error(exc):
-                    raise
-            finally:
-                stream.Close()
-
-        def final_check() -> None:
-            if desktop_identity(bound.identity.pid) != bound.identity:
-                raise ObservationUnavailable("PID_REUSED")
-            current = list(server.Databases)
-            if len(current) != 1 or str(current[0].ID) != bound.catalogue:
-                raise ObservationUnavailable("CATALOGUE_CHANGED")
-
-        outcome = _persist_image(
-            cache_path,
-            model_dir,
-            live_level,
-            write_image,
-            return_observation=return_observation,
-            final_check=final_check if return_observation else None,
-        )
-    finally:
-        if return_observation:
-            try:
-                server.Disconnect()
-            except Exception:  # pylint: disable=broad-exception-caught
-                print("[save] AMO disconnect unavailable (TOOL_UNAVAILABLE)")
-        else:
-            server.Disconnect()
-    if return_observation:
-        return PersistenceObservation(bound.catalogue, live_level, outcome, bound.identity)
-    return outcome
-
-
 def _looks_like_semantic_model(path: Path) -> bool:
     """A resolved `byPath` target that is really an on-disk `.SemanticModel` folder.
 
@@ -1909,7 +670,7 @@ def _cache_from_absent_binding(pbip: Path) -> Path | None:
     return None
 
 
-def cache_file(pid: int, *, instance: dict | None = None) -> Path | None:
+def cache_file(pid: int, *, instance: dict) -> Path | None:
     """Where `<Name>.SemanticModel/.pbi/cache.abf` belongs for the model this instance has open.
 
     Resolves the DESTINATION, not an existing file (on a first build there is no cache yet). There is
@@ -1919,12 +680,9 @@ def cache_file(pid: int, *, instance: dict | None = None) -> Path | None:
     (round-3 mandate): resolved -> use it (even OUTSIDE this folder); unresolvable -> None (fail
     closed); absent -> and only then a name/count heuristic may run.
     """
-    inst = _instance(pid) if instance is None else instance
-    if instance is not None and instance.get("pid") != pid:
+    if instance.get("pid") != pid or not instance.get("currentFilePath"):
         return None
-    if inst is None or not inst.get("currentFilePath"):
-        return None
-    pbip = Path(inst["currentFilePath"])
+    pbip = Path(instance["currentFilePath"])
     state, bound = _resolve_pbip_binding(pbip)
     if state == "resolved":
         return bound / ".pbi" / "cache.abf"
@@ -2120,136 +878,6 @@ def row_counts(port: int, tables: list[str] | None) -> tuple[list[tuple[str, int
         conn.Close()
 
 
-def _refresh_and_save(  # pylint: disable=too-many-return-statements,too-many-branches,too-many-statements
-    pid: int,
-    port: int,
-    cache: Path | None,
-    args: argparse.Namespace,
-    initial_state: Observation | None = None,
-) -> int | None:
-    """Run the refresh and (unless suppressed) persist it. Returns an exit code, or None to continue.
-
-    `cache` is passed in rather than re-derived: `cache_file` is another Desktop Bridge round trip,
-    and the bridge returning nothing (or something else) after the identity gate has run would mean
-    writing to a destination that was never verified.
-    """
-    try:
-        parameters = inspect.signature(refresh).parameters
-        refresh_kwargs = {}
-        if "refresh_type" in parameters:
-            refresh_kwargs["refresh_type"] = args.refresh_type
-        if "desktop_pid" in parameters:
-            refresh_kwargs["desktop_pid"] = pid
-            if "initial_state" in parameters:
-                refresh_kwargs["initial_state"] = initial_state
-        if "progress_enabled" in parameters:
-            refresh_kwargs["progress_enabled"] = not args.no_progress
-        if "progress_liveness_sec" in parameters:
-            refresh_kwargs["progress_liveness_sec"] = args.progress_liveness_seconds
-        if "absolute_timeout_sec" in parameters:
-            refresh_kwargs["absolute_timeout_sec"] = args.refresh_absolute_timeout_seconds
-        ok, message = refresh(port, args.tables, REFRESH_TIMEOUT_SECONDS, **refresh_kwargs)
-    except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
-        if isinstance(exc, DialogFoundError):
-            _emit_dialog_finding(exc.pid, exc.finding)
-            return 3
-        if isinstance(exc, CredentialUnknownError):
-            _emit_credential_unknown(exc.pid, exc.reason)
-            return 3
-        if isinstance(exc, DesktopGoneError):
-            _emit_desktop_gone(exc.pid, exc.reason)
-            return 2
-        if isinstance(exc, DesktopUnreadyError):
-            _emit_desktop_unready(exc.pid, exc.reason)
-            return 2
-        text = f"{type(exc).__name__}: {exc}"
-        # Elapsed time alone establishes neither a Desktop dialog nor any state of the source.
-        if "timeout" in text.lower() or "timed out" in text.lower():
-            print("REFRESH: TIMEOUT - no result within configured refresh deadline")
-            print(
-                f"  CAUSE UNKNOWN: cause unestablished. Inspect Desktop PID {pid} locally before retrying. "
-                "A deadline alone does not identify a dialog or establish the state of the data source.\n"
-                "  The existing arbiter is available after local inspection (it may invoke Refresh):\n"
-                f'    python "{CREDENTIAL_PROBE}" --pid {pid}'
-            )
-            return 3
-        print(f"REFRESH: ERROR {text}")
-        return 2
-    print(f"  refresh: {message}" if ok else f"  refresh FAILED: {message}")
-
-    # Persisting is the DEFAULT, because it is this script's stated purpose: "so the next agent (and
-    # the next Desktop open) sees real data instead of an empty model". It was off for a while
-    # because a persisted cache was believed to break the PBIP; root-caused 2026-08-07, that was a
-    # compatibility-level mismatch, and `image_save` now aligns `database.tmdl` the way Desktop's own
-    # Save does. With the hazard gone, the default that matches the purpose wins.
-    #
-    # Which default is safer is decided by the failure modes, not by taste. Forgetting `--no-save`
-    # bumps a declared compat level and leaves a cache: bounded, visible, reversible. Forgetting a
-    # `--save` opt-in hands the NEXT agent an empty model - measured this session, a probe came back
-    # NO_DATA - and an agent that queries it reports findings about nothing. The second is worse and
-    # more likely, since persisting is the reason to run this at all.
-    #
-    # `--no-save` is for read-only work (the validator is read-only BY CONTRACT and must pass it) and
-    # for validate-then-deploy, where the project must stay byte-identical.
-    if not args.no_save:
-        return _persist_after_refresh(port, cache)
-    return None
-
-
-def _persist_after_refresh(  # pylint: disable=too-many-return-statements
-    port: int, cache: Path | None
-) -> int | None:
-    """ImageSave is the only XMLA-route writer; there is no UI fallback (#831 R1).
-
-    Each NOT_PERSISTED line says only what is proven. No cache path means ``image_save`` never ran.
-    ``(False, reason)`` is returned only after a clean compatibility rollback. An untyped exception can
-    come from connect, from a rolled-back write, or from ``Disconnect`` AFTER the cache and
-    ``database.tmdl`` were committed, so its persistence is UNESTABLISHED.
-    """
-    if cache is None:
-        print(
-            "REFRESH: NOT_PERSISTED (no cache path resolved; nothing was written; no UI fallback. "
-            "A human can save in Desktop.)"
-        )
-        return 1
-    try:
-        saved, save_message = image_save(port, cache, model_dir=cache.parent.parent)
-    except CompatRollbackError as exc:
-        # FATAL: the cache write failed AND the compatibility alignment could not be rolled back,
-        # so database.tmdl declares a level that was never written to a cache.
-        print(f"  save   : {exc}")
-        print(
-            "REFRESH: ERROR compatibility rollback failed - database.tmdl left inconsistent; "
-            "do NOT save. Restore database.tmdl from source control before retrying."
-        )
-        return 2
-    except ModelLockTimeout as exc:
-        print(f"  save   : {exc}")
-        print(
-            "REFRESH: NOT_PERSISTED (a concurrent persist of this model holds the lock; "
-            "data is in memory only). Wait for the other run to finish and retry."
-        )
-        return 1
-    except LockUnavailable as exc:
-        print(f"REFRESH: NOT_PERSISTED (model lock not writable: {exc}; data is in memory only)")
-        return 1
-    except ObservationUnavailable:
-        print("REFRESH: NOT_PERSISTED (observation unavailable; do NOT fall back to UI Save)")
-        return 1
-    except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
-        print(
-            f"REFRESH: NOT_PERSISTED (ImageSave raised {type(exc).__name__}; persistence UNESTABLISHED: "
-            "the cache and database.tmdl may or may not have been committed; no UI fallback. "
-            "Check .pbi/cache.abf before relying on it.)"
-        )
-        return 1
-    if not saved:
-        print(f"REFRESH: NOT_PERSISTED ({save_message}; rolled back; no UI fallback. A human can save in Desktop.)")
-        return 1
-    print("  save   : AMO ImageSave attempt completed; legacy cache-update verification pending")
-    return None
-
-
 def _ui_root(state: Observation, pid: int, expected_start: str) -> int:
     """Require one complete READY observer snapshot and return its exact main-window handle."""
     if not state.complete or state.state != "READY" or state.process_started_at != expected_start:
@@ -2359,13 +987,13 @@ def _ui_wait_ready(context: UIRefreshContext, deadline: float) -> Observation | 
 
 
 def _ui_refresh_preflight(  # pylint: disable=too-many-return-statements,too-many-branches,too-many-statements
-    pid: int, instance: dict, deadline: float
+    pid: int, instance: dict, deadline: float, *, require_clean: bool = True
 ) -> tuple[dict, Observation] | int:
-    """Require a clean exact-file bridge instance and a complete READY observer before Refresh."""
+    """Require an exact-file bridge instance (clean unless `--save-only`) and a complete READY observer."""
     try:
         _ui_read_budget(deadline)
         # A missing/false-like value is not permission to discard changes.
-        if instance.get("hasUnsavedChanges") is not False:
+        if require_clean and instance.get("hasUnsavedChanges") is not False:
             raise DesktopActionError("initial clean state unavailable")
         path = instance.get("currentFilePath")
         if not isinstance(path, str) or not path.strip() or "\x00" in path or not Path(path).is_absolute():
@@ -2416,32 +1044,20 @@ def _read_completion_snapshot(context: UIRefreshContext, deadline: float) -> Par
         return None
 
 
-def _status_line(elapsed: float, count: int | None, total: int, title: str | None) -> str:
-    """One REFRESH_STATUS line for an agent to relay; it carries no token and changes no exit code."""
-    partitions = f"{'?' if count is None else count}/{total}"
-    dialog = "dialog=none" if title is None else f'dialog="{title}"'
-    return f"REFRESH_STATUS elapsed={int(elapsed)}s partitions={partitions} {dialog}"
-
-
 def _wait_for_engine_completion(
     context: UIRefreshContext,
     baseline: PartitionSnapshot,
     action_started_ticks: int,
     deadline: float,
 ) -> tuple[bool, CompletionResult | None]:
-    # pylint: disable=too-many-statements,too-many-locals
-    """Poll exact typed partition evidence and stream status; only identity loss or the backstop stop it.
+    """Poll exact typed partition evidence; only identity loss or the deadline stop the wait.
 
-    A dialog does NOT end this wait (#831 D2): its title is relayed on the status stream so the agent can
-    ask the human. Completion authority stays with ``check_completion``; the partition count shown uses
-    the same per-partition predicate, and is ``?`` while the reader is refused or cannot compare.
+    A dialog does NOT end this wait (#831 D2): the progress stream relays its title so the agent can
+    ask the human. Completion authority stays with ``check_completion``.
     """
     _ui_read_budget(deadline, float("inf"))
     cancelled = threading.Event()
-    outcome: dict[str, object] = {"count": None}
-    started = time.monotonic()
-    total = len(baseline.partitions)
-    print(f"REFRESH_STATUS started tool_pid={os.getpid()}", flush=True)
+    outcome: dict[str, object] = {}
 
     def watch_ui() -> Observation:
         remaining = deadline - time.monotonic()
@@ -2457,13 +1073,11 @@ def _wait_for_engine_completion(
                     raise TimeoutError("engine completion deadline expired")
                 current = _read_completion_snapshot(context, deadline)
                 if current is None:
-                    outcome["count"] = None
                     cancelled.wait(min(1.0, max(0.0, deadline - time.monotonic())))
                     continue
                 completed_at = time.monotonic()
                 if completed_at >= deadline:
                     raise TimeoutError("engine completion result arrived after deadline")
-                outcome["count"] = count_refreshed(baseline, current, action_started_ticks)
                 result = check_completion(baseline, current, action_started_ticks)
                 if result.complete:
                     outcome["result"] = result
@@ -2475,28 +1089,18 @@ def _wait_for_engine_completion(
             outcome["error"] = exc
             outcome["completed_at"] = time.monotonic()
 
-    def report(state: Observation, printed: tuple | None, due: float) -> tuple[tuple, float]:
-        now = time.monotonic()
-        shown = (outcome["count"], state.dialog.title if state.dialog is not None else None)
-        if shown != printed or now >= due:
-            print(_status_line(now - started, shown[0], total, shown[1]), flush=True)
-            return shown, now + REFRESH_HEARTBEAT_SECONDS
-        return printed, due
-
     last = watch_ui()
-    printed, due = report(last, None, started + REFRESH_HEARTBEAT_SECONDS)
     _ui_read_budget(deadline)
     worker = threading.Thread(target=poll, name="ui-refresh-engine-completion", daemon=True)
     worker.start()
     try:
         while worker.is_alive() and (remaining := deadline - time.monotonic()) > 0:
-            worker.join(timeout=min(REFRESH_CREDENTIAL_POLL_SECONDS, remaining, max(0.01, due - time.monotonic())))
+            worker.join(timeout=min(REFRESH_CREDENTIAL_POLL_SECONDS, remaining))
             if worker.is_alive():
                 try:
                     last = watch_ui()
                 except TimeoutError:
                     break
-                printed, due = report(last, printed, due)
     finally:
         cancelled.set()
         worker.join(timeout=8.5)
@@ -2512,7 +1116,250 @@ def _wait_for_engine_completion(
     return False, None
 
 
-def _ui_refresh_and_save(  # pylint: disable=too-many-return-statements,too-many-branches,too-many-locals
+# Captured at import: tests patch `time.monotonic` to drive deadlines, which must not skew progress.
+_progress_clock = time.monotonic
+
+
+def _open_progress_connection(context: UIRefreshContext):
+    """A plain ADOMD connection pinned to the bound catalogue, separate from every `bound_call` read.
+
+    Desktop names each catalogue with a GUID, so another engine on that port cannot answer for it;
+    that pin is the identity proof. It never relaxes `bound_call`'s dialog refusal.
+    """
+    port = context.bound.identity.port
+    connection = _load_adomd(port)(
+        f"Data Source=localhost:{port};Initial Catalog={context.bound.catalogue};Connect Timeout=5"
+    )
+    connection.Open()
+    return connection
+
+
+def _process_jobs(connection) -> int:
+    """Count `$SYSTEM.DISCOVER_JOBS` rows whose JOB_DESCRIPTION is `Process`; other job types are noise."""
+    command = connection.CreateCommand()
+    command.CommandTimeout = 5
+    command.CommandText = "SELECT [JOB_DESCRIPTION] FROM $SYSTEM.DISCOVER_JOBS"
+    reader = command.ExecuteReader()
+    try:
+        count = 0
+        while reader.Read():
+            count += str(reader.GetValue(0)) == "Process"
+        return count
+    finally:
+        reader.Close()
+
+
+def _dialog_field(context: UIRefreshContext) -> str:
+    """The title of a Desktop-owned dialog the observer reports, `none`, or `?` when unobserved."""
+    try:
+        state = observe(context.pid, expected_process_start=context.bound.identity.process_start, timeout_s=8.0)
+    except Exception:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+        return "?"
+    if state.dialog is not None:
+        return f'"{state.dialog.title}"'
+    return "none" if state.complete else "?"
+
+
+class _Progress:  # pylint: disable=too-many-instance-attributes
+    """Always-on `REFRESH_STATUS` lines for every phase; progress never decides anything.
+
+    A failed read prints `?` and reconnects on the next poll, so no value is ever carried forward.
+    """
+
+    def __init__(self, context: UIRefreshContext, phase: str = "invoke") -> None:
+        self._context = context
+        self._started = self._phase_started = _progress_clock()
+        self._phase = phase
+        self._spent: dict[str, float] = {}
+        self._connection = None
+        self._printed: tuple[str, str, str] | None = None
+        self._due = 0.0
+        self._lock = threading.Lock()
+        self._wake = threading.Event()
+        self._stop = False
+        self._muted = False
+        self._thread = threading.Thread(target=self._run, name="refresh-status", daemon=True)
+
+    def __enter__(self) -> _Progress:
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self._muted = True
+        self._close()
+
+    def phase(self, name: str) -> None:
+        """Switch phase; the new phase is shown on the next tick, which runs at once."""
+        with self._lock:
+            now = _progress_clock()
+            self._spent[self._phase] = self._spent.get(self._phase, 0.0) + now - self._phase_started
+            self._phase, self._phase_started = name, now
+        self._wake.set()
+
+    def finish(self) -> str:
+        """Show the `done` phase, stop streaming and return the summary line."""
+        self.phase("done")
+        self._close()
+        self._muted = True
+        spent = self._spent
+        refresh = sum(spent.get(name, 0.0) for name in ("invoke", "refreshing", "committed"))
+        save = f"{spent['saving']:.0f}s" if "saving" in spent else "skipped"
+        return (
+            f"REFRESH_SUMMARY total={_progress_clock() - self._started:.0f}s refresh={refresh:.0f}s "
+            f"canaries={spent.get('canaries', 0.0):.0f}s save={save}"
+        )
+
+    def _close(self) -> None:
+        self._stop = True
+        self._wake.set()
+        if self._thread.is_alive():
+            self._thread.join(timeout=10.0)
+
+    def _run(self) -> None:
+        try:
+            while not self._stop:
+                self._wake.clear()
+                self._tick()
+                self._wake.wait(POLL_INTERVAL_SECONDS)
+            self._tick()
+        finally:
+            self._disconnect()
+
+    def _jobs(self) -> str:
+        try:
+            if self._connection is None:
+                self._connection = _open_progress_connection(self._context)
+            return str(_process_jobs(self._connection))
+        except Exception:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+            self._disconnect()
+            return "?"
+
+    def _disconnect(self) -> None:
+        connection, self._connection = self._connection, None
+        if connection is not None:
+            with contextlib.suppress(Exception):
+                connection.Close()
+
+    def _tick(self) -> None:
+        jobs, dialog = self._jobs(), _dialog_field(self._context)
+        with self._lock:
+            now = _progress_clock()
+            shown = (self._phase, jobs, dialog)
+            if self._muted or (shown == self._printed and now < self._due):
+                return
+            print(
+                f"REFRESH_STATUS elapsed={now - self._started:.0f}s phase={shown[0]} "
+                f"process_jobs={jobs} dialog={dialog}",
+                flush=True,
+            )
+            self._printed, self._due = shown, now + REFRESH_HEARTBEAT_SECONDS
+
+
+def _ui_stop(exc: Exception, stage: str | None, other: str, code: int) -> int:
+    """Print the one refusal line for an exception raised inside a UI step; return its exit code."""
+    if isinstance(exc, DialogFoundError):
+        _emit_dialog_finding(exc.pid, exc.finding)
+        return 3
+    if isinstance(exc, CredentialUnknownError):
+        if stage is None:
+            _emit_credential_unknown(exc.pid, exc.reason)
+        else:
+            _emit_ui_observation_unknown(exc.pid, stage)
+        return 3
+    if isinstance(exc, DesktopGoneError):
+        _emit_desktop_gone(exc.pid, exc.reason)
+        return 2
+    if isinstance(exc, DesktopUnreadyError):
+        _emit_desktop_unready(exc.pid, exc.reason)
+        return 2
+    print(f"REFRESH: {other}")
+    return code
+
+
+def _model_lock(cache: Path):
+    """The per-model lock beside the cache; a model without a `.pbi` folder yet has nothing to guard."""
+    if not cache.parent.exists():
+        return contextlib.nullcontext()
+    return model_lock(cache.with_name(cache.name + ".lock"), timeout=PERSIST_LOCK_TIMEOUT_SECONDS)
+
+
+def _invoke(context: UIRefreshContext, name: Literal["Refresh", "Save"], deadline: float) -> ActionResult:
+    """One named Desktop action; TimeoutError means it was NOT invoked because the deadline had passed."""
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError(f"UI {name} was not invoked after the operation deadline")
+    return invoke_desktop_action(
+        name,
+        pid=context.pid,
+        expected_process_start=context.bound.identity.process_start,
+        root_hwnd=context.root_hwnd,
+        timeout_seconds=min(ACTION_CHILD_TIMEOUT_SECONDS, remaining),
+    )
+
+
+def _no_read(_connection) -> None:
+    return None
+
+
+def _before_save(context: UIRefreshContext, deadline: float) -> None:
+    """Binding only: READY with no dialog on the held root, then the held identity and catalogue."""
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("UI Save was not invoked after the operation deadline")
+    _ui_observer_state(context, timeout_seconds=remaining)
+    bound_call(context.bound, _no_read, timeout_seconds=_ui_read_budget(deadline))
+    _ui_read_budget(deadline)
+
+
+def _after_save(context: UIRefreshContext, cache: Path, deadline: float) -> bool:
+    """After a Save Invoke: READY, the held binding, a clean bridge and an unchanged file binding.
+
+    False means Desktop did not settle inside the deadline; every other failure raises.
+    """
+    if _ui_wait_ready(context, deadline) is None:
+        return False
+    bound_call(context.bound, _no_read, timeout_seconds=_ui_read_budget(deadline))
+    payload = _ui_bridge_status(_ui_bridge_command(), context.pid, deadline)
+    _ui_read_budget(deadline)
+    instance, _delay = _bridge_readiness_result(payload, context.pid)
+    if instance is None or instance.get("hasUnsavedChanges") is not False:
+        raise DesktopActionError("post-Save bridge clean state unestablished")
+    resolved_cache = cache_file(context.pid, instance=instance)
+    if resolved_cache is None or resolved_cache.resolve() != cache.resolve():
+        raise DesktopActionError("post-Save file binding changed")
+    _ui_read_budget(deadline)
+    return True
+
+
+def _cli_save(  # pylint: disable=too-many-return-statements
+    context: UIRefreshContext, cache: Path, deadline: float, *, model_gate: bool
+) -> int | None:
+    """The CLI's guarded Desktop Save; returns the refusal exit code, or None once Save is verified."""
+    try:
+        _before_save(context, deadline)
+        if model_gate and not _identity_gate(context.port, cache):
+            return 2
+        action = _invoke(context, "Save", deadline)
+    except TimeoutError:
+        print("REFRESH: TIMEOUT - UI Save was not invoked after the operation deadline")
+        return 3
+    except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+        return _ui_stop(exc, None, f"NOT_PERSISTED (UI Save was not established: {type(exc).__name__})", 1)
+    if not action.invoked:
+        print(f"REFRESH: NOT_PERSISTED (UI Save refused: {action.reason})")
+        return 1
+    print("  UI Save: one named Invoke returned; persistence remains unconfirmed")
+    try:
+        if not _after_save(context, cache, deadline):
+            print("REFRESH: NOT_PERSISTED (Desktop did not return to READY within the settle window after Save)")
+            return 1
+    except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+        reason = f"NOT_PERSISTED (post-Save verification unavailable: {type(exc).__name__})"
+        return _ui_stop(exc, "Post-Save", reason, 1)
+    return None
+
+
+def _ui_refresh_and_save(  # pylint: disable=too-many-arguments
     pid: int,
     port: int,
     cache: Path | None,
@@ -2521,8 +1368,7 @@ def _ui_refresh_and_save(  # pylint: disable=too-many-return-statements,too-many
     *,
     deadline: float,
 ) -> int:
-    """Run explicit UI refresh with independent engine completion, held canaries and optional UI Save."""
-    # pylint: disable=too-many-arguments
+    """Bind the held Desktop, take the per-model lock, then run the refresh or `--save-only` route."""
     if cache is None:
         print("REFRESH: ERROR no model cache path resolved; refusing the UI route")
         return 2
@@ -2538,23 +1384,14 @@ def _ui_refresh_and_save(  # pylint: disable=too-many-return-statements,too-many
         _ui_read_budget(deadline)
         if bound.identity.process_start != initial_state.process_started_at:
             raise DesktopActionError("bound process identity differs from the initial observer")
-        context = UIRefreshContext(
-            pid=pid,
-            port=port,
-            bound=bound,
-            root_hwnd=root_hwnd,
-        )
+        context = UIRefreshContext(pid=pid, port=port, bound=bound, root_hwnd=root_hwnd)
     except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
         print(f"REFRESH: UI_PREFLIGHT_REFUSED ({type(exc).__name__}: {exc})")
         return 2
-
-    lock_path = cache.with_name(cache.name + ".lock")
-    lock_context = model_lock(lock_path, timeout=PERSIST_LOCK_TIMEOUT_SECONDS) if lock_path.parent.exists() else None
+    route = _ui_save_only_locked if getattr(args, "save_only", False) else _ui_refresh_locked
     try:
-        if lock_context is None:
-            return _ui_refresh_locked(context, cache, args, deadline=deadline)
-        with lock_context:
-            return _ui_refresh_locked(context, cache, args, deadline=deadline)
+        with _model_lock(cache):
+            return route(context, cache, args, deadline=deadline)
     except ModelLockTimeout as exc:
         print(f"REFRESH: NOT_PERSISTED (model lock unavailable: {exc})")
         return 1
@@ -2564,15 +1401,27 @@ def _ui_refresh_and_save(  # pylint: disable=too-many-return-statements,too-many
         return 2
 
 
-def _ui_refresh_locked(  # pylint: disable=too-many-return-statements,too-many-statements
+def _ui_refresh_locked(
     context: UIRefreshContext,
     cache: Path,
     args: argparse.Namespace,
     *,
     deadline: float | None = None,
 ) -> int:
-    """The UI route while holding the existing per-model cooperative lock when available."""
+    """The default route: Desktop's own Refresh, typed completion, canaries, then the guarded Save."""
     deadline = time.monotonic() + args.refresh_absolute_timeout_seconds if deadline is None else deadline
+    with _Progress(context) as progress:
+        return _ui_refresh_steps(context, cache, args, deadline, progress)
+
+
+def _ui_refresh_steps(  # pylint: disable=too-many-return-statements,too-many-branches,too-many-locals,too-many-statements
+    context: UIRefreshContext,
+    cache: Path,
+    args: argparse.Namespace,
+    deadline: float,
+    progress: _Progress,
+) -> int:
+    """The default route's steps, streaming progress; each refusal prints one `REFRESH:` line."""
     before_stamp = cache.stat().st_mtime if cache.exists() else 0.0
     try:
         _ui_observer_state(context, timeout_seconds=_ui_read_budget(deadline, 8.0))
@@ -2595,18 +1444,11 @@ def _ui_refresh_locked(  # pylint: disable=too-many-return-statements,too-many-s
         print(f"REFRESH: UI_PREFLIGHT_REFUSED ({type(exc).__name__}: {exc})")
         return 2
 
-    remaining = deadline - time.monotonic()
-    if remaining <= 0:
+    try:
+        action = _invoke(context, "Refresh", deadline)
+    except TimeoutError:
         print("REFRESH: TIMEOUT - UI refresh deadline expired before action")
         return 3
-    try:
-        action = invoke_desktop_action(
-            "Refresh",
-            pid=context.pid,
-            expected_process_start=context.bound.identity.process_start,
-            root_hwnd=context.root_hwnd,
-            timeout_seconds=min(ACTION_CHILD_TIMEOUT_SECONDS, remaining),
-        )
     except DesktopActionError as exc:
         print(f"REFRESH: UI_ACTION_FAILED ({exc})")
         return 2
@@ -2615,38 +1457,27 @@ def _ui_refresh_locked(  # pylint: disable=too-many-return-statements,too-many-s
         if action.reason == "named_control_missing":
             print("  hint   : a small frame collapses the Home ribbon; maximize the Desktop window")
         return 2
+    progress.phase("refreshing")
     print("  UI Refresh: one named Invoke returned; engine completion remains unestablished")
 
     try:
         complete, completion = _wait_for_engine_completion(context, baseline, action.action_started_ticks, deadline)
-    except DialogFoundError as exc:
-        _emit_dialog_finding(exc.pid, exc.finding)
-        return 3
-    except CredentialUnknownError as exc:
-        _emit_ui_observation_unknown(exc.pid, "Completion")
-        return 3
-    except (DesktopGoneError, DesktopUnreadyError) as exc:
-        if isinstance(exc, DesktopGoneError):
-            _emit_desktop_gone(exc.pid, exc.reason)
-        else:
-            _emit_desktop_unready(exc.pid, exc.reason)
-        return 2
     except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
-        print(f"REFRESH: COMPLETION_UNKNOWN ({type(exc).__name__}: {exc})")
-        return 3
+        return _ui_stop(exc, "Completion", f"COMPLETION_UNKNOWN ({type(exc).__name__}: {exc})", 3)
     if not complete or completion is None:
         print("REFRESH: TIMEOUT - engine completion not established before the bounded deadline")
         return 3
+    progress.phase("committed")
     print(f"  engine completion: {completion.reason}")
 
     try:
         if _ui_wait_ready(context, deadline) is None:
             print("REFRESH: COMPLETION_UNKNOWN (Desktop observer did not return to READY within the settle window)")
             return 3
+        progress.phase("canaries")
         canaries = _canary_tables(args)
         implicit = not canaries
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
+        if deadline - time.monotonic() <= 0:
             print("REFRESH: TIMEOUT - data checks did not begin before the operation deadline")
             return 3
         targets = canaries or [bound_call(context.bound, first_table, timeout_seconds=_ui_read_budget(deadline))]
@@ -2655,103 +1486,91 @@ def _ui_refresh_locked(  # pylint: disable=too-many-return-statements,too-many-s
             print("REFRESH: TIMEOUT - data-check result arrived after the operation deadline")
             return 3
         results = [(item.table, item.returned_rows) for item in observations]
-    except DialogFoundError as exc:
-        _emit_dialog_finding(exc.pid, exc.finding)
-        return 3
-    except CredentialUnknownError as exc:
-        _emit_ui_observation_unknown(exc.pid, "Completion")
-        return 3
-    except (DesktopGoneError, DesktopUnreadyError) as exc:
-        if isinstance(exc, DesktopGoneError):
-            _emit_desktop_gone(exc.pid, exc.reason)
-        else:
-            _emit_desktop_unready(exc.pid, exc.reason)
-        return 2
     except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
-        print(f"REFRESH: DATA_CHECK_FAILED ({type(exc).__name__}: {exc})")
-        return 2
+        return _ui_stop(exc, "Completion", f"DATA_CHECK_FAILED ({type(exc).__name__}: {exc})", 2)
 
-    if any(rows <= 0 for _, rows in results):
-        return _emit_data_verdict(cache, before_stamp, args, results, implicit)
-    if args.no_save:
-        return _emit_data_verdict(cache, before_stamp, args, results, implicit)
-    try:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            print("REFRESH: TIMEOUT - UI Save was not invoked after the operation deadline")
-            return 3
-        _ui_observer_state(
-            context,
-            timeout_seconds=remaining,
-        )
-        bound_call(context.bound, lambda _connection: None, timeout_seconds=_ui_read_budget(deadline))
-        _ui_read_budget(deadline)
-        if not _identity_gate(context.port, cache):
-            return 2
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            print("REFRESH: TIMEOUT - UI Save was not invoked after the operation deadline")
-            return 3
-        save_action = invoke_desktop_action(
-            "Save",
-            pid=context.pid,
-            expected_process_start=context.bound.identity.process_start,
-            root_hwnd=context.root_hwnd,
-            timeout_seconds=min(ACTION_CHILD_TIMEOUT_SECONDS, remaining),
-        )
-        _ui_read_budget(deadline)
-    except DialogFoundError as exc:
-        _emit_dialog_finding(exc.pid, exc.finding)
-        return 3
-    except CredentialUnknownError as exc:
-        _emit_credential_unknown(exc.pid, exc.reason)
-        return 3
-    except (DesktopGoneError, DesktopUnreadyError) as exc:
-        if isinstance(exc, DesktopGoneError):
-            _emit_desktop_gone(exc.pid, exc.reason)
-        else:
-            _emit_desktop_unready(exc.pid, exc.reason)
-        return 2
-    except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
-        print(f"REFRESH: NOT_PERSISTED (UI Save was not established: {type(exc).__name__})")
-        return 1
-    if not save_action.invoked:
-        print(f"REFRESH: NOT_PERSISTED (UI Save refused: {save_action.reason})")
-        return 1
-    print("  UI Save: one named Invoke returned; persistence remains unconfirmed")
-    try:
-        if _ui_wait_ready(context, deadline) is None:
-            print("REFRESH: NOT_PERSISTED (Desktop did not return to READY within the settle window after Save)")
-            return 1
-        bound_call(context.bound, lambda _connection: None, timeout_seconds=_ui_read_budget(deadline))
-        payload = _ui_bridge_status(_ui_bridge_command(), context.pid, deadline)
-        _ui_read_budget(deadline)
-        instance, _delay = _bridge_readiness_result(payload, context.pid)
-        if instance is None or instance.get("hasUnsavedChanges") is not False:
-            raise DesktopActionError("post-Save bridge clean state unestablished")
-        resolved_cache = cache_file(context.pid, instance=instance)
-        if resolved_cache is None or resolved_cache.resolve() != cache.resolve():
-            raise DesktopActionError("post-Save file binding changed")
-        _ui_read_budget(deadline)
-    except DialogFoundError as exc:
-        _emit_dialog_finding(exc.pid, exc.finding)
-        return 3
-    except CredentialUnknownError as exc:
-        _emit_ui_observation_unknown(exc.pid, "Post-Save")
-        return 3
-    except (DesktopGoneError, DesktopUnreadyError) as exc:
-        if isinstance(exc, DesktopGoneError):
-            _emit_desktop_gone(exc.pid, exc.reason)
-        else:
-            _emit_desktop_unready(exc.pid, exc.reason)
-        return 2
-    except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
-        print(f"REFRESH: NOT_PERSISTED (post-Save verification unavailable: {type(exc).__name__})")
-        return 1
+    if not args.no_save and all(rows > 0 for _, rows in results):
+        progress.phase("saving")
+        refused = _cli_save(context, cache, deadline, model_gate=True)
+        if refused is not None:
+            return refused
+    print(progress.finish())
     return _emit_data_verdict(cache, before_stamp, args, results, implicit)
 
 
-def ui_refresh_observed(
+def _ui_save_only_locked(
+    context: UIRefreshContext,
+    cache: Path,
+    args: argparse.Namespace,
+    *,
+    deadline: float,
+) -> int:
+    """`--save-only`: Desktop's guarded Save of what is loaded now, then model and canary checks; never Refresh.
+
+    Before Save only the binding is checked: after MCP edits the live model legitimately differs from
+    disk, so `same_model` runs against the TMDL that Save just wrote.
+    """
+    before_stamp = cache.stat().st_mtime if cache.exists() else 0.0
+    print("  disclosure: Save persists everything loaded in this Desktop, including edits not made by this run")
+    with _Progress(context, "saving") as progress:
+        refused = _cli_save(context, cache, deadline, model_gate=False)
+        if refused is not None:
+            return refused
+        if not _identity_gate(context.port, cache):
+            return 2
+        progress.phase("canaries")
+        try:
+            observations = probe_observations(
+                context.bound, list(args.canaries), timeout_seconds=_ui_read_budget(deadline)
+            )
+        except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+            return _ui_stop(exc, "Post-Save", f"DATA_CHECK_FAILED ({type(exc).__name__}: {exc})", 2)
+        results = [(item.table, item.returned_rows) for item in observations]
+        print(progress.finish())
+    return _emit_data_verdict(cache, before_stamp, args, results, False)
+
+
+def _api_refusal(exc: Exception) -> Exception:
+    """Map a programmatic-call failure onto the closed observation vocabulary (no new codes)."""
+    if isinstance(exc, (ObservationUnavailable, ModelLockTimeout, SourceScopeError)):
+        return exc
+    for kind, code in (
+        (DialogFoundError, DIALOG_NEEDS_HUMAN),
+        (DesktopGoneError, "DESKTOP_GONE"),
+        (DesktopUnreadyError, "DESKTOP_UNREADY"),
+        (TimeoutError, "TIMEOUT"),
+        (CredentialUnknownError, "CREDENTIAL_UNKNOWN"),
+    ):
+        if isinstance(exc, kind):
+            return ObservationUnavailable(code)
+    return ObservationUnavailable("TOOL_UNAVAILABLE")
+
+
+def _api_context(bound: BoundDesktop, cache: Path, deadline: float, *, refresh: bool) -> UIRefreshContext:
+    """READY with no dialog, a ready bridge for this PID that owns `cache`, and (before a refresh) clean."""
+    pid, start = bound.identity.pid, bound.identity.process_start
+    state = _credential_state(pid, expected_process_start=start, timeout_s=_ui_read_budget(deadline, 8.0))
+    raise_terminal_detection(pid, state)
+    if state.desktop_unready is not None:
+        raise DesktopUnreadyError(pid, state.desktop_unready)
+    if not state.complete or state.state != "READY":
+        raise CredentialUnknownError(pid, state.unknown_reason or state.reason or "observer_not_ready")
+    context = UIRefreshContext(pid, bound.identity.port, bound, _ui_root(state, pid, start))
+    try:
+        instance = _wait_ui_bridge(pid, min(deadline, time.monotonic() + 60.0))
+    except TimeoutError:
+        if time.monotonic() >= deadline:
+            raise
+        raise DesktopActionError("bridge readiness not established") from None
+    if refresh and instance.get("hasUnsavedChanges") is not False:
+        raise DesktopUnreadyError(pid, "unsaved_changes")
+    resolved = cache_file(pid, instance=instance)
+    if resolved is None or resolved.resolve() != cache.resolve():
+        raise ObservationUnavailable("IDENTITY_UNESTABLISHED")
+    return context
+
+
+def ui_refresh_observed(  # pylint: disable=too-many-locals
     bound: BoundDesktop,
     cache: Path,
     *,
@@ -2761,7 +1580,7 @@ def ui_refresh_observed(
 ) -> RefreshObservation:
     """Refresh every source of the bound model through Desktop's own Refresh, for a programmatic caller.
 
-    Pinned contract (the capture caller codes against it; the body lands with the UI-default runtime):
+    Pinned contract (the capture caller codes against it):
 
     - ``bound`` comes from ``bind_desktop`` for the Desktop that opened the model owning ``cache``
       (``<model>/.pbi/cache.abf``). Identity, catalogue and file binding are rechecked before Invoke.
@@ -2774,10 +1593,41 @@ def ui_refresh_observed(
       the engine reports every partition of this model refreshed within ``deadline_seconds``.
     - Every refusal raises ``ObservationUnavailable(code)`` with a code from the observation
       vocabulary (for example ``DIALOG_NEEDS_HUMAN``, ``DESKTOP_GONE``, ``PID_REUSED``, ``TIMEOUT``,
-      ``TOOL_UNAVAILABLE``). A dialog is a human stop and is never clicked.
+      ``TOOL_UNAVAILABLE``). A dialog is a human stop and is never clicked. A scope mismatch raises
+      ``SourceScopeError``.
     - Never runs canaries, never Saves and never prints a verdict: the caller owns those steps.
     """
-    raise NotImplementedError("ui_refresh_observed lands with the UI-default runtime")
+    deadline = time.monotonic() + deadline_seconds
+    cache = Path(cache)
+    try:
+        with _model_lock(cache):
+            context = _api_context(bound, cache, deadline, refresh=True)
+            with _Progress(context) as progress:
+                if not same_model(context.port, cache)[0]:
+                    raise ObservationUnavailable("IDENTITY_UNESTABLISHED")
+                if automatic_source_scope is not None:
+                    expected = load_expected_sources(automatic_source_scope)
+                    partitions, expressions = bound_call(bound, _scope_reads, timeout_seconds=_ui_read_budget(deadline))
+                    check_source_scope(partitions, expressions, expected, list(canaries))
+                baseline = read_partition_snapshot(bound, timeout_seconds=_ui_read_budget(deadline))
+                check_baseline(baseline)
+                action = _invoke(context, "Refresh", deadline)
+                if not action.invoked or action.action_started_ticks is None:
+                    if action.reason == "named_control_missing":
+                        raise DesktopUnreadyError(context.pid, action.reason)
+                    raise DesktopActionError(f"Refresh refused: {action.reason}")
+                progress.phase("refreshing")
+                complete, _completion = _wait_for_engine_completion(
+                    context, baseline, action.action_started_ticks, deadline
+                )
+                if not complete:
+                    raise TimeoutError("engine completion not established before the deadline")
+                progress.phase("committed")
+                if _ui_wait_ready(context, deadline) is None:
+                    raise TimeoutError("Desktop did not settle before the deadline")
+    except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+        raise _api_refusal(exc) from None
+    return RefreshObservation(bound.catalogue, "full", "database", (), bound.identity)
 
 
 def ui_save_observed(
@@ -2788,7 +1638,7 @@ def ui_save_observed(
 ) -> SaveObservation:
     """Persist the bound model through Desktop's own guarded Save and read its cache back once.
 
-    Pinned contract (the capture caller codes against it; the body lands with the UI-default runtime):
+    Pinned contract (the capture caller codes against it):
 
     - Same binding precondition and per-model lock as ``ui_refresh_observed``.
     - Refuses before Save unless the bound Desktop is READY with no dialog and still serves this
@@ -2800,27 +1650,22 @@ def ui_save_observed(
     - Refusals raise ``ObservationUnavailable(code)`` as in ``ui_refresh_observed``; a concurrent
       holder raises ``ModelLockTimeout``. Never prints a verdict.
     """
-    raise NotImplementedError("ui_save_observed lands with the UI-default runtime")
-
-
-def _resolve_pid(pid: int | None) -> int | None:
-    """The Desktop pid to act on: the one given, or the ONLY running instance - never a guess.
-
-    Picking "the first instance the bridge listed" is fine on a one-instance box and ambiguous in a
-    parallel batch, where it silently binds the run to somebody else's migration.
-    """
-    if pid is not None:
-        return pid
-    running = _instances()
-    if len(running) > 1:
-        listed = "; ".join(f"{i.get('pid')} -> {i.get('currentFilePath') or '?'}" for i in running)
-        print(f"REFRESH: ERROR {len(running)} Power BI Desktop instances are running - name yours with --pid")
-        print(f"  instances: {listed}")
-        return None
-    pid = running[0].get("pid") if running else None
-    if pid is None:
-        print("REFRESH: ERROR no Power BI Desktop instance found (open the .pbip first)")
-    return pid
+    deadline = time.monotonic() + deadline_seconds
+    cache = Path(cache)
+    try:
+        with _model_lock(cache):
+            context = _api_context(bound, cache, deadline, refresh=False)
+            with _Progress(context, "saving"):
+                _before_save(context, deadline)
+                action = _invoke(context, "Save", deadline)
+                if not action.invoked:
+                    raise DesktopActionError(f"Save refused: {action.reason}")
+                if not _after_save(context, cache, deadline):
+                    raise TimeoutError("Desktop did not settle after Save before the deadline")
+            data = cache.read_bytes()
+    except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+        raise _api_refusal(exc) from None
+    return SaveObservation(bound.catalogue, SavedCache(hashlib.sha256(data).hexdigest(), len(data)), bound.identity)
 
 
 def _identity_gate(port: int, cache_path: Path | None) -> bool:
@@ -2842,175 +1687,127 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--pid",
         type=int,
-        help="Power BI Desktop process id - required when several instances are open "
-        "(`powerbi-desktop status` maps pid -> open file)",
+        required=True,
+        help="Power BI Desktop process id (`powerbi-desktop status` maps pid -> open file)",
     )
     parser.add_argument(
         "--port",
         type=int,
         help="Local AS port. Derived from --pid; if given it MUST equal the pid-discovered port "
-        "(a mismatch aborts - it cannot silently point the write at another instance)",
-    )
-    parser.add_argument(
-        "--tables",
-        nargs="*",
-        help="Tables to REFRESH (default: the whole database). This narrows the refresh, so it can "
-        "never earn a model-level DATA_OK - name canaries with --canaries instead",
+        "(a mismatch aborts - it cannot silently point a read or Save at another instance)",
     )
     parser.add_argument(
         "--canaries",
         nargs="*",
-        help="Tables to VERIFY after the refresh, one per distinct live source. A whole-database "
-        "refresh whose canaries all return rows earns the model-level DATA_OK. Defaults to --tables "
-        "when only that is given; with neither, the first queryable table is probed and the verdict "
-        "is downgraded to name that single table",
+        help="Tables to VERIFY after the refresh, one per distinct live source. A refresh whose "
+        "canaries all return rows earns the model-level DATA_OK; with none, the first queryable table "
+        "is probed and the verdict is downgraded to name that single table",
     )
-    parser.set_defaults(refresh_type=REFRESH_TYPE_FULL)
-    parser.add_argument(
-        "--calculate-only",
-        "--measures-only",
-        dest="refresh_type",
-        action="store_const",
-        const=REFRESH_TYPE_CALCULATE,
-        help=(
-            "Opt-in DAX-only refresh: send TMSL refresh type 'calculate' instead of 'full'. "
-            "This recalculates formulas without re-reading source rows; use only after measure-only "
-            "edits, because data-affecting changes need the default full refresh"
-        ),
-    )
-    parser.add_argument(
-        "--save",
-        action="store_true",
-        help="Accepted no-op: persisting is now the DEFAULT. Kept so existing callers still work",
-    )
+    parser.add_argument("--save", action="store_true", help="Accepted no-op: Save is the default")
     parser.add_argument(
         "--no-save",
         action="store_true",
-        help=(
-            "Prevent Save, NOT source execution: refresh still runs current M/native/custom SQL "
-            "and may incur source-side costs. Refresh in memory but persist NOTHING. Use for "
-            "read-only work (validation, auditing) and for the validate-then-deploy path, because "
-            "saving raises database.tmdl's declared compatibilityLevel to the level Desktop runs at"
-        ),
+        help="Prevent Save, NOT source execution: the refresh still runs current M/native/custom SQL and "
+        "may incur source-side costs; the refreshed data stays in memory only",
     )
-    parser.add_argument("--verify-only", action="store_true", help="Skip refresh/save; just report the state")
+    parser.add_argument("--verify-only", action="store_true", help="Skip Refresh and Save; just report the state")
+    parser.add_argument(
+        "--save-only",
+        action="store_true",
+        help="After an MCP Calculate of MCP-made edits: Desktop's guarded Save of what is loaded now, then "
+        "the model check and canaries. Never refreshes; requires --canaries; earns SAVE_OK",
+    )
     parser.add_argument(
         "--ui-refresh",
         action="store_true",
-        help=(
-            "WARNING: operator-only opt-in commissions execution of ALL current M, including native/custom SQL, "
-            "with potential source-side costs; --no-save prevents Save, NOT source execution. "
-            "Invoke one whole-model Import M Refresh and require typed engine completion evidence. "
-            "Defaults/callers unchanged. "
-            "Automatic callers must add --automatic-source-scope (#780, linked #692)"
-        ),
+        help="Accepted for compatibility; UI refresh is the default. WARNING: the default refresh executes "
+        "ALL current M, including native/custom SQL, with possible source-side cost; --no-save prevents "
+        "Save, NOT source execution",
     )
     parser.add_argument(
         "--automatic-source-scope",
         nargs="?",
         const="",
         metavar="EXPECTED_SOURCES_JSON",
-        help=(
-            "Automatic-caller form of --ui-refresh (#780): before any Refresh, refuse unless every partition "
-            "is an exact engine connector read (no custom SQL, files or code) whose identity equals this file. "
-            "Requires --ui-refresh and --canaries"
-        ),
-    )
-    parser.add_argument(
-        "--no-progress",
-        action="store_true",
-        help="Disable AMO progress tracing and use the legacy XMLA timeout path",
-    )
-    parser.add_argument(
-        "--progress-liveness-seconds",
-        type=float,
-        default=REFRESH_PROGRESS_LIVENESS_SECONDS,
-        help=(
-            "Seconds without a ProgressReport event before a traced refresh is considered stuck "
-            f"(default: {REFRESH_PROGRESS_LIVENESS_SECONDS:.0f})"
-        ),
+        help="Automatic callers (#780): before any Refresh, refuse unless every partition is an exact "
+        "engine connector read (no custom SQL, files or code) whose identity equals this file. "
+        "Requires --canaries",
     )
     parser.add_argument(
         "--refresh-absolute-timeout-seconds",
         type=float,
         default=REFRESH_ABSOLUTE_TIMEOUT_SECONDS,
-        help=(
-            "Absolute backstop for traced refreshes; liveness warnings are non-fatal "
-            f"(default: {REFRESH_ABSOLUTE_TIMEOUT_SECONDS:.0f})"
-        ),
+        help=f"Deadline for the whole operation (default: {REFRESH_ABSOLUTE_TIMEOUT_SECONDS:.0f})",
     )
     return parser
 
 
-def _validate_ui_refresh_args(args: argparse.Namespace) -> bool:
-    """Reject incompatible UI-refresh combinations before process discovery or any action."""
-    if args.automatic_source_scope is not None and not (
-        args.ui_refresh and args.automatic_source_scope and args.canaries
-    ):
-        print("REFRESH: ERROR --automatic-source-scope requires a file value, --ui-refresh and --canaries")
+def _validate_args(args: argparse.Namespace) -> bool:
+    """Reject invalid combinations before process discovery or any Desktop contact."""
+    scope = args.automatic_source_scope
+    if not 0 < args.pid < 2**32:
+        print("REFRESH: ERROR --pid must be a valid process id")
         return False
-    if not args.ui_refresh:
-        return True
-    if args.pid is None or args.pid <= 0 or args.pid >= 2**32:
-        print("REFRESH: ERROR --ui-refresh requires an explicit valid --pid")
+    if scope is not None and not (scope and args.canaries):
+        print("REFRESH: ERROR --automatic-source-scope requires a file value and --canaries")
         return False
-    exclusions = []
-    if args.verify_only:
-        exclusions.append("--verify-only")
-    if args.tables is not None:
-        exclusions.append("--tables")
-    if args.refresh_type != REFRESH_TYPE_FULL:
-        exclusions.append("--calculate-only/--measures-only")
-    if exclusions:
-        print(f"REFRESH: ERROR --ui-refresh cannot be combined with {', '.join(exclusions)}")
+    if args.verify_only and scope is not None:
+        print("REFRESH: ERROR --verify-only cannot be combined with --automatic-source-scope")
         return False
+    if args.save_only:
+        clashes = [
+            flag
+            for flag, given in (
+                ("--no-save", args.no_save),
+                ("--automatic-source-scope", scope is not None),
+                ("--verify-only", args.verify_only),
+            )
+            if given
+        ]
+        if clashes:
+            print(f"REFRESH: ERROR --save-only cannot be combined with {', '.join(clashes)}")
+            return False
+        if not args.canaries:
+            print("REFRESH: ERROR --save-only requires --canaries")
+            return False
     return True
 
 
-def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-return-statements,too-many-statements
-    """CLI entry point: refresh, save, and prove data is really there."""
+def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-return-statements,too-many-locals,too-many-branches
+    """CLI entry point: Desktop's own Refresh and guarded Save by default, and proof the data is there."""
     args = _build_arg_parser().parse_args(argv)
-    if not _validate_ui_refresh_args(args):
+    if not _validate_args(args):
         return 2
+    pid = args.pid
     entry = time.monotonic()
-    ui_deadline = entry + args.refresh_absolute_timeout_seconds if args.ui_refresh else None
-    credential_state = None
+    deadline = entry + args.refresh_absolute_timeout_seconds
+    startup_deadline = min(entry + 60.0, deadline)
 
-    if args.ui_refresh:
-        pid = args.pid
-        startup_deadline = min(entry + 60.0, ui_deadline)
-        instance = _ui_bridge_preflight(pid, startup_deadline)
-        if instance is None:
-            return 3
-        refresh_preflight = _ui_refresh_preflight(pid, instance, startup_deadline)
-        if isinstance(refresh_preflight, int):
-            return refresh_preflight
-        instance, credential_state = refresh_preflight
-        cache = cache_file(pid, instance=instance)
-    else:
-        pid = _resolve_pid(args.pid)
-        if pid is None:
-            return 2
-        cache = cache_file(pid)
-
-    # Observe before touching XMLA so no query is issued against a blocked Desktop.
-    if credential_state is None:
-        credential_state = _credential_state(pid)
-    if credential_state.dialog is not None:
-        _emit_dialog_finding(pid, credential_state.dialog)
+    instance = _ui_bridge_preflight(pid, startup_deadline)
+    if instance is None:
         return 3
-    if credential_state.process_gone is not None:
-        _emit_desktop_gone(pid, credential_state.process_gone)
+    if args.verify_only:
+        state = _credential_state(pid)
+    else:
+        preflight = _ui_refresh_preflight(pid, instance, startup_deadline, require_clean=not args.save_only)
+        if isinstance(preflight, int):
+            return preflight
+        instance, state = preflight
+    if state.dialog is not None:
+        _emit_dialog_finding(pid, state.dialog)
+        return 3
+    if state.process_gone is not None:
+        _emit_desktop_gone(pid, state.process_gone)
         return 2
-    if credential_state.desktop_unready is not None:
-        _emit_desktop_unready(pid, credential_state.desktop_unready)
+    if state.desktop_unready is not None:
+        _emit_desktop_unready(pid, state.desktop_unready)
         return 2
-    if credential_state.unknown_reason:
-        print(f"  credential-check: UNKNOWN ({credential_state.unknown_reason})")
+    if state.unknown_reason:
+        print(f"  credential-check: UNKNOWN ({state.unknown_reason})")
+    cache = cache_file(pid, instance=instance)
 
-    # The port is DERIVED from the pid. A stray --port must never bypass that on this mutating path:
-    # the destination cache is resolved from the pid, so a --port pointing at another instance would
-    # read (and, via ImageSave, persist) a sibling's model into this project's own correct cache.abf.
+    # The port is DERIVED from the pid. A stray --port must never bypass that: the destination cache is
+    # resolved from the pid, so a --port pointing at another instance would read a sibling's model.
     discovered = discover_port(pid)
     if args.port is not None and args.port != discovered:
         print(
@@ -3019,29 +1816,28 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-retu
         )
         return 2
     port = discovered
-
-    before_stamp = cache.stat().st_mtime if cache and cache.exists() else 0.0
-
-    # Gate everything on identity: refreshing, row-counting or persisting a sibling's model is a
-    # fully self-consistent false positive, so it has to be caught BEFORE any of the three.
-    if not _identity_gate(port, cache):
+    try:
+        _load_adomd(port)
+    except AdomdUnavailable as exc:
+        print(f"REFRESH: ERROR ADOMD_UNAVAILABLE {exc.detail}")
         return 2
 
-    if args.ui_refresh:
-        try:
-            _ui_read_budget(ui_deadline)
-        except TimeoutError:
-            print("REFRESH: TIMEOUT - UI refresh deadline exhausted during CLI preflight; no action invoked")
-            return 3
-        return _ui_refresh_and_save(pid, port, cache, args, credential_state, deadline=ui_deadline)
-
-    if not args.verify_only:
-        outcome = _refresh_and_save(pid, port, cache, args, credential_state)
-        if outcome is not None:
-            return outcome
-
-    results, implicit = row_counts(port, _canary_tables(args))
-    return _emit_data_verdict(cache, before_stamp, args, results, implicit)
+    if args.verify_only:
+        before_stamp = cache.stat().st_mtime if cache and cache.exists() else 0.0
+        if not _identity_gate(port, cache):
+            return 2
+        results, implicit = row_counts(port, _canary_tables(args))
+        return _emit_data_verdict(cache, before_stamp, args, results, implicit)
+    # Gate on identity before Refresh: refreshing a sibling's model is a self-consistent false positive.
+    # `--save-only` checks the model only after Save, because MCP edits legitimately differ from disk.
+    if not args.save_only and not _identity_gate(port, cache):
+        return 2
+    try:
+        _ui_read_budget(deadline)
+    except TimeoutError:
+        print("REFRESH: TIMEOUT - UI refresh deadline exhausted during CLI preflight; no action invoked")
+        return 3
+    return _ui_refresh_and_save(pid, port, cache, args, state, deadline=deadline)
 
 
 if __name__ == "__main__":

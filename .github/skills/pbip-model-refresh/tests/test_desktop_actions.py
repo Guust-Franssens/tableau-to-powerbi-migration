@@ -196,8 +196,6 @@ def test_ui_main_readiness_gate_precedes_cache_and_never_uses_legacy_bridge(
     context, _args, calls = _wire_ui_route(monkeypatch, no_save=True)
     instance = _ready_bridge()["instances"][0]
     sequence = []
-    for name in ("_resolve_pid", "_instance", "_bridge_status", "_refresh_and_save"):
-        monkeypatch.setattr(refresh_pbip_model, name, lambda *_args: pytest.fail("legacy UI path"))
 
     def wait(pid, deadline):
         assert pid == 123 and deadline > 0
@@ -229,7 +227,8 @@ def test_ui_main_readiness_gate_precedes_cache_and_never_uses_legacy_bridge(
     )
     monkeypatch.setattr(refresh_pbip_model, "discover_port", lambda _pid: 49157)
     monkeypatch.setattr(refresh_pbip_model, "bind_desktop", lambda *_args, **_kwargs: context.bound)
-    result = refresh_pbip_model.main(["--pid", "123", "--ui-refresh", "--no-save"])
+    # No mode flag: Desktop's own UI Refresh is the default route.
+    result = refresh_pbip_model.main(["--pid", "123", "--no-save"])
     assert result == (0 if outcome == "ready" else 3)
     assert calls == (["Refresh", "canaries"] if outcome == "ready" else [])
     assert sequence == (["readiness", "cache"] if outcome == "ready" else ["readiness"])
@@ -240,9 +239,10 @@ def test_ui_main_readiness_gate_precedes_cache_and_never_uses_legacy_bridge(
 
 
 def test_ui_refresh_requires_explicit_pid_before_discovery(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(refresh_pbip_model, "_resolve_pid", lambda *_args: pytest.fail("legacy discovery"))
     monkeypatch.setattr(refresh_pbip_model, "_wait_ui_bridge", lambda *_args: pytest.fail("bridge discovery"))
-    assert refresh_pbip_model.main(["--ui-refresh"]) == 2
+    with pytest.raises(SystemExit) as stopped:
+        refresh_pbip_model.main(["--ui-refresh"])
+    assert stopped.value.code == 2
 
 
 @pytest.mark.parametrize("operation_seconds,expected", [(10, 110.0)])
@@ -339,8 +339,6 @@ def _ui_refresh_route(  # pylint: disable=too-many-locals
         phase("baseline")
         return original_snapshot(*args, **kwargs)
 
-    for name in ("_resolve_pid", "_instance", "_bridge_status", "_refresh_and_save"):
-        monkeypatch.setattr(refresh_pbip_model, name, lambda *_args: pytest.fail("legacy UI path"))
     monkeypatch.setattr(refresh_pbip_model, "_wait_ui_bridge", wait)
     monkeypatch.setattr(refresh_pbip_model, "_credential_state", observe)
     monkeypatch.setattr(refresh_pbip_model, "_ui_bridge_status", bridge)
@@ -398,7 +396,7 @@ def test_ui_refresh_preflight_precedes_binding_baseline_and_refresh(
     assert actions_seen == ["Refresh", "canaries", *([] if no_save else ["Save"])]
 
 
-@pytest.mark.parametrize("dirty", [1, None])
+@pytest.mark.parametrize("dirty", [True, 1, None])
 def test_ui_refresh_requires_strict_false_initially(ui_refresh_route, dirty: object) -> None:
     controls, events, actions_seen, bridge_operations = ui_refresh_route
     instance = controls["initial"]
@@ -406,7 +404,7 @@ def test_ui_refresh_requires_strict_false_initially(ui_refresh_route, dirty: obj
         instance.pop("hasUnsavedChanges")
     else:
         instance["hasUnsavedChanges"] = dirty
-    assert refresh_pbip_model.main(["--pid", "123", "--ui-refresh"]) != 0, "dirty or unknown initial state was accepted"
+    assert refresh_pbip_model.main(["--pid", "123"]) != 0, "dirty or unknown initial state was accepted"
     assert events == ["initial"], "dirty or unknown state must refuse before observation"
     assert bridge_operations == []
     assert actions_seen == [], "Refresh/Save must be withheld when clean state is not proven"
@@ -2152,27 +2150,28 @@ def test_expired_action_deadline_refuses_before_starting_a_child(monkeypatch: py
 
 
 @pytest.mark.parametrize(
-    "arguments",
+    "arguments,refusal",
     [
-        ["--ui-refresh", "--verify-only"],
-        ["--ui-refresh", "--tables"],
-        ["--ui-refresh", "--calculate-only"],
+        (["--save-only", "--canaries", "Orders", "--no-save"], "--save-only cannot be combined with --no-save"),
+        (["--save-only", "--canaries", "Orders", "--verify-only"], "--save-only cannot be combined with --verify-only"),
+        (
+            ["--save-only", "--canaries", "Orders", "--automatic-source-scope", "x.json"],
+            "--save-only cannot be combined with --automatic-source-scope",
+        ),
+        (["--save-only"], "--save-only requires --canaries"),
+        (
+            ["--verify-only", "--automatic-source-scope", "x.json", "--canaries", "Orders"],
+            "--verify-only cannot be combined with --automatic-source-scope",
+        ),
     ],
 )
-def test_ui_refresh_incompatible_arguments_refuse_before_instance_discovery(
-    arguments: list[str], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+def test_incompatible_arguments_refuse_before_any_desktop_contact(
+    arguments: list[str], refusal: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setattr(refresh_pbip_model, "_resolve_pid", lambda _pid: pytest.fail("instance discovery ran"))
+    monkeypatch.setattr(refresh_pbip_model, "_ui_bridge_preflight", lambda *_args: pytest.fail("Desktop contact"))
 
     assert refresh_pbip_model.main(["--pid", "123", *arguments]) == 2
-    assert "cannot be combined" in capsys.readouterr().out
-
-
-def test_default_and_verify_only_paths_do_not_enable_ui_refresh() -> None:
-    parser = refresh_pbip_model._build_arg_parser()
-
-    assert parser.parse_args(["--pid", "123"]).ui_refresh is False
-    assert parser.parse_args(["--pid", "123", "--verify-only"]).ui_refresh is False
+    assert capsys.readouterr().out == f"REFRESH: ERROR {refusal}\n"
 
 
 def _wire_ui_route(monkeypatch: pytest.MonkeyPatch, *, no_save: bool = False, rows: int = 1):
@@ -2227,7 +2226,6 @@ def _wire_ui_route(monkeypatch: pytest.MonkeyPatch, *, no_save: bool = False, ro
         refresh_absolute_timeout_seconds=10,
         no_save=no_save,
         canaries=["Orders"],
-        tables=None,
         verify_only=False,
     )
     return context, args, calls
@@ -2244,36 +2242,122 @@ def test_positive_bound_canaries_invoke_one_ui_save_without_a_dirty_flag_gate(
     assert calls == ["Refresh", "canaries", "Save"]
 
 
-def test_o23_completion_wait_reports_elapsed_every_thirty_seconds(monkeypatch, capsys) -> None:
-    """A deterministic clock measures the status heartbeat without sleeping or launching a reader."""
-    clock = [1000.0]
+def _scripted_progress(monkeypatch: pytest.MonkeyPatch, reads: list[object]) -> tuple[list[float], list[str]]:
+    """Drive `_Progress._tick` by hand: a controlled clock and scripted job counts or read errors."""
+    clock = [0.0]
+    connections: list[str] = []
+    values = iter(reads)
 
-    class Worker:
-        def __init__(self, **_kwargs):
-            pass
+    class Connection:
+        def __init__(self) -> None:
+            connections.append("open")
 
-        def start(self):
-            pass
+        def Close(self) -> None:  # pylint: disable=invalid-name
+            connections.append("close")
 
-        def is_alive(self):
-            return True
+    def jobs(_connection) -> int:
+        value = next(values)
+        if isinstance(value, Exception):
+            raise value
+        return value
 
-        def join(self, timeout):
-            clock[0] += timeout
+    monkeypatch.setattr(refresh_pbip_model, "_progress_clock", lambda: clock[0])
+    monkeypatch.setattr(refresh_pbip_model, "_open_progress_connection", lambda _context: Connection())
+    monkeypatch.setattr(refresh_pbip_model, "_process_jobs", jobs)
+    return clock, connections
 
-    monkeypatch.setattr(refresh_pbip_model, "time", SimpleNamespace(monotonic=lambda: clock[0]))
-    monkeypatch.setattr(refresh_pbip_model.threading, "Thread", Worker)
-    monkeypatch.setattr(refresh_pbip_model, "_ui_observer_state", lambda *_a, **_k: _settle_observation("ready"))
-    assert refresh_pbip_model._wait_for_engine_completion(_held_ui_context(), _snapshot(ticks=100), 200, 1061.0) == (
-        False,
-        None,
-    )
+
+def test_progress_read_error_prints_unknown_then_reconnects_without_a_stale_value(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    clock, connections = _scripted_progress(monkeypatch, [3, OSError("popup"), 0])
+    progress = refresh_pbip_model._Progress(_held_ui_context(), "refreshing")
+    for _ in range(3):
+        clock[0] += 5
+        progress._tick()
+
     assert capsys.readouterr().out.splitlines() == [
-        f"REFRESH_STATUS started tool_pid={os.getpid()}",
-        "REFRESH_STATUS elapsed=0s partitions=?/1 dialog=none",
-        "REFRESH_STATUS elapsed=30s partitions=?/1 dialog=none",
-        "REFRESH_STATUS elapsed=60s partitions=?/1 dialog=none",
+        "REFRESH_STATUS elapsed=5s phase=refreshing process_jobs=3 dialog=none",
+        "REFRESH_STATUS elapsed=10s phase=refreshing process_jobs=? dialog=none",
+        "REFRESH_STATUS elapsed=15s phase=refreshing process_jobs=0 dialog=none",
     ]
+    assert connections == ["open", "close", "open"]
+
+
+def test_progress_prints_on_any_change_and_at_least_every_thirty_seconds(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    clock, _connections = _scripted_progress(monkeypatch, [1, 1, 1, 2, 2, 2])
+    progress = refresh_pbip_model._Progress(_held_ui_context())
+    for moment in (0, 29, 30, 31):
+        clock[0] = moment
+        progress._tick()
+    progress.phase("canaries")
+    for moment in (32, 33):
+        clock[0] = moment
+        progress._tick()
+
+    assert capsys.readouterr().out.splitlines() == [
+        "REFRESH_STATUS elapsed=0s phase=invoke process_jobs=1 dialog=none",
+        "REFRESH_STATUS elapsed=30s phase=invoke process_jobs=1 dialog=none",
+        "REFRESH_STATUS elapsed=31s phase=invoke process_jobs=2 dialog=none",
+        "REFRESH_STATUS elapsed=32s phase=canaries process_jobs=2 dialog=none",
+    ]
+
+
+@pytest.mark.parametrize("saved", [True, False])
+def test_progress_summary_sums_each_phase(monkeypatch: pytest.MonkeyPatch, saved: bool) -> None:
+    clock, _connections = _scripted_progress(monkeypatch, [])
+    progress = refresh_pbip_model._Progress(_held_ui_context())
+    for moment, phase in ((10, "refreshing"), (70, "committed"), (75, "canaries"), (80, "saving")):
+        if phase != "saving" or saved:
+            clock[0] = moment
+            progress.phase(phase)
+    clock[0] = 90
+
+    assert progress.finish() == (
+        "REFRESH_SUMMARY total=90s refresh=75s canaries=5s save=10s"
+        if saved
+        else "REFRESH_SUMMARY total=90s refresh=75s canaries=15s save=skipped"
+    )
+
+
+@pytest.mark.parametrize("completes_on_read", [3, None])
+def test_zero_process_jobs_neither_ends_the_wait_nor_changes_the_exit_code(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], completes_on_read: int | None
+) -> None:
+    """Only typed partition completion ends the wait: an idle job count is reported, never acted on."""
+    wait = refresh_pbip_model._wait_for_engine_completion
+    context, args, calls = _wire_ui_route(monkeypatch, no_save=True)
+    args.refresh_absolute_timeout_seconds = 1.0
+    reads: list[int] = []
+
+    def completion(*_args, **_kwargs) -> CompletionResult:
+        reads.append(len(reads) + 1)
+        return CompletionResult(reads[-1] == completes_on_read, "controlled completion")
+
+    monkeypatch.setattr(refresh_pbip_model, "_wait_for_engine_completion", wait)
+    monkeypatch.setattr(refresh_pbip_model, "_read_completion_snapshot", lambda *_args: _snapshot(ticks=300))
+    monkeypatch.setattr(refresh_pbip_model, "check_completion", completion)
+    monkeypatch.setattr(
+        refresh_pbip_model, "time", SimpleNamespace(monotonic=time.monotonic, sleep=lambda _s: time.sleep(0.01))
+    )
+    monkeypatch.setattr(refresh_pbip_model, "_open_progress_connection", lambda _context: SimpleNamespace())
+    monkeypatch.setattr(refresh_pbip_model, "_process_jobs", lambda _connection: 0)
+
+    result = refresh_pbip_model._ui_refresh_locked(context, Path("missing-cache.abf"), args)
+
+    output = capsys.readouterr().out
+    assert "process_jobs=0" in output
+    if completes_on_read:
+        assert result == 0, output
+        assert reads == [1, 2, 3], "the wait ended before typed completion"
+        assert calls == ["Refresh", "canaries"]
+    else:
+        assert result == 3, output
+        assert len(reads) > 3
+        assert "REFRESH: TIMEOUT - engine completion not established" in output
+        assert calls == ["Refresh"]
 
 
 def test_no_save_and_failed_completion_never_invoke_ui_save(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2520,6 +2604,144 @@ def test_real_save_failures_are_not_cleared(
     assert "REFRESH: DATA_OK" not in output
 
 
+def _wire_main(monkeypatch: pytest.MonkeyPatch, context: UIRefreshContext, instance: dict, cache: Path) -> None:
+    """Route `main` to the controlled Desktop of `_wire_ui_route`, with `instance` as its bridge entry."""
+    root = DesktopWindow("", "", 100, 100, hwnd=789, pid="123", process_started_at="456")
+    monkeypatch.setattr(refresh_pbip_model, "_wait_ui_bridge", lambda *_args: instance)
+    monkeypatch.setattr(
+        refresh_pbip_model, "_ui_bridge_status", lambda *_args, **_kwargs: {"status": "ready", "instances": [instance]}
+    )
+    monkeypatch.setattr(
+        refresh_pbip_model,
+        "_credential_state",
+        lambda _pid, **_kwargs: Observation(pid="123", process_started_at="456", target_window=root),
+    )
+    monkeypatch.setattr(refresh_pbip_model, "cache_file", lambda *_args, **_kwargs: cache)
+    monkeypatch.setattr(refresh_pbip_model, "discover_port", lambda _pid: 49157)
+    monkeypatch.setattr(refresh_pbip_model, "bind_desktop", lambda *_args, **_kwargs: context.bound)
+
+
+@pytest.mark.parametrize("dirty_after_save", [False, True])
+def test_save_only_never_refreshes_and_earns_save_ok_only_on_a_clean_post_save_bridge(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str], dirty_after_save: bool
+) -> None:
+    emit_verdict = refresh_pbip_model._emit_data_verdict
+    context, _args, calls = _wire_ui_route(monkeypatch)
+    cache = tmp_path / "cache.abf"
+    cache.write_bytes(b"old synthetic cache")
+    os.utime(cache, (100, 100))
+    # MCP edits leave Desktop dirty; --save-only accepts that before its Save.
+    instance = {**_ready_bridge()["instances"][0], "hasUnsavedChanges": True}
+    wired_invoke = refresh_pbip_model.invoke_desktop_action
+
+    def invoke(action: str, **kwargs) -> ActionResult:
+        if action == "Save":
+            cache.write_bytes(b"synthetic cache updated by named Save")
+            os.utime(cache, (200, 200))
+            instance["hasUnsavedChanges"] = dirty_after_save
+        return wired_invoke(action, **kwargs)
+
+    _wire_main(monkeypatch, context, instance, cache)
+    monkeypatch.setattr(refresh_pbip_model, "invoke_desktop_action", invoke)
+    monkeypatch.setattr(refresh_pbip_model, "_emit_data_verdict", emit_verdict)
+
+    result = refresh_pbip_model.main(["--pid", "123", "--save-only", "--canaries", "Orders"])
+
+    output = capsys.readouterr().out
+    assert "Refresh" not in calls
+    assert "Save persists everything loaded in this Desktop" in output
+    if dirty_after_save:
+        assert result == 1, output
+        assert calls == ["Save"]
+        assert "REFRESH: NOT_PERSISTED (post-Save verification unavailable: DesktopActionError)" in output
+        assert "SAVE_OK" not in output
+    else:
+        assert result == 0, output
+        assert calls == ["Save", "canaries"]
+        assert "REFRESH: SAVE_OK" in output
+        assert "DATA_OK" not in output
+
+
+@pytest.mark.parametrize(
+    "mode", [[], ["--no-save"], ["--save-only", "--canaries", "Orders"], ["--verify-only"]], ids=str
+)
+def test_adomd_load_failure_prints_one_line_before_any_model_read(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], mode: list[str]
+) -> None:
+    context, _args, calls = _wire_ui_route(monkeypatch)
+    _wire_main(monkeypatch, context, _ready_bridge()["instances"][0], Path("missing-cache.abf"))
+
+    def unavailable(_port):
+        raise refresh_pbip_model.AdomdUnavailable("pythonnet is not installed")
+
+    monkeypatch.setattr(refresh_pbip_model, "_load_adomd", unavailable)
+    for reader in ("_identity_gate", "row_counts", "bind_desktop"):
+        monkeypatch.setattr(refresh_pbip_model, reader, lambda *_args, **_kwargs: pytest.fail("model read"))
+    try:
+        result = refresh_pbip_model.main(["--pid", "123", *mode])
+    except refresh_pbip_model.AdomdUnavailable:
+        pytest.fail("the ADOMD failure escaped as a traceback")
+
+    output = capsys.readouterr().out
+    assert result == 2
+    assert output.splitlines()[-1] == "REFRESH: ERROR ADOMD_UNAVAILABLE pythonnet is not installed"
+    assert "Traceback" not in output
+    assert not calls
+
+
+def _wire_api(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, state: Observation | None = None):
+    """The programmatic API over `_wire_ui_route`'s controlled Desktop; returns (bound, cache, calls)."""
+    context, _args, calls = _wire_ui_route(monkeypatch)
+    bound = SimpleNamespace(identity=context.bound.identity, catalogue="catalogue-guid")
+    cache = tmp_path / "cache.abf"
+    cache.write_bytes(b"synthetic cache")
+    root = DesktopWindow("", "", 100, 100, hwnd=789, pid="123", process_started_at="456")
+    state = state or Observation(pid="123", process_started_at="456", target_window=root)
+    monkeypatch.setattr(refresh_pbip_model, "_credential_state", lambda _pid, **_kwargs: state)
+    monkeypatch.setattr(refresh_pbip_model, "_wait_ui_bridge", lambda *_args: _ready_bridge()["instances"][0])
+    monkeypatch.setattr(refresh_pbip_model, "cache_file", lambda *_args, **_kwargs: cache)
+    monkeypatch.setattr(refresh_pbip_model, "same_model", lambda *_args: (True, "controlled"))
+    return bound, cache, calls
+
+
+def test_api_refresh_then_save_return_their_observations_without_a_verdict(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bound, cache, calls = _wire_api(monkeypatch, tmp_path)
+
+    refreshed = refresh_pbip_model.ui_refresh_observed(bound, cache)
+    saved = refresh_pbip_model.ui_save_observed(bound, cache)
+
+    assert refreshed == refresh_pbip_model.RefreshObservation("catalogue-guid", "full", "database", (), bound.identity)
+    digest = refresh_pbip_model.hashlib.sha256(b"synthetic cache").hexdigest()
+    assert saved == refresh_pbip_model.SaveObservation(
+        "catalogue-guid", refresh_pbip_model.SavedCache(digest, len(b"synthetic cache")), bound.identity
+    )
+    assert calls == ["Refresh", "Save"]
+    assert "REFRESH:" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("api", ["refresh", "save"])
+@pytest.mark.parametrize("stop", ["dialog", "timeout"])
+def test_api_refusals_map_onto_the_observation_vocabulary(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, api: str, stop: str
+) -> None:
+    root = DesktopWindow("", "", 100, 100, hwnd=789, pid="123", process_started_at="456")
+    dialog = DialogFinding(DesktopWindow("", "", 100, 100, hwnd=888, owner_hwnd=789), "Sign in")
+    state = Observation(pid="123", process_started_at="456", target_window=root, dialog=dialog)
+    bound, cache, calls = _wire_api(monkeypatch, tmp_path, state if stop == "dialog" else None)
+    # The deadline expires while Desktop works: the engine never completes, or Desktop never settles after Save.
+    monkeypatch.setattr(refresh_pbip_model, "_wait_for_engine_completion", lambda *_args: (False, None))
+    monkeypatch.setattr(refresh_pbip_model, "_ui_wait_ready", lambda *_args: None)
+    observed = refresh_pbip_model.ui_refresh_observed if api == "refresh" else refresh_pbip_model.ui_save_observed
+
+    with pytest.raises(refresh_pbip_model.ObservationUnavailable) as refused:
+        observed(bound, cache)
+
+    assert refused.value.args == ("DIALOG_NEEDS_HUMAN" if stop == "dialog" else "TIMEOUT",)
+    assert calls == ([] if stop == "dialog" else ["Refresh" if api == "refresh" else "Save"])
+
+
 # --- #780 automatic source scope -----------------------------------------------------------------
 
 _PARAM = '"{}" meta [IsParameterQuery=true, Type="Text", IsParameterQueryRequired=true]'
@@ -2712,16 +2934,17 @@ def test_scope_refuses_unreadable_or_malformed_expected_sources(
 @pytest.mark.parametrize(
     "arguments",
     [
-        ["--ui-refresh", "--automatic-source-scope", "x.json"],
+        ["--automatic-source-scope", "x.json"],
+        ["--automatic-source-scope", "--canaries", "Orders"],
     ],
 )
-def test_scope_flag_requires_value_ui_refresh_and_canaries_before_discovery(
+def test_scope_flag_requires_value_and_canaries_before_discovery(
     arguments: list[str], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setattr(refresh_pbip_model, "_resolve_pid", lambda _pid: pytest.fail("instance discovery ran"))
+    monkeypatch.setattr(refresh_pbip_model, "_ui_bridge_preflight", lambda *_args: pytest.fail("Desktop contact"))
 
     assert refresh_pbip_model.main(["--pid", "123", *arguments]) == 2
-    assert "--automatic-source-scope requires" in capsys.readouterr().out
+    assert "REFRESH: ERROR --automatic-source-scope requires a file value and --canaries" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize(

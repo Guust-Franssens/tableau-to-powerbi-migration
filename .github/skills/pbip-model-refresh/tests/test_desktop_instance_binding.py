@@ -6,7 +6,7 @@ so always correct) and the Analysis Services port the data is read from. `discov
 silently widen to "any msmdsrv on the machine" whenever the pid-scoped lookup came back empty -
 most likely because Desktop was up before its msmdsrv had bound a port - and then took the first
 result. That writes a SIBLING migration's model into this migration's own correct `cache.abf`, and
-every existing check still passes: `image_save` can only see that the file exists, is non-empty and
+every existing check still passes: a cache check can only see that the file exists, is non-empty and
 was newly written, and `row_counts` queries that same wrong port, so both signals agree and both are
 wrong. `cache.abf` is gitignored, so nothing downstream catches it either.
 
@@ -19,11 +19,9 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-import traceback
-from dataclasses import FrozenInstanceError, asdict, replace
+from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
 
 import pytest
 
@@ -33,7 +31,7 @@ import pytest
 import probe_desktop_query
 import refresh_pbip_model
 from probe_desktop_query import discover_port, table_names
-from refresh_pbip_model import _instance, _resolve_pid, same_model, tmdl_tables
+from refresh_pbip_model import same_model, tmdl_tables
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 OBSERVED_IDENTITY = probe_desktop_query.DesktopIdentity(111, "100", 222, "101", 52001)
@@ -214,393 +212,6 @@ def test_observation_catalogue_is_one_exact_id_and_reader_is_closed(catalogues):
         with pytest.raises(probe_desktop_query.ObservationUnavailable, match="^CATALOGUE_UNESTABLISHED$"):
             probe_desktop_query.catalogue_id(connection)
     assert connection.reader.closed
-
-
-@pytest.mark.parametrize("kind", ["full"])
-@pytest.mark.parametrize("tables", [("Orders",)], ids=["tables"])
-def test_refresh_observation_matches_the_executed_scope(monkeypatch, kind, tables):
-    bound = probe_desktop_query.BoundDesktop(OBSERVED_IDENTITY, OBSERVED_CATALOGUE)
-    sent = []
-    command = SimpleNamespace()
-    command.ExecuteNonQuery = lambda: sent.append(json.loads(command.CommandText))
-    connection = SimpleNamespace(CreateCommand=lambda: command, Open=lambda: None, Close=lambda: None)
-    monkeypatch.setattr(refresh_pbip_model, "_load_adomd", lambda _port=None: lambda _: connection)
-    monkeypatch.setattr(refresh_pbip_model, "recheck_bound", lambda *_args, **_kwargs: None)
-    observation = refresh_pbip_model.refresh(
-        52001,
-        list(tables),
-        desktop_pid=111,
-        refresh_type=kind,
-        bound=bound,
-        return_observation=True,
-        progress_enabled=False,
-    )
-    objects = [{"database": OBSERVED_CATALOGUE, "table": "Orders"}] if tables else [{"database": OBSERVED_CATALOGUE}]
-    assert sent == [{"refresh": {"type": kind, "objects": objects}}]
-    assert observation == refresh_pbip_model.RefreshObservation(
-        OBSERVED_CATALOGUE, kind, "tables" if tables else "database", tables, OBSERVED_IDENTITY
-    )
-    with pytest.raises(FrozenInstanceError):
-        observation.catalogue = "caller mutation"
-    with pytest.raises(probe_desktop_query.ObservationUnavailable, match="^WRONG_PID_PORT$"):
-        refresh_pbip_model.refresh(52002, None, desktop_pid=111, bound=bound, return_observation=True)
-    with pytest.raises(probe_desktop_query.ObservationUnavailable, match="^IDENTITY_UNESTABLISHED$"):
-        refresh_pbip_model.refresh(52001, None, return_observation=True)
-
-
-class _HostileObservationArgument:
-    def __init__(self):
-        self.touched = []
-
-    def __bool__(self):
-        self.touched.append("bool")
-        raise AssertionError("retired argument inspected")
-
-    def __len__(self):
-        self.touched.append("len")
-        raise AssertionError("retired argument inspected")
-
-    def __iter__(self):
-        self.touched.append("iter")
-        raise AssertionError("retired argument inspected")
-
-    def __call__(self, *_args):
-        self.touched.append("call")
-        raise AssertionError("retired argument invoked")
-
-    def append(self, _value):
-        self.touched.append("append")
-        raise AssertionError("retired argument invoked")
-
-
-def _observation_entry(name, cache, **options):
-    bound = probe_desktop_query.BoundDesktop(OBSERVED_IDENTITY, OBSERVED_CATALOGUE)
-    if name == "refresh":
-        return refresh_pbip_model.refresh(52001, None, desktop_pid=111, bound=bound, **options)
-    if name == "image_save":
-        return refresh_pbip_model.image_save(52001, cache, bound=bound, **options)
-    if name == "_staged_image_write":
-        return refresh_pbip_model._staged_image_write(cache, lambda _path: None, **options)
-    return getattr(refresh_pbip_model, name)(cache, cache.parent.parent, 1606, lambda _path: None, **options)
-
-
-@pytest.mark.parametrize(
-    "sink_kind,mode,name,sink_name",
-    [
-        ("empty", True, "refresh", "observations"),
-        ("false", False, "image_save", "on_persist"),
-        ("empty", True, "_persist_image_locked", "on_observation"),
-    ],
-)
-def test_all_retired_sinks_refuse_without_inspection_or_io(monkeypatch, tmp_path, name, sink_name, mode, sink_kind):
-    touched = []
-    hostile = _HostileObservationArgument()
-    sink = {
-        "empty": [],
-        "populated": [object()],
-        "false": False,
-        "callable": lambda _: touched.append("called"),
-        "hostile": hostile,
-    }[sink_kind]
-
-    def unexpected(*_args, **_kwargs):
-        touched.append("I/O")
-        raise AssertionError("retired-sink guard ran too late")
-
-    with monkeypatch.context() as patch:
-        for module, attr in (
-            (refresh_pbip_model, "_load_adomd"),
-            (refresh_pbip_model, "_load_amo"),
-            (refresh_pbip_model, "desktop_identity"),
-            (refresh_pbip_model, "_credential_state"),
-            (refresh_pbip_model, "_snapshot_rollback_paths"),
-            (Path, "mkdir"),
-        ):
-            patch.setattr(module, attr, unexpected)
-        with pytest.raises(probe_desktop_query.ObservationUnavailable, match="^TOOL_UNAVAILABLE$"):
-            _observation_entry(name, tmp_path / "cache.abf", return_observation=mode, **{sink_name: sink})
-    assert touched == hostile.touched == [], "the retired-sink identity guard must precede all inspection/work"
-
-
-@pytest.mark.parametrize(
-    "mode,name",
-    [
-        (0, "_persist_image"),
-        ([], "_staged_image_write"),
-    ],
-    ids=["zero-_persist_image", "list-_staged_image_write"],
-)
-def test_observation_mode_is_an_exact_bool_before_io(monkeypatch, tmp_path, name, mode):
-    touched = []
-
-    def unexpected(*_args, **_kwargs):
-        touched.append("I/O")
-        raise AssertionError("exact-mode guard ran too late")
-
-    with monkeypatch.context() as patch:
-        patch.setattr(Path, "mkdir", unexpected)
-        patch.setattr(refresh_pbip_model, "_load_adomd", unexpected)
-        patch.setattr(refresh_pbip_model, "_load_amo", unexpected)
-        patch.setattr(refresh_pbip_model, "desktop_identity", unexpected)
-        patch.setattr(refresh_pbip_model, "_credential_state", unexpected)
-        patch.setattr(refresh_pbip_model, "_snapshot_rollback_paths", unexpected)
-        with pytest.raises(probe_desktop_query.ObservationUnavailable, match="^TOOL_UNAVAILABLE$"):
-            _observation_entry(name, tmp_path / "cache.abf", return_observation=mode)
-    assert touched == [], "bool substitutes must not enter native or filesystem phases"
-    if isinstance(mode, _HostileObservationArgument):
-        assert mode.touched == []
-
-
-def _refresh_connection(monkeypatch):
-    """A local connection double with the real bound/catalogue rechecks still in the path."""
-    events = []
-    bound = probe_desktop_query.BoundDesktop(OBSERVED_IDENTITY, OBSERVED_CATALOGUE)
-    connection = SimpleNamespace(
-        Database=OBSERVED_CATALOGUE, Open=lambda: events.append("open"), Close=lambda: events.append("adomd-close")
-    )
-
-    def command():
-        cmd = SimpleNamespace()
-        cmd.ExecuteReader = lambda: _FakeReader([(connection.Database, False)])
-        cmd.ExecuteNonQuery = lambda: events.append(json.loads(cmd.CommandText))
-        return cmd
-
-    connection.CreateCommand = command
-    monkeypatch.setattr(probe_desktop_query, "desktop_identity", lambda *_: bound.identity)
-    monkeypatch.setattr(refresh_pbip_model, "_load_adomd", lambda _port=None: lambda _: connection)
-    return bound, connection, events
-
-
-@pytest.mark.parametrize("explicit", [False], ids=["default"])
-def test_refresh_legacy_tuple_is_unchanged(monkeypatch, explicit):
-    _, _, events = _refresh_connection(monkeypatch)
-    options = {"return_observation": False} if explicit else {}
-    result = refresh_pbip_model.refresh(52001, ["Orders"], progress_enabled=False, **options)
-    assert result == (True, f"refreshed Orders (catalog {OBSERVED_CATALOGUE})")
-    assert events[-1] == "adomd-close"
-
-
-@pytest.mark.parametrize(
-    "fault,phase,mode",
-    [
-        ("reader-close", "after-xmla", "true"),
-        ("execute-reader", "before-xmla", "false"),
-    ],
-)
-def test_bound_refresh_catalogue_failures_respect_observation_mode(monkeypatch, capsys, mode, phase, fault):
-    """Exercise both production rechecks, not a helper that the legacy refresh could bypass."""
-    bound, connection, events = _refresh_connection(monkeypatch)
-    create = connection.CreateCommand
-    sentinel = "PRIVATE_CATALOGUE_QUERY_OR_CLOSE_DIAGNOSTIC"
-    error = RuntimeError(sentinel)
-    cause = OSError("PRIVATE_CATALOGUE_CAUSE")
-    error.add_note("PRIVATE_CATALOGUE_NOTE")
-    entered, readers = [], []
-
-    def native_catalogue_failure():
-        entered.append((phase, fault))
-        raise error from cause
-
-    def command():
-        cmd = create()
-        execute_reader = cmd.ExecuteReader
-
-        def read():
-            assert cmd.CommandText == "SELECT [CATALOG_NAME] FROM $SYSTEM.DBSCHEMA_CATALOGS"
-            current_phase = "after-xmla" if any(isinstance(event, dict) for event in events) else "before-xmla"
-            targeted = current_phase == phase
-            if targeted and fault == "execute-reader":
-                native_catalogue_failure()
-            reader = execute_reader()
-            readers.append(reader)
-            if targeted and fault == "reader-close":
-                close = reader.Close
-
-                def fail_close():
-                    close()
-                    native_catalogue_failure()
-
-                reader.Close = fail_close
-            return reader
-
-        cmd.ExecuteReader = read
-        return cmd
-
-    connection.CreateCommand = command
-    options = {} if mode == "default" else {"return_observation": mode == "true"}
-    result, failure = None, None
-    try:
-        result = refresh_pbip_model.refresh(
-            52001, None, bound=bound, desktop_pid=111, progress_enabled=False, **options
-        )
-    except BaseException as caught:
-        failure = caught
-    assert entered == [(phase, fault)], "the actual catalogue query/Close must enter the intended recheck phase"
-    assert events[-1] == "adomd-close" and all(reader.closed for reader in readers)
-    executed = sum(isinstance(event, dict) for event in events)
-    assert executed == int(phase == "after-xmla" or (mode == "true" and fault == "reader-close")), (
-        "legacy failure at the initial catalogue recheck must abort before XMLA"
-    )
-    if mode != "true":
-        assert failure is error, "legacy catalogue errors, including Close failures, must propagate the original object"
-        assert result is None, "legacy Close failure must abort rather than report successful refresh"
-        assert type(failure) is RuntimeError and failure.args == (sentinel,)
-        assert failure.__cause__ is cause and failure.__notes__ == ["PRIVATE_CATALOGUE_NOTE"]
-        rendered = "".join(traceback.format_exception(failure))
-        assert sentinel in rendered and "native_catalogue_failure" in rendered
-    elif fault == "reader-close":
-        assert failure is None and type(result) is refresh_pbip_model.RefreshObservation
-        assert result.identity == bound.identity and result.catalogue == bound.catalogue
-    else:
-        assert result is None and type(failure) is probe_desktop_query.ObservationUnavailable and failure is not error
-        assert failure.args == ("TOOL_UNAVAILABLE",) and failure.__cause__ is failure.__context__ is None
-        assert not getattr(failure, "__notes__", ())
-        rendered = "".join(traceback.format_exception(failure))
-        assert sentinel not in rendered and "native_catalogue_failure" not in rendered
-    if mode == "true":
-        assert sentinel not in str(capsys.readouterr())
-
-
-@pytest.mark.parametrize("field", ["as_process_start"])
-def test_refresh_rechecks_each_identity_component_after_xmla(monkeypatch, field):
-    bound, connection, events = _refresh_connection(monkeypatch)
-    create = connection.CreateCommand
-
-    def command():
-        cmd = create()
-        execute = cmd.ExecuteNonQuery
-
-        def change_after_execution():
-            execute()
-            if field == "catalogue":
-                connection.Database = "22222222-2222-3333-4444-555555555555"
-            else:
-                value = "200" if "start" in field else 777
-                monkeypatch.setattr(
-                    probe_desktop_query, "desktop_identity", lambda *_: replace(bound.identity, **{field: value})
-                )
-
-        cmd.ExecuteNonQuery = change_after_execution
-        return cmd
-
-    connection.CreateCommand = command
-    code = "CATALOGUE_CHANGED" if field == "catalogue" else "PID_REUSED"
-    with pytest.raises(probe_desktop_query.ObservationUnavailable, match=f"^{code}$"):
-        refresh_pbip_model.refresh(
-            52001, None, bound=bound, desktop_pid=111, progress_enabled=False, return_observation=True
-        )
-    assert isinstance(events[1], dict) and events[-1] == "adomd-close", "must reach the post-XMLA recheck"
-
-
-@pytest.mark.parametrize(
-    "error_type,phase",
-    [
-        (RuntimeError, "trace-drop"),
-        (RuntimeError, "trace-stop"),
-        (RuntimeError, "monitor-close"),
-        (RuntimeError, "trace-disconnect"),
-        (SystemExit, "trace-stop"),
-        (SystemExit, "trace-drop"),
-        (KeyboardInterrupt, "trace-disconnect"),
-        (KeyboardInterrupt, "adomd-close"),
-        (RuntimeError, "adomd-close"),
-    ],
-)
-def test_refresh_teardown_distinguishes_ordinary_failures_from_interrupts(monkeypatch, capsys, phase, error_type):
-    bound, connection, events = _refresh_connection(monkeypatch)
-
-    def action(name):
-        def call():
-            events.append(name)
-            if name == phase:
-                raise error_type("PRIVATE_TEARDOWN_DETAIL")
-
-        return call
-
-    connection.Close = action("adomd-close")
-    monitor = refresh_pbip_model.RefreshProgressMonitor(
-        trace=SimpleNamespace(Stop=action("trace-stop"), Drop=action("trace-drop")),
-        server=SimpleNamespace(Disconnect=action("trace-disconnect")),
-        observation_mode=True,
-    )
-    if phase == "monitor-close":
-        monitor.close = action(phase)
-    monkeypatch.setattr(refresh_pbip_model, "_start_refresh_progress_trace", lambda *_a, **_k: monitor)
-    published = []
-    if error_type is RuntimeError:
-        published.append(refresh_pbip_model.refresh(52001, None, bound=bound, desktop_pid=111, return_observation=True))
-        assert type(published[0]) is refresh_pbip_model.RefreshObservation
-        expected = (
-            ["adomd-close", "monitor-close"]
-            if phase == "monitor-close"
-            else ["adomd-close", "trace-stop", "trace-drop", "trace-disconnect"]
-        )
-        assert events[-len(expected) :] == expected, "ordinary failure must not skip later teardown attempts"
-    else:
-        expected_type = (
-            KeyboardInterrupt if error_type is KeyboardInterrupt else probe_desktop_query.ObservationUnavailable
-        )
-        with pytest.raises(expected_type) as caught:
-            published.append(
-                refresh_pbip_model.refresh(52001, None, bound=bound, desktop_pid=111, return_observation=True)
-            )
-        assert caught.value.args == (() if error_type is KeyboardInterrupt else ("TOOL_UNAVAILABLE",))
-    assert phase in events and isinstance(events[1], dict), "must enter teardown after XMLA completion"
-    assert "PRIVATE_TEARDOWN_DETAIL" not in str(capsys.readouterr())
-
-
-@pytest.mark.parametrize(
-    "kind,code,observe",
-    [
-        ("timeout", "TIMEOUT", True),
-        ("native", "TOOL_UNAVAILABLE", False),
-        ("known", "PID_REUSED", True),
-    ],
-    ids=["timeout-TIMEOUT-observation", "native-TOOL_UNAVAILABLE-legacy", "known-PID_REUSED-observation"],
-)
-def test_refresh_errors_are_fresh_closed_observations_or_unchanged_legacy(monkeypatch, capsys, observe, kind, code):
-    bound, connection, events = _refresh_connection(monkeypatch)
-    sentinel = "PRIVATE_NATIVE_PATH_ENDPOINT_TOKEN_PAYLOAD"
-    error = {
-        "native": RuntimeError(sentinel),
-        "system-exit": SystemExit(sentinel),
-        "interrupt": KeyboardInterrupt(sentinel),
-        "known": probe_desktop_query.ObservationUnavailable("PID_REUSED"),
-        "unknown-code": probe_desktop_query.ObservationUnavailable(sentinel),
-        "timeout": TimeoutError(sentinel),
-    }[kind]
-    error.add_note(sentinel)
-    cause = RuntimeError(sentinel)
-    create = connection.CreateCommand
-
-    def command():
-        cmd = create()
-
-        def native_execute():
-            events.append("native-execute")
-            raise error from cause
-
-        cmd.ExecuteNonQuery = native_execute
-        return cmd
-
-    connection.CreateCommand = command
-    with pytest.raises(BaseException) as caught:
-        refresh_pbip_model.refresh(
-            52001, None, bound=bound, desktop_pid=111, progress_enabled=False, return_observation=observe
-        )
-    assert events == ["open", "native-execute", "adomd-close"], "must reach the actual worker error"
-    if observe:
-        expected = KeyboardInterrupt if kind == "interrupt" else probe_desktop_query.ObservationUnavailable
-        assert type(caught.value) is expected and caught.value is not error
-        assert caught.value.args == (() if code is None else (code,))
-        assert caught.value.__cause__ is caught.value.__context__ is None
-        assert not getattr(caught.value, "__notes__", ())
-        rendered = "".join(traceback.format_exception(caught.value))
-        assert sentinel not in rendered and "native_execute" not in rendered
-        assert sentinel not in str(capsys.readouterr())
-    else:
-        assert caught.value is error and caught.value.__cause__ is cause
-        assert caught.value.__notes__ == [sentinel]
 
 
 def test_table_names_filters_the_auto_date_scaffolding_but_can_keep_hidden_tables() -> None:
@@ -841,163 +452,28 @@ def test_measure_names_filters_auto_date_measures() -> None:
     assert probe_desktop_query.measure_names(conn) == {("Sales", "Total Sales")}
 
 
-def _stub_bridge(monkeypatch, instances: list[dict]) -> None:
-    monkeypatch.setattr(refresh_pbip_model, "_bridge_status", lambda: {"instances": instances})
-
-
-def test_resolve_pid_refuses_to_choose_between_instances(monkeypatch) -> None:
-    """`_instance(None)` returning the first instance is fine interactively, ambiguous in a batch."""
-    _stub_bridge(monkeypatch, [{"pid": 111, "currentFilePath": "a.pbip"}, {"pid": 222, "currentFilePath": "b.pbip"}])
-    assert _resolve_pid(None) is None
-    assert _instance(None) is None
-    assert _resolve_pid(222) == 222  # an explicitly named instance is always honoured
-    assert _instance(222) == {"pid": 222, "currentFilePath": "b.pbip"}
-    assert _instance(333) is None
-
-
-def test_resolve_pid_keeps_the_single_instance_shortcut(monkeypatch) -> None:
-    """One Desktop open is unambiguous, so the interactive call must not need --pid."""
-    _stub_bridge(monkeypatch, [{"pid": 111, "currentFilePath": "a.pbip"}])
-    assert _resolve_pid(None) == 111
-    _stub_bridge(monkeypatch, [])
-    assert _resolve_pid(None) is None
+def _reach_the_instance(monkeypatch, pbip: Path) -> None:
+    """Route `main` past the bridge and observer preflights to the pid-111 Desktop that has `pbip` open."""
+    instance = {"pid": 111, "currentFilePath": str(pbip)}
+    monkeypatch.setattr(refresh_pbip_model, "_ui_bridge_preflight", lambda *_args: instance)
+    monkeypatch.setattr(
+        refresh_pbip_model,
+        "_ui_refresh_preflight",
+        lambda pid, inst, *_args, **_kwargs: (inst, refresh_pbip_model._credential_state(pid)),
+    )
+    monkeypatch.setattr(refresh_pbip_model, "discover_port", lambda pid: 52001)
 
 
 def test_main_aborts_before_refreshing_a_wrong_bound_instance(monkeypatch, tmp_path: Path, capsys) -> None:
-    """End to end: a wrong port must never reach refresh, ImageSave or the row count."""
+    """End to end: a wrong port must never reach Desktop's Refresh, Save or the row count."""
     _model_folder(tmp_path, "MyMigration", ["Orders"])
-    _stub_bridge(monkeypatch, [{"pid": 111, "currentFilePath": str(tmp_path / "MyMigration.pbip")}])
-    monkeypatch.setattr(refresh_pbip_model, "discover_port", lambda pid: 52001)
+    _reach_the_instance(monkeypatch, tmp_path / "MyMigration.pbip")
     monkeypatch.setattr(refresh_pbip_model, "_live_tables", lambda port: {"Turbine"})
-    for never in ("refresh", "image_save", "row_counts"):
+    for never in ("invoke_desktop_action", "_ui_refresh_and_save", "row_counts"):
         monkeypatch.setattr(refresh_pbip_model, never, _explode(never))
 
     assert refresh_pbip_model.main(["--pid", "111"]) == 2
     assert "REFRESH: WRONG_MODEL" in capsys.readouterr().out
-
-
-def test_no_save_leaves_the_project_byte_identical(monkeypatch, tmp_path: Path, capsys) -> None:
-    """With `--no-save`, a refresh must NOT write `cache.abf` or touch the project."""
-    cache = _model_folder(tmp_path, "MyMigration", ["Orders"])
-    _stub_bridge(monkeypatch, [{"pid": 111, "currentFilePath": str(tmp_path / "MyMigration.pbip")}])
-    monkeypatch.setattr(refresh_pbip_model, "discover_port", lambda pid: 52001)
-    _stub_live_to_match_disk(monkeypatch, cache)
-    monkeypatch.setattr(refresh_pbip_model, "refresh", lambda port, tables, timeout: (True, "refreshed"))
-    monkeypatch.setattr(refresh_pbip_model, "row_counts", lambda port, tables: ([("Orders", 42)], False))
-    monkeypatch.setattr(refresh_pbip_model, "image_save", _explode("image_save must not run"))
-
-    assert refresh_pbip_model.main(["--pid", "111", "--canaries", "Orders", "--no-save"]) == 0
-    out = capsys.readouterr().out
-    assert "REFRESH: DATA_OK" in out
-    assert "PERSISTED" not in out
-    assert not cache.exists(), "--no-save must not write cache.abf"
-
-
-def test_persisting_is_the_default(monkeypatch, tmp_path: Path, capsys) -> None:
-    """With no flags at all, a refresh MUST persist."""
-    cache = _model_folder(tmp_path, "MyMigration", ["Orders"])
-    _stub_bridge(monkeypatch, [{"pid": 111, "currentFilePath": str(tmp_path / "MyMigration.pbip")}])
-    monkeypatch.setattr(refresh_pbip_model, "discover_port", lambda pid: 52001)
-    _stub_live_to_match_disk(monkeypatch, cache)
-    monkeypatch.setattr(refresh_pbip_model, "refresh", lambda port, tables, timeout: (True, "refreshed"))
-    monkeypatch.setattr(refresh_pbip_model, "row_counts", lambda port, tables: ([("Orders", 42)], False))
-
-    def fake_image_save(port: int, cache_path: Path, model_dir=None):
-        del port, model_dir
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        cache_path.write_bytes(b"cache")
-        return True, "persisted"
-
-    monkeypatch.setattr(refresh_pbip_model, "image_save", fake_image_save)
-
-    assert refresh_pbip_model.main(["--pid", "111", "--canaries", "Orders"]) == 0
-    out = capsys.readouterr().out
-    assert "REFRESH: DATA_OK + PERSISTED" in out
-    assert cache.exists(), "a default refresh must persist cache.abf"
-
-
-def test_a_compat_rollback_failure_is_fatal_and_does_not_fall_back_to_ui_save(monkeypatch, tmp_path, capsys):
-    """A `CompatRollbackError` from persist is FATAL - the run must NOT drive the UI Save on top of it (#831)."""
-    cache = _model_folder(tmp_path, "MyMigration", ["Orders"])
-    _stub_bridge(monkeypatch, [{"pid": 111, "currentFilePath": str(tmp_path / "MyMigration.pbip")}])
-    monkeypatch.setattr(refresh_pbip_model, "discover_port", lambda pid: 52001)
-    _stub_live_to_match_disk(monkeypatch, cache)
-    monkeypatch.setattr(refresh_pbip_model, "refresh", lambda port, tables, timeout: (True, "refreshed"))
-    monkeypatch.setattr(refresh_pbip_model, "row_counts", lambda port, tables: ([("Orders", 42)], False))
-
-    def raise_rollback_error(port: int, cache_path: Path, model_dir=None):
-        del port, cache_path, model_dir
-        raise refresh_pbip_model.CompatRollbackError("compatibility rollback FAILED for database.tmdl")
-
-    monkeypatch.setattr(refresh_pbip_model, "image_save", raise_rollback_error)
-
-    exit_code = refresh_pbip_model.main(["--pid", "111", "--canaries", "Orders"])
-    out = capsys.readouterr().out
-    assert exit_code == 2
-    assert "compatibility rollback failed" in out.lower()
-    assert "do NOT save" in out
-
-
-def test_compatibility_alignment_declares_generated_edit(tmp_path: Path) -> None:
-    """A normal persisted refresh may rewrite database.tmdl; tamper needs structured evidence."""
-    cache = _model_folder(tmp_path, "MyMigration", ["Orders"])
-    model_dir = cache.parent.parent
-    database_tmdl = model_dir / "definition" / "database.tmdl"
-    database_tmdl.write_text("compatibilityLevel: 1604\n", encoding="utf-8")
-    before_hash = refresh_pbip_model.sha256_file(database_tmdl)
-    (tmp_path / "input_manifest.json").write_text(
-        json.dumps(
-            {
-                "generated_artifacts": {
-                    "version": 1,
-                    "run_id": "engine-run",
-                    "recorded_at": "2026-08-10T08:00:00+00:00",
-                    "report_sha256": "report-hash",
-                    "files": {"MyMigration.SemanticModel/definition/database.tmdl": before_hash},
-                }
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    class FakeDatabase:
-        CompatibilityLevel = 1702
-
-    note = refresh_pbip_model._align_compatibility(model_dir, int(FakeDatabase.CompatibilityLevel))
-
-    declaration_files = list((tmp_path / "_build" / "generated-edit-declarations").glob("*.json"))
-    assert len(declaration_files) == 1
-    declaration = json.loads(declaration_files[0].read_text(encoding="utf-8"))
-    assert "1604 -> 1702" in note
-    assert declaration["run_id"] == "engine-run"
-    assert declaration["target"] == "MyMigration.SemanticModel/definition/database.tmdl"
-    assert declaration["baseline_sha256"] == before_hash
-    assert declaration["expected_sha256"] == refresh_pbip_model.sha256_file(database_tmdl)
-    assert declaration["script_identity"] == "pbip-model-refresh/refresh_pbip_model.py"
-
-
-def test_a_timeout_does_not_assert_a_desktop_observer(monkeypatch, tmp_path: Path, capsys) -> None:
-    """A refresh timeout must report the cause as UNKNOWN, never as "this needs a human"."""
-    cache = _model_folder(tmp_path, "MyMigration", ["Orders"])
-    _stub_bridge(monkeypatch, [{"pid": 111, "currentFilePath": str(tmp_path / "MyMigration.pbip")}])
-    monkeypatch.setattr(refresh_pbip_model, "discover_port", lambda pid: 52001)
-    _stub_live_to_match_disk(monkeypatch, cache)
-    monkeypatch.setattr(refresh_pbip_model, "refresh", _explode("The XML for Analysis request timed out"))
-
-    exit_code = refresh_pbip_model.main(["--pid", "111"])
-    out = capsys.readouterr().out
-    assert exit_code == 3
-    assert "REFRESH: TIMEOUT" in out
-    assert "CAUSE UNKNOWN" in out
-    assert "THIS NEEDS A HUMAN" not in out, "a timeout heuristic must not emit a stop-word instruction"
-    assert "probe_desktop_query" in out, "it must name the bundled row-query path, not a retired arbiter"
-    # #118: the arbiter it names must actually ship in the bundle, and the message must print its
-    # bundled absolute path - a runtime instruction to run a file that is not here breaks the
-    # bundle's self-containment claim.
-    arbiter = refresh_pbip_model.CREDENTIAL_PROBE
-    assert str(arbiter) in out, "the timeout must print the arbiter's absolute, bundled path"
-    assert arbiter.is_file(), "the named arbiter must actually ship in the bundle"
-    assert arbiter.parent == SKILL_ROOT / "scripts", "the arbiter must live inside this skill's scripts/"
 
 
 def _project_with_two_models(root: Path, bypath: str | None, *, stem_decoy: bool) -> Path:
@@ -1027,18 +503,16 @@ def _project_with_two_models(root: Path, bypath: str | None, *, stem_decoy: bool
     return pbip
 
 
-def test_cache_file_refuses_to_guess_when_the_binding_is_ambiguous(monkeypatch, tmp_path: Path) -> None:
+def test_cache_file_refuses_to_guess_when_the_binding_is_ambiguous(tmp_path: Path) -> None:
     """No name match and no resolvable binding => None, so the identity gate fails closed."""
     pbip = _project_with_two_models(tmp_path, None, stem_decoy=False)
-    _stub_bridge(monkeypatch, [{"pid": 111, "currentFilePath": str(pbip)}])
-    assert refresh_pbip_model.cache_file(111) is None
+    assert refresh_pbip_model.cache_file(111, instance={"pid": 111, "currentFilePath": str(pbip)}) is None
 
 
-def test_cache_file_uses_the_stem_only_when_no_binding_resolves(monkeypatch, tmp_path: Path) -> None:
+def test_cache_file_uses_the_stem_only_when_no_binding_resolves(tmp_path: Path) -> None:
     """The stem heuristic is a legitimate FALLBACK - it just must never run ahead of the binding."""
     pbip = _project_with_two_models(tmp_path, None, stem_decoy=True)
-    _stub_bridge(monkeypatch, [{"pid": 111, "currentFilePath": str(pbip)}])
-    resolved = refresh_pbip_model.cache_file(111)
+    resolved = refresh_pbip_model.cache_file(111, instance={"pid": 111, "currentFilePath": str(pbip)})
     assert resolved == tmp_path / "Proj.SemanticModel" / ".pbi" / "cache.abf"
 
 
@@ -1078,28 +552,25 @@ def _project_with_binding_outside_the_folder(root: Path, *, target_exists: bool)
     return pbip
 
 
-def test_cache_file_follows_a_binding_that_points_outside_the_folder(monkeypatch, tmp_path: Path) -> None:
+def test_cache_file_follows_a_binding_that_points_outside_the_folder(tmp_path: Path) -> None:
     """A binding to a model OUTSIDE the `.pbip` folder wins over the lone adjacent decoy (round-3 mandate)."""
     pbip = _project_with_binding_outside_the_folder(tmp_path, target_exists=True)
-    _stub_bridge(monkeypatch, [{"pid": 111, "currentFilePath": str(pbip)}])
-    resolved = refresh_pbip_model.cache_file(111)
+    resolved = refresh_pbip_model.cache_file(111, instance={"pid": 111, "currentFilePath": str(pbip)})
     assert resolved == tmp_path / "elsewhere" / "Real.SemanticModel" / ".pbi" / "cache.abf"
     assert resolved != tmp_path / "proj" / "Decoy.SemanticModel" / ".pbi" / "cache.abf"
 
 
-def test_cache_file_fails_closed_when_the_binding_points_at_a_missing_model(monkeypatch, tmp_path: Path) -> None:
+def test_cache_file_fails_closed_when_the_binding_points_at_a_missing_model(tmp_path: Path) -> None:
     """A binding present but UNRESOLVABLE (its target is gone) fails closed - it must NOT fall to the decoy."""
     pbip = _project_with_binding_outside_the_folder(tmp_path, target_exists=False)
-    _stub_bridge(monkeypatch, [{"pid": 111, "currentFilePath": str(pbip)}])
-    assert refresh_pbip_model.cache_file(111) is None
+    assert refresh_pbip_model.cache_file(111, instance={"pid": 111, "currentFilePath": str(pbip)}) is None
 
 
 def test_a_mismatched_port_aborts_before_any_read_or_write(monkeypatch, tmp_path: Path, capsys) -> None:
     """`--port` must EQUAL the pid-derived port, or the run aborts before touching anything (#114)."""
     _model_folder(tmp_path, "MyMigration", ["Orders"])
-    _stub_bridge(monkeypatch, [{"pid": 111, "currentFilePath": str(tmp_path / "MyMigration.pbip")}])
-    monkeypatch.setattr(refresh_pbip_model, "discover_port", lambda pid: 52001)
-    for never in ("same_model", "refresh", "image_save", "row_counts"):
+    _reach_the_instance(monkeypatch, tmp_path / "MyMigration.pbip")
+    for never in ("_load_adomd", "same_model", "invoke_desktop_action", "row_counts"):
         monkeypatch.setattr(refresh_pbip_model, never, _explode(never))
 
     exit_code = refresh_pbip_model.main(["--pid", "111", "--port", "59999"])
@@ -1112,49 +583,14 @@ def test_a_mismatched_port_aborts_before_any_read_or_write(monkeypatch, tmp_path
 def test_a_matching_port_is_accepted(monkeypatch, tmp_path: Path, capsys) -> None:
     """An explicit `--port` that EQUALS the pid-derived port is fine - the guard blocks only mismatch."""
     cache = _model_folder(tmp_path, "MyMigration", ["Orders"])
-    _stub_bridge(monkeypatch, [{"pid": 111, "currentFilePath": str(tmp_path / "MyMigration.pbip")}])
-    monkeypatch.setattr(refresh_pbip_model, "discover_port", lambda pid: 52001)
+    _reach_the_instance(monkeypatch, tmp_path / "MyMigration.pbip")
     _stub_live_to_match_disk(monkeypatch, cache)
-    monkeypatch.setattr(refresh_pbip_model, "refresh", lambda port, tables, timeout: (True, "refreshed"))
     monkeypatch.setattr(refresh_pbip_model, "row_counts", lambda port, tables: ([("Orders", 5)], False))
 
-    def fake_image_save(port: int, cache_path: Path, model_dir=None):
-        del port, model_dir
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        cache_path.write_bytes(b"cache")
-        return True, "persisted"
-
-    monkeypatch.setattr(refresh_pbip_model, "image_save", fake_image_save)
-
-    exit_code = refresh_pbip_model.main(["--pid", "111", "--canaries", "Orders", "--port", "52001"])
+    exit_code = refresh_pbip_model.main(["--pid", "111", "--canaries", "Orders", "--port", "52001", "--verify-only"])
     out = capsys.readouterr().out
     assert exit_code == 0
-    assert "REFRESH: DATA_OK + PERSISTED" in out
-
-
-def test_an_implicit_probe_downgrades_to_table_ok_but_still_persists(monkeypatch, tmp_path: Path, capsys) -> None:
-    """No `--tables`: only the first queryable table is probed, so the verdict names that one table (#115)."""
-    cache = _model_folder(tmp_path, "MyMigration", ["Orders"])
-    _stub_bridge(monkeypatch, [{"pid": 111, "currentFilePath": str(tmp_path / "MyMigration.pbip")}])
-    monkeypatch.setattr(refresh_pbip_model, "discover_port", lambda pid: 52001)
-    _stub_live_to_match_disk(monkeypatch, cache)
-    monkeypatch.setattr(refresh_pbip_model, "refresh", lambda port, tables, timeout: (True, "refreshed"))
-    monkeypatch.setattr(refresh_pbip_model, "row_counts", lambda port, tables: ([("Parameters", 1)], True))
-
-    def fake_image_save(port: int, cache_path: Path, model_dir=None):
-        del port, model_dir
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        cache_path.write_bytes(b"cache")
-        return True, "persisted"
-
-    monkeypatch.setattr(refresh_pbip_model, "image_save", fake_image_save)
-
-    exit_code = refresh_pbip_model.main(["--pid", "111"])
-    out = capsys.readouterr().out
-    assert exit_code == 0
-    assert "REFRESH: TABLE_OK 'Parameters'" in out
-    assert "REFRESH: DATA_OK" not in out, "an implicit single-table probe must never claim a model-level DATA_OK"
-    assert cache.exists(), "the downgrade is about the VERDICT, not about suppressing persistence"
+    assert "REFRESH: DATA_OK" in out
 
 
 @pytest.mark.parametrize(
@@ -1198,114 +634,25 @@ def _explode(name: str):
     return boom
 
 
-def test_timeout_recovery_command_quotes_a_path_with_spaces(monkeypatch, tmp_path: Path, capsys) -> None:
-    """The printed recovery command must QUOTE the arbiter path, or a space breaks `powershell -File` (#118)."""
-    cache = _model_folder(tmp_path, "MyMigration", ["Orders"])
-    spaced = tmp_path / "Program Files" / "probe_desktop_credential.ps1"
-    spaced.parent.mkdir(parents=True)
-    spaced.write_text("# stub arbiter\n", encoding="utf-8")
-    monkeypatch.setattr(refresh_pbip_model, "CREDENTIAL_PROBE", spaced)
-    _stub_bridge(monkeypatch, [{"pid": 111, "currentFilePath": str(tmp_path / "MyMigration.pbip")}])
-    monkeypatch.setattr(refresh_pbip_model, "discover_port", lambda pid: 52001)
-    _stub_live_to_match_disk(monkeypatch, cache)
-    monkeypatch.setattr(refresh_pbip_model, "refresh", _explode("The XML for Analysis request timed out"))
-
-    exit_code = refresh_pbip_model.main(["--pid", "111"])
-    out = capsys.readouterr().out
-    assert exit_code == 3
-    assert f'python "{spaced}" --pid 111' in out, "the portable query recovery path must stay quoted"
-
-
 def _reporting_instance(monkeypatch: pytest.MonkeyPatch, root: Path) -> Path:
     """Use real identity/reporting logic with a bound model and an independently timed old cache."""
     cache = _model_folder(root, "MyMigration", ["Orders"])
     cache.parent.mkdir()
     cache.write_bytes(b"old-cache")
     os.utime(cache, (1_700_000_000, 1_700_000_000))
-    monkeypatch.setattr(refresh_pbip_model, "cache_file", lambda pid: cache)
-    monkeypatch.setattr(refresh_pbip_model, "discover_port", lambda pid: 52001)
+    _reach_the_instance(monkeypatch, root / "MyMigration.pbip")
     _stub_live_to_match_disk(monkeypatch, cache)
     return cache
 
 
 @pytest.mark.parametrize("advanced", [False, True], ids=["unchanged", "newer"])
-def test_amo_legacy_attempt_is_not_the_terminal_persistence_verdict(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str], advanced: bool
-) -> None:
-    """Exercise the real legacy tuple producer, not a canned success message (#641)."""
-    cache = _reporting_instance(monkeypatch, tmp_path)
-    before_stamp = cache.stat().st_mtime
-    # Independently restate the measured ABF layout: UTF-16LE preamble, pad, one short final block.
-    image = (
-        "This backup was created using XPress9 compression.".encode("utf-16-le")
-        + bytes.fromhex("000000100000080000002ad7864e")
-        + b"data"
-    )
-    attempts = []
-
-    def legacy_image_save(port: int, cache_path: Path, model_dir: Path | None = None) -> tuple[bool, str]:
-        assert port == 52001 and cache_path == cache
-        result = refresh_pbip_model._persist_image(cache_path, model_dir, 1604, lambda stage: stage.write_bytes(image))
-        attempts.append(result)
-        stamp = before_stamp + 60 if advanced else before_stamp
-        os.utime(cache_path, (stamp, stamp))
-        return result
-
-    monkeypatch.setattr(refresh_pbip_model, "image_save", legacy_image_save)
-    monkeypatch.setattr(refresh_pbip_model, "refresh", lambda port, tables, timeout: (True, "refreshed"))
-    monkeypatch.setattr(refresh_pbip_model, "row_counts", lambda port, tables: ([("Orders", 42)], False))
-
-    exit_code = refresh_pbip_model.main(["--pid", "111", "--canaries", "Orders"])
-    out = capsys.readouterr().out
-    assert len(attempts) == 1 and attempts[0][0] is True
-    assert cache.read_bytes() == image
-    assert (cache.stat().st_mtime > before_stamp) is advanced
-    assert "save   : AMO ImageSave attempt completed; legacy cache-update verification pending" in out
-    assert "persisted via AMO ImageSave" not in out
-    if advanced:
-        expected = "REFRESH: DATA_OK + PERSISTED"
-        assert exit_code == 0
-        assert f"cache  : legacy timestamp check observed a newer cache -> {cache} (cold reopen not tested)" in out
-    else:
-        expected = "REFRESH: NOT_PERSISTED (legacy timestamp check did not observe a newer cache.abf; write outcome unconfirmed)"
-        assert exit_code == 1
-        assert "cache  : legacy timestamp check did not observe a newer cache (write outcome unconfirmed)" in out
-    assert [line for line in out.splitlines() if line.startswith("REFRESH:")] == [expected]
-
-
-@pytest.mark.parametrize("advanced", [False], ids=["unchanged"])
-@pytest.mark.parametrize(
-    "flags,cache_message,refresh_count",
-    [
-        (
-            ["--verify-only"],
-            "cache  : persistence not requested (--verify-only; no refresh or save was run)",
-            0,
-        ),
-        (
-            ["--no-save"],
-            "cache  : persistence not requested (--no-save; refreshed data remains in memory only)",
-            1,
-        ),
-    ],
-    ids=["verify-only", "no-save"],
-)
 def test_unrequested_persistence_never_attributes_external_cache_changes(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-    advanced: bool,
-    flags: list[str],
-    cache_message: str,
-    refresh_count: int,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str], advanced: bool
 ) -> None:
     """An external cache update cannot become evidence of an invocation's unrequested save."""
     cache = _reporting_instance(monkeypatch, tmp_path)
     before_stamp = cache.stat().st_mtime
-    refresh = Mock(return_value=(True, "refreshed"))
-    image_save = Mock()
-    monkeypatch.setattr(refresh_pbip_model, "refresh", refresh)
-    monkeypatch.setattr(refresh_pbip_model, "image_save", image_save)
+    monkeypatch.setattr(refresh_pbip_model, "invoke_desktop_action", _explode("invoke_desktop_action"))
 
     def row_counts(port: int, tables: list[str]) -> tuple[list[tuple[str, int]], bool]:
         assert port == 52001 and tables == ["Orders"]
@@ -1315,66 +662,42 @@ def test_unrequested_persistence_never_attributes_external_cache_changes(
         return [("Orders", 42)], False
 
     monkeypatch.setattr(refresh_pbip_model, "row_counts", row_counts)
-    assert refresh_pbip_model.main(["--pid", "111", "--canaries", "Orders", *flags]) == 0
+    assert refresh_pbip_model.main(["--pid", "111", "--canaries", "Orders", "--verify-only"]) == 0
     out = capsys.readouterr().out
-    assert refresh.call_count == refresh_count
-    image_save.assert_not_called()
     assert (cache.stat().st_mtime > before_stamp) is advanced
     assert cache.read_bytes() == (b"external-cache" if advanced else b"old-cache")
-    assert [line.strip() for line in out.splitlines() if line.strip().startswith("cache  :")] == [cache_message]
+    assert [line.strip() for line in out.splitlines() if line.strip().startswith("cache  :")] == [
+        "cache  : persistence not requested (--verify-only; no refresh or save was run)"
+    ]
     assert [line for line in out.splitlines() if line.startswith("REFRESH:")] == ["REFRESH: DATA_OK"]
     assert "PERSISTED" not in out and "byte-identical" not in out
 
 
-@pytest.mark.parametrize("cause", ["no-cache-path", "rolled-back"])
-def test_failed_save_reports_only_the_observed_failure(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str], cause: str
-) -> None:
-    """T15: every non-success ImageSave ends NOT_PERSISTED exit 1, no UI action, worded by what is proven."""
-    cache = _reporting_instance(monkeypatch, tmp_path)
-    tmdl = cache.parent.parent / "definition" / "database.tmdl"
-    before = tmdl.read_bytes() if tmdl.is_file() else None
-    monkeypatch.setattr(refresh_pbip_model, "refresh", lambda port, tables, timeout: (True, "refreshed"))
-    image_save = Mock(return_value=(False, "ImageSave unavailable"))
-    if cause == "untyped-exception":
-        image_save.side_effect = RuntimeError("Disconnect failed")
-    monkeypatch.setattr(refresh_pbip_model, "image_save", image_save)
-    row_counts = Mock()
-    monkeypatch.setattr(refresh_pbip_model, "row_counts", row_counts)
-
-    if cause == "no-cache-path":
-        # main() now refuses an unresolved destination earlier (WRONG_MODEL); the persist helper keeps
-        # its own honest wording for any caller that reaches it without a cache path.
-        assert refresh_pbip_model._persist_after_refresh(52001, None) == 1
-    else:
-        assert refresh_pbip_model.main(["--pid", "111", "--canaries", "Orders"]) == 1
-    out = capsys.readouterr().out
-    row_counts.assert_not_called()
-    verdicts = [line for line in out.splitlines() if line.startswith("REFRESH:")]
-    assert len(verdicts) == 1 and verdicts[0].startswith("REFRESH: NOT_PERSISTED (")
-    assert "UI Automation" not in out and "falling back to UI" not in out
-    assert "next open" not in out and "then re-run with --verify-only" not in out
-    if cause == "untyped-exception":
-        # The write may have committed before Disconnect raised: never claim nothing was written.
-        assert "persistence UNESTABLISHED" in verdicts[0] and "RuntimeError" in verdicts[0]
-        assert "in memory only" not in out and "nothing was written" not in out and "rolled back" not in out
-        return
-    assert cache.read_bytes() == b"old-cache"
-    assert (tmdl.read_bytes() if tmdl.is_file() else None) == before
-    if cause == "no-cache-path":
-        image_save.assert_not_called()
-        assert "nothing was written" in verdicts[0] and "UNESTABLISHED" not in verdicts[0]
-    else:
-        image_save.assert_called_once()
-        assert "ImageSave unavailable; rolled back" in verdicts[0] and "UNESTABLISHED" not in verdicts[0]
-
-
-@pytest.mark.parametrize("retired", [["--ui-save"]])
+@pytest.mark.parametrize(
+    "retired",
+    [
+        ["--ui-save"],
+        ["--tables", "Orders"],
+        ["--calculate-only"],
+        ["--measures-only"],
+        ["--no-progress"],
+        ["--progress-liveness-seconds", "5"],
+    ],
+    ids=lambda retired: retired[0],
+)
 def test_retired_flags_are_rejected_before_any_desktop_contact(monkeypatch, capsys, retired: list[str]) -> None:
-    """T16: a retired flag is an argparse error (exit 2) before any bridge, port or XMLA call."""
-    for never in ("_instance", "discover_port", "refresh", "image_save", "row_counts", "cache_file"):
+    """T16: a retired flag is an argparse error (exit 2) before any bridge, port or ADOMD call."""
+    for never in (
+        "_ui_bridge_preflight",
+        "_wait_ui_bridge",
+        "discover_port",
+        "_load_adomd",
+        "invoke_desktop_action",
+        "row_counts",
+        "cache_file",
+    ):
         monkeypatch.setattr(refresh_pbip_model, never, _explode(never))
     with pytest.raises(SystemExit) as stop:
         refresh_pbip_model.main(["--pid", "111", *retired])
     assert stop.value.code == 2
-    assert f"unrecognized arguments: {retired[0]}" in capsys.readouterr().err
+    assert f"unrecognized arguments: {' '.join(retired)}" in capsys.readouterr().err

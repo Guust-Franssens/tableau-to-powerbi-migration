@@ -92,3 +92,28 @@ def healthy_desktop_state(monkeypatch: pytest.MonkeyPatch) -> None:
 
     for module in (refresh_pbip_model, probe_desktop_query):
         monkeypatch.setattr(module, "_credential_state", _healthy_desktop)
+
+
+class _FakeAdomdConnection:  # pylint: disable=too-few-public-methods
+    """What the upfront ADOMD load check returns by default: a type nothing in a unit test opens."""
+
+    def __init__(self, *_args) -> None:
+        raise AssertionError("a unit test opened a real ADOMD connection")
+
+
+@pytest.fixture(autouse=True)
+def offline_adomd_and_progress(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never load the real ADOMD and never let the progress stream touch a real engine or window.
+
+    The CLI's upfront `_load_adomd(port)` check is stubbed to succeed; the progress reader's
+    connection fails (so it prints `process_jobs=?`) and its dialog field reads `none`. Tests of
+    those seams override them with their own `monkeypatch.setattr`.
+    """
+    import refresh_pbip_model  # pylint: disable=import-outside-toplevel
+
+    def no_connection(_context):
+        raise OSError("no engine in a unit test")
+
+    monkeypatch.setattr(refresh_pbip_model, "_load_adomd", lambda _port=None: _FakeAdomdConnection)
+    monkeypatch.setattr(refresh_pbip_model, "_open_progress_connection", no_connection)
+    monkeypatch.setattr(refresh_pbip_model, "_dialog_field", lambda _context: "none")
