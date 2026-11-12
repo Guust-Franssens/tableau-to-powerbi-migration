@@ -19,7 +19,7 @@ sys.path.insert(0, str(REPO_ROOT / "scripts"))
 import capture_powerbi_pages as capture
 import _desktop_observer as modal  # pylint: disable=wrong-import-position
 from probe_desktop_query import DesktopIdentity
-from refresh_pbip_model import ImageObservation
+from refresh_pbip_model import SavedCache
 from test_iteration_receipt import (
     PAGE,
     PID,
@@ -94,7 +94,7 @@ def test_capture_dialog_report_preserves_package_refusals_and_receipts(
     elif phase == "bind":
         monkeypatch.setattr(capture, "bind_desktop", refuse)
     else:
-        for operation in ("refresh", "probe_observations", "image_save"):
+        for operation in ("ui_refresh_observed", "probe_observations", "ui_save_observed"):
             monkeypatch.setattr(capture, operation, refuse)
     if phase in {"reload", "capture", "bind"}:
         code = _code(lambda: _prepared_iteration(package, runtime=runtime))
@@ -106,10 +106,10 @@ def test_capture_dialog_report_preserves_package_refusals_and_receipts(
     else:
         pending = _prepared_iteration(package, runtime=runtime)
         expected = "refused" if phase == "observation" else "unestablished"
-        assert all(
-            pending["generated"]["data_evidence"][key]["status"] == expected
-            for key in ("refresh", "canaries", "persistence")
-        )
+        facts = pending["generated"]["data_evidence"]
+        assert facts["refresh"]["status"] == facts["canaries"]["status"] == expected
+        # Save never follows a refresh that was not observed.
+        assert facts["persistence"] == receipt.unestablished_fact("observation_unavailable")
         # The title is shown to the human once and never persisted: receipts keep only tokens.
         assert "Sign in" not in json.dumps(pending)
         assert "Sign in" not in _path(package).read_text(encoding="utf-8")
@@ -582,10 +582,10 @@ def a1_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple:
         events.append("recheck")
         assert operation(object()) is None
 
-    def refresh(port: int, tables: object, **kwargs: object) -> capture.RefreshObservation:
-        assert port == 55001 and tables is None
-        assert kwargs == {"refresh_type": "full", "desktop_pid": PID, "bound": bound, "return_observation": True}
-        assert kwargs["bound"] is bound
+    model = package / "fabric" / "Unit.SemanticModel"
+
+    def refresh(held: capture.BoundDesktop, cache: Path, **kwargs: object) -> capture.RefreshObservation:
+        assert held is bound and cache == model / ".pbi" / "cache.abf" and not kwargs
         events.append("refresh")
         result = capture.RefreshObservation(bound.catalogue, "full", "database", (), bound.identity)
         returned["refresh"] = result
@@ -601,28 +601,24 @@ def a1_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple:
         returned["canaries"] = result
         return result
 
-    def persist(port: int, cache: Path, model: Path, **kwargs: object) -> capture.PersistenceObservation:
-        assert port == 55001
-        assert model == package / "fabric" / "Unit.SemanticModel" and cache == model / ".pbi" / "cache.abf"
-        assert kwargs == {"bound": bound, "return_observation": True} and kwargs["bound"] is bound
+    def persist(held: capture.BoundDesktop, cache: Path, **kwargs: object) -> capture.SaveObservation:
+        assert held is bound and cache == model / ".pbi" / "cache.abf" and not kwargs
         events.append("persistence")
         blob = b"synthetic invocation-owned cache bytes, not native ABF evidence"
         cache.parent.mkdir(exist_ok=True)
         cache.write_bytes(blob)
         (model / "definition" / "database.tmdl").write_bytes(b"database\n\tcompatibilityLevel: 1604\n")
         digest = hashlib.sha256(blob).hexdigest()
-        result = capture.PersistenceObservation(
-            bound.catalogue, 1604, ImageObservation(digest, len(blob), digest, len(blob)), bound.identity
-        )
+        result = capture.SaveObservation(bound.catalogue, SavedCache(digest, len(blob)), bound.identity)
         returned["persistence"] = result
         return result
 
     for name, operation in (
         ("bind_desktop", bind),
         ("bound_call", recheck),
-        ("refresh", refresh),
+        ("ui_refresh_observed", refresh),
         ("probe_observations", probe),
-        ("image_save", persist),
+        ("ui_save_observed", persist),
     ):
         monkeypatch.setattr(capture, name, operation)
     return package, bound, events, returned
@@ -674,7 +670,12 @@ def test_a1_calls_share_one_held_binding_and_freeze_after_preparation(a1: tuple)
     }
     assert facts["refresh"]["observation"]["scope"] == "database"
     assert facts["refresh"]["observation"]["refresh_type"] == "full"
-    assert facts["persistence"]["observation"]["image"]["commitment"] == "UNESTABLISHED"
+    assert facts["persistence"]["observation"]["method"] == "DESKTOP_UI_SAVE"
+    assert facts["persistence"]["observation"]["cache"] == {
+        "sha256": after["cache_sha256"],
+        "size": after["cache_byte_count"],
+        "commitment": "UNESTABLISHED",
+    }
     assert facts["persistence"]["observation"]["catalogue"] == bound.catalogue
     for row, name in zip(facts["canaries"]["observation"], ["Sales", "Returns"]):
         expected_query = f"EVALUATE TOPN(1, '{name}')"
@@ -703,7 +704,8 @@ def test_a1_zero_and_positive_returned_rows_are_both_observed(
 
 
 @pytest.mark.parametrize(
-    "operation,field", [("refresh", "refresh"), ("probe_observations", "canaries"), ("image_save", "persistence")]
+    "operation,field",
+    [("ui_refresh_observed", "refresh"), ("probe_observations", "canaries"), ("ui_save_observed", "persistence")],
 )
 @pytest.mark.parametrize("result", ["refused", "missing"])
 def test_a1_unsuccessful_measurements_can_seal_with_valid_authority(
@@ -743,7 +745,7 @@ def test_a1_return_from_another_binding_refuses_publication(
     a1: tuple, monkeypatch: pytest.MonkeyPatch, field: str, value: object
 ) -> None:
     package, _, _, _ = a1
-    refresh = capture.refresh
+    refresh = capture.ui_refresh_observed
 
     def swapped(*args: object, **kwargs: object) -> capture.RefreshObservation:
         result = refresh(*args, **kwargs)
@@ -753,7 +755,7 @@ def test_a1_return_from_another_binding_refuses_publication(
             else replace(result, identity=replace(result.identity, **{field: value}))
         )
 
-    monkeypatch.setattr(capture, "refresh", swapped)
+    monkeypatch.setattr(capture, "ui_refresh_observed", swapped)
     assert _code(lambda: _prepared_iteration(package)) == "A1_BINDING_MISMATCH"
     assert not _path(package).exists()
 
@@ -768,7 +770,7 @@ def test_a1_authority_failure_is_not_retained_as_measurement_refusal(
         raise capture.ObservationUnavailable("PID_REUSED")
 
     if moment in {"bind", "refresh"}:
-        monkeypatch.setattr(capture, "bind_desktop" if moment == "bind" else "refresh", broken)
+        monkeypatch.setattr(capture, "bind_desktop" if moment == "bind" else "ui_refresh_observed", broken)
     else:
         recheck, calls = capture.bound_call, []
 
@@ -784,26 +786,117 @@ def test_a1_authority_failure_is_not_retained_as_measurement_refusal(
             def refuse(*_args: object, **_kwargs: object) -> None:
                 raise capture.ObservationUnavailable("TOOL_UNAVAILABLE")
 
-            monkeypatch.setattr(capture, "refresh", refuse)
+            monkeypatch.setattr(capture, "ui_refresh_observed", refuse)
     assert _code(lambda: _prepared_iteration(package)) == "A1_BINDING_UNESTABLISHED"
     assert not _path(package).parent.exists()
 
 
-@pytest.mark.parametrize("field", ["intended_sha256", "installed_sha256", "intended_size", "installed_size"])
+@pytest.mark.parametrize("field", ["sha256", "size"])
 def test_a1_persistence_readback_must_agree_with_actual_cache(
     a1: tuple, monkeypatch: pytest.MonkeyPatch, field: str
 ) -> None:
     package, _, _, _ = a1
-    persist = capture.image_save
+    persist = capture.ui_save_observed
 
-    def mismatched(*args: object, **kwargs: object) -> capture.PersistenceObservation:
+    def mismatched(*args: object, **kwargs: object) -> capture.SaveObservation:
         result = persist(*args, **kwargs)
-        value = "f" * 64 if field.endswith("sha256") else result.image.installed_size + 1
-        return replace(result, image=replace(result.image, **{field: value}))
+        value = "f" * 64 if field == "sha256" else result.cache.size + 1
+        return replace(result, cache=replace(result.cache, **{field: value}))
 
-    monkeypatch.setattr(capture, "image_save", mismatched)
+    monkeypatch.setattr(capture, "ui_save_observed", mismatched)
     assert _code(lambda: _prepared_iteration(package)) == "A1_CACHE_MISMATCH"
     assert not _path(package).parent.exists()
+
+
+def test_a1_saved_cache_commitment_is_never_claimed(a1: tuple, monkeypatch: pytest.MonkeyPatch) -> None:
+    package, _, _, _ = a1
+    persist = capture.ui_save_observed
+
+    def committed(*args: object, **kwargs: object) -> capture.SaveObservation:
+        result = persist(*args, **kwargs)
+        return replace(result, cache=replace(result.cache, commitment="COMMITTED"))
+
+    monkeypatch.setattr(capture, "ui_save_observed", committed)
+    assert _code(lambda: _prepared_iteration(package)) == "SCHEMA"
+    assert not _path(package).parent.exists()
+
+
+def _legacy_persistence(payload: dict, *, size_delta: int = 0) -> dict:
+    """A pre-UIA receipt's AMO_ImageSave fact; the deleted dataclasses cannot build it."""
+    artifact, binding = payload["generated"]["artifact"], payload["generated"]["data_evidence"]["binding"]
+    legacy = json.loads(json.dumps(payload))
+    legacy["generated"]["data_evidence"]["persistence"]["observation"] = {
+        **binding["observation"],
+        "compatibility_level": 1604,
+        "method": "AMO_ImageSave",
+        "image": {
+            "intended_sha256": artifact["cache_sha256"],
+            "intended_size": artifact["cache_byte_count"],
+            "installed_sha256": artifact["cache_sha256"],
+            "installed_size": artifact["cache_byte_count"] + size_delta,
+            "commitment": "UNESTABLISHED",
+        },
+    }
+    return legacy
+
+
+def test_legacy_amo_imagesave_persistence_still_validates(a1: tuple) -> None:
+    package, _, _, _ = a1
+    pending = _prepared_iteration(package)
+    legacy = _legacy_persistence(pending)
+    try:
+        validated = receipt.validate_receipt(legacy)
+    except receipt.ReceiptError as error:
+        pytest.fail(f"a legacy AMO_ImageSave receipt was refused: {error.code}")
+    assert validated is legacy
+    assert _code(lambda: receipt.validate_receipt(_legacy_persistence(pending, size_delta=1))) == "A1_CACHE_MISMATCH"
+
+
+@pytest.mark.parametrize("result", ["refused", "missing"])
+def test_a1_save_never_follows_an_unobserved_refresh(a1: tuple, monkeypatch: pytest.MonkeyPatch, result: str) -> None:
+    package, _, events, _ = a1
+
+    def failed(*_args: object, **_kwargs: object) -> None:
+        events.append("refresh")
+        if result == "refused":
+            raise capture.ObservationUnavailable("TOOL_UNAVAILABLE")
+
+    monkeypatch.setattr(capture, "ui_refresh_observed", failed)
+    facts = _finalize(package, _prepared_iteration(package))["generated"]["data_evidence"]
+    assert "persistence" not in events and "canaries" in events
+    assert facts["persistence"] == receipt.unestablished_fact("observation_unavailable")
+    assert facts["canaries"]["status"] == "observed"
+
+
+def test_refresh_without_persist_refuses_before_desktop_contact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    package = build_package(tmp_path)
+
+    def forbidden(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("a refresh without persist reached Desktop")
+
+    monkeypatch.setattr(capture, "bind_desktop", forbidden)
+    runtime = replace(_runtime(package), state_reader=forbidden, reload=forbidden)
+    with pytest.raises(receipt.ReceiptError) as caught:
+        _iterate(package, runtime=runtime, refresh=True, canaries=("Sales",))
+    assert caught.value.code == "REQUEST_INVALID" and "--persist" in caught.value.detail
+    assert not _path(package).exists()
+
+
+def test_dirty_desktop_stops_before_reload(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    package = build_package(tmp_path)
+    runtime = _runtime(package)
+    status = runtime.state_reader(PID)
+    status["instances"][0]["hasUnsavedChanges"] = True
+
+    def forbidden(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("a Desktop with unsaved changes was reloaded or bound")
+
+    monkeypatch.setattr(capture, "bind_desktop", forbidden)
+    runtime = replace(runtime, state_reader=lambda _pid: status, reload=forbidden)
+    assert _code(lambda: _prepared_iteration(package, runtime=runtime)) == "DESKTOP_UNVERIFIED"
+    assert not _path(package).exists()
 
 
 def test_a1_retained_facts_are_never_recollected_by_readers_or_finalization(
@@ -815,7 +908,7 @@ def test_a1_retained_facts_are_never_recollected_by_readers_or_finalization(
     def forbidden(*_args: object, **_kwargs: object) -> None:
         pytest.fail("native preparation or observation replay is forbidden")
 
-    for name in ("bind_desktop", "bound_call", "refresh", "probe_observations", "image_save"):
+    for name in ("bind_desktop", "bound_call", "ui_refresh_observed", "probe_observations", "ui_save_observed"):
         monkeypatch.setattr(capture, name, forbidden)
     final = _finalize(package, pending)
     assert receipt.read_history(package)[-1].payload == final
@@ -828,7 +921,7 @@ def test_no_requested_a1_operations_performs_no_native_work(tmp_path: Path, monk
     def forbidden(*_args: object, **_kwargs: object) -> None:
         pytest.fail("an unrequested A1 operation was executed")
 
-    for name in ("bind_desktop", "bound_call", "refresh", "probe_observations", "image_save"):
+    for name in ("bind_desktop", "bound_call", "ui_refresh_observed", "probe_observations", "ui_save_observed"):
         monkeypatch.setattr(capture, name, forbidden)
     final = _finalize(package, _iterate(package, options=_options(page_ids=frozenset({PAGE}))))
     assert [page["page_id"] for page in final["generated"]["numeric_evidence"]] == [PAGE, "page-trend"]
@@ -853,7 +946,7 @@ def test_supplied_or_legacy_a1_results_cannot_become_observations(
     a1: tuple, monkeypatch: pytest.MonkeyPatch, value: object
 ) -> None:
     package, _, _, _ = a1
-    monkeypatch.setattr(capture, "refresh", lambda *_args, **_kwargs: value)
+    monkeypatch.setattr(capture, "ui_refresh_observed", lambda *_args, **_kwargs: value)
     assert _code(lambda: _prepared_iteration(package)) == "A1_OBSERVATION_INVALID"
     assert not _path(package).exists()
 
@@ -936,13 +1029,15 @@ def test_a1_return_must_describe_the_requested_operations(
     a1: tuple, monkeypatch: pytest.MonkeyPatch, change: str
 ) -> None:
     package, _, _, _ = a1
-    refresh, probe = capture.refresh, capture.probe_observations
+    refresh, probe = capture.ui_refresh_observed, capture.probe_observations
     if change == "canary_set":
         monkeypatch.setattr(capture, "probe_observations", lambda *args: probe(*args)[:1])
     else:
         value = "tables" if change == "scope" else "calculate"
         monkeypatch.setattr(
-            capture, "refresh", lambda *args, **kwargs: replace(refresh(*args, **kwargs), **{change: value})
+            capture,
+            "ui_refresh_observed",
+            lambda *args, **kwargs: replace(refresh(*args, **kwargs), **{change: value}),
         )
     assert _code(lambda: _prepared_iteration(package)) == ("A1_CANARY_SET" if change == "canary_set" else "SCHEMA")
     assert not _path(package).parent.exists()
@@ -961,6 +1056,6 @@ def test_capture_diagnostic_keeps_the_held_start_after_fatal_preparation(
         return modal.Observation(pid=str(pid), process_started_at=bound.identity.process_start)
 
     monkeypatch.setattr(capture, "observe", observe)
-    monkeypatch.setattr(capture, "refresh", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(capture, "ui_refresh_observed", lambda *_args, **_kwargs: object())
     assert _code(lambda: _prepared_iteration(package)) == "A1_OBSERVATION_INVALID"
     assert received == [bound.identity.process_start], "a held identity must survive a fatal preparation refusal"

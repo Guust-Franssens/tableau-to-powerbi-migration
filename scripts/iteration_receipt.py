@@ -318,18 +318,27 @@ DATA_EVIDENCE_SCHEMA = _object(
         )
     ),
     persistence=_fact_schema(
-        _object(
-            **BINDING_SCHEMA["properties"],
-            compatibility_level={"type": "integer", "minimum": 1, "maximum": MAX_COUNT},
-            method={"const": "AMO_ImageSave"},
-            image=_object(
-                intended_sha256=SHA,
-                intended_size={**COUNT, "minimum": 1},
-                installed_sha256=SHA,
-                installed_size={**COUNT, "minimum": 1},
-                commitment={"const": "UNESTABLISHED"},
-            ),
-        )
+        {
+            "oneOf": [
+                _object(
+                    **BINDING_SCHEMA["properties"],
+                    compatibility_level={"type": "integer", "minimum": 1, "maximum": MAX_COUNT},
+                    method={"const": "AMO_ImageSave"},
+                    image=_object(
+                        intended_sha256=SHA,
+                        intended_size={**COUNT, "minimum": 1},
+                        installed_sha256=SHA,
+                        installed_size={**COUNT, "minimum": 1},
+                        commitment={"const": "UNESTABLISHED"},
+                    ),
+                ),
+                _object(
+                    **BINDING_SCHEMA["properties"],
+                    method={"const": "DESKTOP_UI_SAVE"},
+                    cache=_object(sha256=SHA, size={**COUNT, "minimum": 1}, commitment={"const": "UNESTABLISHED"}),
+                ),
+            ]
+        }
     ),
 )
 NUMERIC_FACT_SCHEMA = _object(status={"const": UNESTABLISHED}, reason={"const": NUMERIC_ABSENCE})
@@ -500,13 +509,17 @@ def _validate_operation_facts(generated: dict[str, Any]) -> None:
         if any(hashlib.sha256(row["query"].encode("utf-8")).hexdigest() != row["query_sha256"] for row in rows):
             raise ReceiptError("A1_QUERY_CHANGED", "the retained canary query and its digest disagree")
     persisted = facts["persistence"]["observation"]
-    if persisted is not None:
-        image, artifact = persisted["image"], generated["artifact"]
-        if not (
-            image["intended_sha256"] == image["installed_sha256"] == artifact["cache_sha256"]
-            and image["intended_size"] == image["installed_size"] == artifact["cache_byte_count"]
-        ):
-            raise ReceiptError("A1_CACHE_MISMATCH", "ImageSave readback must agree with the current cache bytes")
+    current = (generated["artifact"]["cache_sha256"], generated["artifact"]["cache_byte_count"])
+    if persisted is not None and any(pair != current for pair in _persisted_readback(persisted)):
+        raise ReceiptError("A1_CACHE_MISMATCH", "the persisted cache readback must agree with the current cache bytes")
+
+
+def _persisted_readback(persisted: dict[str, Any]) -> list[tuple[str, int]]:
+    """Every (sha256, size) a persistence observation claims; legacy AMO_ImageSave has two."""
+    if persisted["method"] == "DESKTOP_UI_SAVE":
+        return [(persisted["cache"]["sha256"], persisted["cache"]["size"])]
+    image = persisted["image"]
+    return [(image["intended_sha256"], image["intended_size"]), (image["installed_sha256"], image["installed_size"])]
 
 
 @dataclass(frozen=True)

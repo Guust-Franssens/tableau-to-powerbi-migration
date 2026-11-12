@@ -54,12 +54,11 @@ from probe_desktop_query import (  # noqa: E402  # pylint: disable=wrong-import-
     probe_observations,
 )
 from refresh_pbip_model import (  # noqa: E402  # pylint: disable=wrong-import-position,no-name-in-module
-    CompatRollbackError,
     ModelLockTimeout,
-    PersistenceObservation,
     RefreshObservation,
-    image_save,
-    refresh,
+    SaveObservation,
+    ui_refresh_observed,
+    ui_save_observed,
 )
 
 Screenshotter = Callable[[str, str, Path], bool]
@@ -313,6 +312,10 @@ def _preparation_request(request: IterationRequest) -> dict[str, Any]:
         request.canaries
     ):
         raise receipt.ReceiptError("CANARIES_REQUIRED", "canaries must be nonempty, unique explicit table names")
+    if request.refresh and not request.persist:
+        raise receipt.ReceiptError(
+            "REQUEST_INVALID", "a UI refresh leaves unsaved changes; request --persist with --refresh"
+        )
     return requested
 
 
@@ -340,10 +343,6 @@ def _observe_a1(operation: Callable[[], Any], result_type: type, bound: BoundDes
         return {"status": receipt.REFUSED, "reason": reason, "observation": None}
     except ModelLockTimeout:
         return {"status": receipt.REFUSED, "reason": "MODEL_LOCK_TIMEOUT", "observation": None}
-    except CompatRollbackError as error:
-        raise receipt.ReceiptError(
-            "A1_PERSISTENCE_UNESTABLISHED", "A1 could not restore its publication state"
-        ) from error
     if result is None:
         return receipt.unestablished_fact("observation_unavailable")
     multiple = result_type is CanaryObservation
@@ -386,38 +385,26 @@ def _prepare_a1(
     if diagnostic_state is not None:
         diagnostic_state["process_start"] = bound.identity.process_start
     facts["binding"] = {"status": receipt.OBSERVED, "reason": None, "observation": asdict(bound)}
+    cache = target.model_dir / ".pbi" / "cache.abf"
     operations = (
-        (
-            "refresh",
-            requested["refresh"],
-            lambda: refresh(
-                bound.identity.port, None, refresh_type="full", desktop_pid=pid, bound=bound, return_observation=True
-            ),
-            RefreshObservation,
-        ),
+        ("refresh", requested["refresh"], lambda: ui_refresh_observed(bound, cache), RefreshObservation),
         (
             "canaries",
             bool(requested["canaries"]),
             lambda: probe_observations(bound, requested["canaries"]),
             CanaryObservation,
         ),
-        (
-            "persistence",
-            requested["persist"],
-            lambda: image_save(
-                bound.identity.port,
-                target.model_dir / ".pbi" / "cache.abf",
-                target.model_dir,
-                bound=bound,
-                return_observation=True,
-            ),
-            PersistenceObservation,
-        ),
+        ("persistence", requested["persist"], lambda: ui_save_observed(bound, cache), SaveObservation),
     )
     for key, enabled, operation, result_type in operations:
-        if enabled:
-            facts[key] = _observe_a1(operation, result_type, bound)
-            _recheck_a1(bound)  # Measurement refusal is retainable only while authority still holds.
+        if not enabled:
+            continue
+        if key == "persistence" and requested["refresh"] and facts["refresh"]["status"] != receipt.OBSERVED:
+            # A failed UI refresh is not known to be transactional; never Save a possibly partial model.
+            facts[key] = receipt.unestablished_fact("observation_unavailable")
+            continue
+        facts[key] = _observe_a1(operation, result_type, bound)
+        _recheck_a1(bound)  # Measurement refusal is retainable only while authority still holds.
     return facts, bound
 
 
@@ -644,8 +631,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         iterate.add_argument("--reviewer", default="pbi-migration-validator")
         iterate.add_argument("--session-id")
         iterate.add_argument("--previous-sha256", help="The previous finalize command's returned checksum")
-        iterate.add_argument("--refresh", action="store_true", help="Observe a full database-scoped A1 refresh")
-        iterate.add_argument("--persist", action="store_true", help="Observe direct A1 ImageSave/readback")
+        iterate.add_argument(
+            "--refresh",
+            action="store_true",
+            help="Refresh every source through Desktop's own Refresh (UI Automation); requires --persist",
+        )
+        iterate.add_argument(
+            "--persist", action="store_true", help="Save through Desktop's own guarded Save and read the cache back"
+        )
         iterate.add_argument("--canary-table", action="append", default=[], help="Explicit A1 canary table; repeatable")
         _timing_args(iterate)
         finalize = commands.add_parser("finalize", help="seal separate reviewer input against an immutable capture")
