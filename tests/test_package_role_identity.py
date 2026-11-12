@@ -1334,7 +1334,6 @@ def test_current_working_roles_are_exact_declarations_not_name_discovery(
         ("provenance-scope", "package_scope_mismatch"),
         ("provenance-row", "provenance_row_cardinality"),
         ("provenance-digest", "provenance_sha_disagrees_with_source"),
-        ("provenance-file", "provenance_file_disagrees_with_source"),
         ("spec-file", "spec_file_disagrees_with_source"),
         ("luid-namespace", "luid_namespace_mismatch"),
         ("luid-mismatch", "server_luid_contradiction"),
@@ -1362,8 +1361,6 @@ def test_current_working_pure_identity_rules_refuse_coherent_digests_with_wrong_
         payload["inputs"] *= 2
     elif change == "provenance-digest":
         payload["inputs"][0]["input"]["sha256"] = "0" * 64
-    elif change == "provenance-file":
-        payload["inputs"][0]["input"]["file"] = "Other.twb"
     elif change == "spec-file":
         name, payload = "migration-spec.json", json.loads(raw["migration-spec.json"])
         payload["source"]["file_name"] = "Other.twb"

@@ -449,8 +449,7 @@ def _valid_published_dependencies(payload: Any) -> bool:
 PROVENANCE_ALLOW: dict[str, Any] = {
     "inputs": Rows(
         {
-            # `original_file`: the stamped name a compact-ID run renamed (#865); `file` is the shipped asset.
-            "input": {**_fields("file", "original_file", "sha256"), "revision_key": _fields("algo", "value")},
+            "input": {**_fields("file", "sha256"), "revision_key": _fields("algo", "value")},
             "origin": {
                 **_fields("workbook_luid", "datasource_luid", "match", "revision_match"),
                 "remote_revision_key": _fields("algo", "value"),

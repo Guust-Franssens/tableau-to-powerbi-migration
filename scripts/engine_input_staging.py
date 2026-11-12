@@ -35,14 +35,10 @@ def _safe_regular_file(path: Path, root: Path) -> bool:
     return stat.S_ISREG(info.st_mode) and path.resolve(strict=True).is_relative_to(root.resolve(strict=True))
 
 
-def staged_name(original_name: str, luid: object, unit_id: str) -> str:
-    """The compact engine-input filename for an original workbook filename. Packaging reuses it (#865)."""
-    prefix = f"{luid}_" if isinstance(luid, str) and luid else ""
-    return f"{prefix}{unit_id}{Path(original_name).suffix}"
-
-
 def _stage_name(record: dict[str, Any], unit_id: str) -> str:
-    return staged_name(record["asset_path"], record.get("luid"), unit_id)
+    luid = record.get("luid")
+    prefix = f"{luid}_" if isinstance(luid, str) and luid else ""
+    return f"{prefix}{unit_id}{Path(record['asset_path']).suffix}"
 
 
 def _allocation_requests(run_dir: Path, records: list[dict[str, Any]], sweep_path: Path) -> list[unit_ids.UnitRequest]:

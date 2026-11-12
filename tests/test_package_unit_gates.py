@@ -1175,102 +1175,44 @@ COMPACT_UNIT = "u0001"
 ORIGINAL_ASSET = f"{WB_LUID}_{UNIT}.twb"
 
 
-def _write_unit_index(run: Path, *, name: str, unit: str = COMPACT_UNIT, luid: str = WB_LUID) -> None:
-    """The run's `unit-index.json`, mapping `unit` onto the original harvested asset."""
-    source = dict.fromkeys(("site_luid", "project_luid", "project_name")) | {
-        "kind": "workbook",
-        "name": UNIT,
-        "luid": luid,
-    }
-    entry = {
-        "id": unit,
-        "key": f"assets/{ORIGINAL_ASSET}",
-        "source": source,
-        "artifacts": dict.fromkeys(("project_file", "semantic_model", "report")),
-    }
-    (run / "unit-index.json").write_text(
-        json.dumps({"schema_version": 2, "run": name, "units": [entry]}), encoding="utf-8"
-    )
-
-
-def _compact_package(
-    tmp_path: Path,
-    *,
-    index: str = "valid",
-    index_unit: str = COMPACT_UNIT,
-    index_luid: str = WB_LUID,
-    provenance_file: str = ORIGINAL_ASSET,
-    provenance_sha: str | None = None,
-) -> Path:
-    """A package from a compact-ID run: `tmp_path` is the run, `bundle/` its engine output."""
+def _compact_package(tmp_path: Path) -> Path:
+    """A compact-ID package whose provenance `input.file` is the original, pre-staging filename."""
     bundle, oracle, _ = _bundle(tmp_path, covered=None, unit=COMPACT_UNIT)
     path = bundle / "source-provenance.json"
     provenance = json.loads(path.read_text(encoding="utf-8"))
-    provenance["inputs"][0]["input"]["file"] = provenance_file
-    if provenance_sha is not None:
-        provenance["inputs"][0]["input"]["sha256"] = provenance_sha
+    provenance["inputs"][0]["input"]["file"] = ORIGINAL_ASSET
     path.write_text(json.dumps(provenance), encoding="utf-8")
-    if index != "absent":
-        name = tmp_path.name if index == "valid" else "another-run"
-        _write_unit_index(tmp_path, name=name, unit=index_unit, luid=index_luid)
     return _package(tmp_path, bundle, oracle, COMPACT_UNIT)
 
 
-def test_a_compact_run_without_a_packaged_asset_has_nothing_to_rename(tmp_path: Path) -> None:
-    _write_unit_index(tmp_path, name=tmp_path.name)
-    assert pkg.compact_provenance_entries([], tmp_path, COMPACT_UNIT, None) == []
-
-
-def _shipped_inputs(package: Path) -> list[dict]:
-    return [
-        row["input"] for row in json.loads((package / "source-provenance.json").read_text(encoding="utf-8"))["inputs"]
-    ]
-
-
-def test_a_compact_id_package_resolves_s2_and_ships_the_stamped_original_name(tmp_path: Path) -> None:
+def test_a_compact_id_package_is_identified_by_sha_and_luid_not_its_filename_label(tmp_path: Path) -> None:
     package = _compact_package(tmp_path)
     result = pri.verify_phase1_role_identity([package])[0]
 
     assert result.verdict == pri.VERDICT_START_READY, result.blockers
-    shipped = _shipped_inputs(package)
-    assert [(row["file"], row["original_file"]) for row in shipped] == [
-        (f"{WB_LUID}_{COMPACT_UNIT}.twb", ORIGINAL_ASSET)
-    ]
-    assert [path.name for path in (package / "assets").iterdir()] == [shipped[0]["file"]]
-
-
-def test_a_noncompact_package_still_ships_its_stamped_name_unchanged(tmp_path: Path) -> None:
-    bundle, oracle, _ = _bundle(tmp_path, covered=None)
-    package = _package(tmp_path, bundle, oracle)
-    result = pri.verify_phase1_role_identity([package])[0]
-
-    assert result.verdict == pri.VERDICT_START_READY, result.blockers
-    assert _shipped_inputs(package) == [
-        {
-            "file": ORIGINAL_ASSET,
-            "sha256": hashlib.sha256((tmp_path / "assets" / ORIGINAL_ASSET).read_bytes()).hexdigest(),
-        }
-    ]
+    (row,) = json.loads((package / "source-provenance.json").read_text(encoding="utf-8"))["inputs"]
+    assert row["input"]["file"] == ORIGINAL_ASSET
+    assert [path.name for path in (package / "assets").iterdir()] == [f"{WB_LUID}_{COMPACT_UNIT}.twb"]
 
 
 @pytest.mark.parametrize(
-    ("change", "code"),
+    ("part", "field", "value", "code"),
     [
-        ({"index": "absent"}, pri.CODE_PROVENANCE_FILE),
-        ({"index": "invalid"}, pri.CODE_PROVENANCE_FILE),
-        ({"index_unit": "u0002"}, pri.CODE_PROVENANCE_FILE),
-        ({"index_luid": DS_LUID}, pri.CODE_PROVENANCE_FILE),
-        ({"provenance_file": f"{WB_LUID}_Foreign.twb"}, pri.CODE_PROVENANCE_FILE),
-        ({"provenance_sha": "0" * 64}, pri.CODE_ROLE_MISSING),
+        ("input", "sha256", "0" * 64, pri.CODE_PROVENANCE_SHA),
+        ("origin", "workbook_luid", DS_LUID, pri.CODE_LUID_CONTRADICTION),
     ],
-    ids=["no-index", "invalid-index", "other-unit", "other-luid", "same-sha-foreign-file", "sha-mismatch"],
+    ids=["sha-mismatch", "luid-contradiction"],
 )
-def test_a_compact_id_package_without_the_runs_own_mapping_stays_refused(
-    tmp_path: Path, change: dict, code: str
+def test_a_compact_id_package_still_refuses_foreign_bytes_or_luid(
+    tmp_path: Path, part: str, field: str, value: str, code: str
 ) -> None:
-    package = _compact_package(tmp_path, **change)
+    package = _compact_package(tmp_path)
+    path = package / "source-provenance.json"
+    provenance = json.loads(path.read_text(encoding="utf-8"))
+    provenance["inputs"][0][part][field] = value
+    path.write_text(json.dumps(provenance), encoding="utf-8")
+    seal(package, **json.loads((package / "package-manifest.json").read_bytes()))
     result = pri.verify_phase1_role_identity([package])[0]
 
     assert result.verdict != pri.VERDICT_START_READY
     assert code in {row.code for row in result.roles if row.state in pri.BLOCKING_STATES}, result.roles
-    assert all("original_file" not in row for row in _shipped_inputs(package))
