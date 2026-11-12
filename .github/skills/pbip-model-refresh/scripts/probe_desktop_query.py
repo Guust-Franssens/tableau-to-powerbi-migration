@@ -92,8 +92,20 @@ class ObservationUnavailable(RuntimeError):
     """A locally named refusal; native exceptions are mapped to TOOL_UNAVAILABLE, not reflected."""
 
 
+class AdomdUnavailable(ObservationUnavailable):
+    """The bound Desktop's own ADOMD client could not be located or loaded; there is no fallback.
+
+    ``detail`` is a short, path-free reason for a CLI line; the closed boundary keeps only the code.
+    """
+
+    def __init__(self, detail: str = "") -> None:
+        super().__init__("ADOMD_UNAVAILABLE")
+        self.detail = detail
+
+
 _OBSERVATION_CODES = frozenset(
     {
+        "ADOMD_UNAVAILABLE",
         "IDENTITY_UNESTABLISHED",
         "WRONG_PID_PORT",
         "PID_REUSED",
@@ -117,6 +129,8 @@ def _fresh_observation_error(error: BaseException) -> BaseException:
     code = "TOOL_UNAVAILABLE"
     if type(error) is ObservationUnavailable and len(error.args) == 1:  # pylint: disable=unidiomatic-typecheck
         code = error.args[0]
+    elif type(error) is AdomdUnavailable:  # pylint: disable=unidiomatic-typecheck
+        code = "ADOMD_UNAVAILABLE"
     elif type(error) is DialogFoundError and type(error.finding) is DialogFinding:  # pylint: disable=unidiomatic-typecheck
         code = DIALOG_NEEDS_HUMAN
     else:
@@ -418,7 +432,7 @@ def bind_desktop(pid: int, supplied_port: int | None = None) -> BoundDesktop:
     identity = desktop_identity(pid, supplied_port)
 
     def discover() -> BoundDesktop:
-        connection = _load_adomd()(f"Data Source=localhost:{identity.port};Connect Timeout=30")
+        connection = _load_adomd(identity.port)(f"Data Source=localhost:{identity.port};Connect Timeout=30")
         try:
             connection.Open()
             bound = BoundDesktop(identity, catalogue_id(connection, observation_mode=True))
@@ -457,7 +471,7 @@ def bound_call(
     def read() -> _T:
         if desktop_identity(bound.identity.pid) != bound.identity:
             raise ObservationUnavailable("PID_REUSED")
-        connection = _load_adomd()(
+        connection = _load_adomd(bound.identity.port)(
             f"Data Source=localhost:{bound.identity.port};Initial Catalog={bound.catalogue};Connect Timeout=30"
         )
         try:
@@ -527,8 +541,11 @@ def is_auto_date_table_name(name: str) -> bool:
     return bool(_AUTO_DATE_TABLE_RE.match(name))
 
 
-def _load_adomd():
-    """Load the ADOMD.NET AdomdConnection type via pythonnet, or exit with a clear message."""
+def _load_adomd(port: int | None = None):  # pylint: disable=unused-argument
+    """Load the ADOMD.NET AdomdConnection type via pythonnet, or exit with a clear message.
+
+    ``port`` names the engine whose own Desktop supplies the client; the bound-Desktop loader uses it.
+    """
     # Imports are deliberately inside this function: pythonnet must host CoreCLR (the ADOMD assembly is
     # a netcoreapp build) BEFORE `import clr`, and the .NET types only exist after AddReference.
     # pylint: disable=import-outside-toplevel,import-error
@@ -789,7 +806,7 @@ def probe(port: int, tables: list[str] | None, emit=print) -> int:
     model-level guarantee, because a static parameter/CSV table can return rows while a live source
     never loaded (see the powerbi-semantic-model-gotchas rule: prove a REAL read per live source).
     """
-    adomd_connection = _load_adomd()
+    adomd_connection = _load_adomd(port)
     conn = adomd_connection(f"Data Source=localhost:{port}")
     conn.Open()
     try:

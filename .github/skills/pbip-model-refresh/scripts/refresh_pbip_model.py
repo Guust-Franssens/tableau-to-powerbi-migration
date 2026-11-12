@@ -215,6 +215,25 @@ class PersistenceObservation:
 
 
 @dataclass(frozen=True, slots=True)
+class SavedCache:
+    """The cache file Desktop's own Save left on disk, read back once; durability stays unestablished."""
+
+    sha256: str
+    size: int
+    commitment: Literal["UNESTABLISHED"] = "UNESTABLISHED"
+
+
+@dataclass(frozen=True, slots=True)
+class SaveObservation:
+    """Desktop's own guarded Save of the bound model and one checked readback of its cache."""
+
+    catalogue: str
+    cache: SavedCache
+    identity: DesktopIdentity
+    method: Literal["DESKTOP_UI_SAVE"] = "DESKTOP_UI_SAVE"
+
+
+@dataclass(frozen=True, slots=True)
 class UIRefreshContext:
     """The held Desktop/model identity shared by one explicit UI refresh operation."""
 
@@ -638,7 +657,7 @@ def _refresh(
         conn = None
         try:
             try:
-                adomd_connection = _load_adomd()
+                adomd_connection = _load_adomd(port)
                 selection = f";Initial Catalog={bound.catalogue};Connect Timeout=30" if bound is not None else ""
                 conn = adomd_connection(f"Data Source=localhost:{port}{selection}")
                 conn.Open()
@@ -1934,7 +1953,7 @@ def tmdl_tables(model_dir: Path) -> set[str]:
 
 def _live_tables(port: int) -> set[str]:
     """Table names in the model currently served on `port` (hidden included, auto date tables not)."""
-    adomd_connection = _load_adomd()
+    adomd_connection = _load_adomd(port)
     conn = adomd_connection(f"Data Source=localhost:{port}")
     conn.Open()
     try:
@@ -1973,7 +1992,7 @@ def _live_columns_measures(port: int) -> tuple[set[tuple[str, str]], set[tuple[s
     Auto-generated columns (RowNumber, and the auto date/time scaffolding) are filtered inside
     `column_names`/`measure_names` so the live side compares like-for-like with the TMDL on disk.
     """
-    adomd_connection = _load_adomd()
+    adomd_connection = _load_adomd(port)
     conn = adomd_connection(f"Data Source=localhost:{port}")
     conn.Open()
     try:
@@ -2079,7 +2098,7 @@ def row_counts(port: int, tables: list[str] | None) -> tuple[list[tuple[str, int
     result earns a MODEL-level verdict is not decided here: it also depends on whether the refresh
     covered the whole database (see :func:`_emit_data_verdict`).
     """
-    adomd_connection = _load_adomd()
+    adomd_connection = _load_adomd(port)
     conn = adomd_connection(f"Data Source=localhost:{port}")
     conn.Open()
     try:
@@ -2730,6 +2749,58 @@ def _ui_refresh_locked(  # pylint: disable=too-many-return-statements,too-many-s
         print(f"REFRESH: NOT_PERSISTED (post-Save verification unavailable: {type(exc).__name__})")
         return 1
     return _emit_data_verdict(cache, before_stamp, args, results, implicit)
+
+
+def ui_refresh_observed(
+    bound: BoundDesktop,
+    cache: Path,
+    *,
+    deadline_seconds: float = REFRESH_ABSOLUTE_TIMEOUT_SECONDS,
+    automatic_source_scope: str | Path | None = None,
+    canaries: tuple[str, ...] = (),
+) -> RefreshObservation:
+    """Refresh every source of the bound model through Desktop's own Refresh, for a programmatic caller.
+
+    Pinned contract (the capture caller codes against it; the body lands with the UI-default runtime):
+
+    - ``bound`` comes from ``bind_desktop`` for the Desktop that opened the model owning ``cache``
+      (``<model>/.pbi/cache.abf``). Identity, catalogue and file binding are rechecked before Invoke.
+    - Holds the per-model lock for the whole call; a concurrent holder raises ``ModelLockTimeout``
+      before any Desktop action.
+    - With ``automatic_source_scope`` the trusted expected-source file and ``canaries`` are checked
+      first, as the CLI's ``--automatic-source-scope`` does; without it no scope check runs.
+    - Streams flushed ``REFRESH_STATUS`` lines to stdout; progress never decides the result.
+    - Returns ``RefreshObservation(bound.catalogue, "full", "database", (), bound.identity)`` only when
+      the engine reports every partition of this model refreshed within ``deadline_seconds``.
+    - Every refusal raises ``ObservationUnavailable(code)`` with a code from the observation
+      vocabulary (for example ``DIALOG_NEEDS_HUMAN``, ``DESKTOP_GONE``, ``PID_REUSED``, ``TIMEOUT``,
+      ``TOOL_UNAVAILABLE``). A dialog is a human stop and is never clicked.
+    - Never runs canaries, never Saves and never prints a verdict: the caller owns those steps.
+    """
+    raise NotImplementedError("ui_refresh_observed lands with the UI-default runtime")
+
+
+def ui_save_observed(
+    bound: BoundDesktop,
+    cache: Path,
+    *,
+    deadline_seconds: float = REFRESH_ABSOLUTE_TIMEOUT_SECONDS,
+) -> SaveObservation:
+    """Persist the bound model through Desktop's own guarded Save and read its cache back once.
+
+    Pinned contract (the capture caller codes against it; the body lands with the UI-default runtime):
+
+    - Same binding precondition and per-model lock as ``ui_refresh_observed``.
+    - Refuses before Save unless the bound Desktop is READY with no dialog and still serves this
+      model's catalogue from the file that owns ``cache``.
+    - After Save it waits for READY, rechecks the binding, requires the bridge's ``hasUnsavedChanges``
+      to be exactly ``False`` and Desktop's cache path to equal ``cache``, then returns a
+      ``SaveObservation`` with the cache's sha256 and byte size. Cold-reopen durability stays
+      ``UNESTABLISHED``.
+    - Refusals raise ``ObservationUnavailable(code)`` as in ``ui_refresh_observed``; a concurrent
+      holder raises ``ModelLockTimeout``. Never prints a verdict.
+    """
+    raise NotImplementedError("ui_save_observed lands with the UI-default runtime")
 
 
 def _resolve_pid(pid: int | None) -> int | None:

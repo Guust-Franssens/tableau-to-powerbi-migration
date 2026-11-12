@@ -907,7 +907,7 @@ def test_completion_awaits_real_bound_reader_progress_without_suppressing_refusa
     monkeypatch.setattr(connection, "Close", lambda: None, raising=False)
     monkeypatch.setattr(query_probe, "desktop_identity", lambda *_args: identity)
     monkeypatch.setattr(query_probe, "catalogue_id", lambda *_args, **_kwargs: bound.catalogue)
-    monkeypatch.setattr(query_probe, "_load_adomd", lambda: lambda *_args: connection)
+    monkeypatch.setattr(query_probe, "_load_adomd", lambda _port=None: lambda *_args: connection)
     # Keep the real bound_call/_observation_call reader, preflight and error translation.
     # Only the OS observation transport and ADOMD connection are synthetic.
     observed = []

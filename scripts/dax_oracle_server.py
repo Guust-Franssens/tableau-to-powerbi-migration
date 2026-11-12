@@ -198,7 +198,7 @@ def adomd_executor(port: int, pid: int | None = None) -> Callable[[str], list[di
         if connection is None:
             refuse_nonclean_desktop()
             # pylint: disable-next=protected-access,no-member
-            candidate = pdq._load_adomd()(f"Data Source=localhost:{port}")
+            candidate = pdq._load_adomd(port)(f"Data Source=localhost:{port}")
             try:
                 candidate.Open()
             except Exception:  # pylint: disable=broad-exception-caught

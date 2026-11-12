@@ -74,7 +74,7 @@ def parked_fixture(monkeypatch):
     """Wire refresh() to a parked ADOMD connection."""
     released = threading.Event()
     conn = ParkedConnection(released)
-    monkeypatch.setattr(refresh_pbip_model, "_load_adomd", lambda: lambda _dsn: conn)
+    monkeypatch.setattr(refresh_pbip_model, "_load_adomd", lambda _port=None: lambda _dsn: conn)
     monkeypatch.setattr(refresh_pbip_model, "_catalog_id", lambda _conn: "catalog-1")
     monkeypatch.setattr(refresh_pbip_model, "REFRESH_WALL_CLOCK_GRACE_SECONDS", 0.15)
     yield released

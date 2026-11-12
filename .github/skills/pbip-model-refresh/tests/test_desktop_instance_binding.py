@@ -224,7 +224,7 @@ def test_refresh_observation_matches_the_executed_scope(monkeypatch, kind, table
     command = SimpleNamespace()
     command.ExecuteNonQuery = lambda: sent.append(json.loads(command.CommandText))
     connection = SimpleNamespace(CreateCommand=lambda: command, Open=lambda: None, Close=lambda: None)
-    monkeypatch.setattr(refresh_pbip_model, "_load_adomd", lambda: lambda _: connection)
+    monkeypatch.setattr(refresh_pbip_model, "_load_adomd", lambda _port=None: lambda _: connection)
     monkeypatch.setattr(refresh_pbip_model, "recheck_bound", lambda *_args, **_kwargs: None)
     observation = refresh_pbip_model.refresh(
         52001,
@@ -367,7 +367,7 @@ def _refresh_connection(monkeypatch):
 
     connection.CreateCommand = command
     monkeypatch.setattr(probe_desktop_query, "desktop_identity", lambda *_: bound.identity)
-    monkeypatch.setattr(refresh_pbip_model, "_load_adomd", lambda: lambda _: connection)
+    monkeypatch.setattr(refresh_pbip_model, "_load_adomd", lambda _port=None: lambda _: connection)
     return bound, connection, events
 
 

@@ -77,7 +77,7 @@ def _parked(monkeypatch):
     """
     released = threading.Event()
     conn = _ParkedConnection(released)
-    monkeypatch.setattr(refresh_pbip_model, "_load_adomd", lambda: lambda _dsn: conn)
+    monkeypatch.setattr(refresh_pbip_model, "_load_adomd", lambda _port=None: lambda _dsn: conn)
     monkeypatch.setattr(refresh_pbip_model, "_catalog_id", lambda _conn: "catalog-1")
     monkeypatch.setattr(refresh_pbip_model, "REFRESH_WALL_CLOCK_GRACE_SECONDS", 2)
     yield conn, released
@@ -296,7 +296,7 @@ def test_calculate_only_aliases_select_tmsl_calculate(monkeypatch) -> None:
         def Close(self) -> None:  # noqa: N802  # pylint: disable=invalid-name
             pass
 
-    monkeypatch.setattr(refresh_pbip_model, "_load_adomd", lambda: lambda _dsn: _Conn())
+    monkeypatch.setattr(refresh_pbip_model, "_load_adomd", lambda _port=None: lambda _dsn: _Conn())
     monkeypatch.setattr(refresh_pbip_model, "_catalog_id", lambda _conn: "catalog-1")
 
     for flag in ("--calculate-only", "--measures-only"):
@@ -311,7 +311,7 @@ def test_calculate_only_aliases_select_tmsl_calculate(monkeypatch) -> None:
 
 def test_refresh_rejects_unknown_refresh_type_before_xmla(monkeypatch) -> None:
     """The mode guard must fire before any ADOMD connection is opened."""
-    monkeypatch.setattr(refresh_pbip_model, "_load_adomd", lambda: pytest.fail("XMLA should not be opened"))
+    monkeypatch.setattr(refresh_pbip_model, "_load_adomd", lambda _port=None: pytest.fail("XMLA should not be opened"))
     with pytest.raises(ValueError, match="unsupported refresh type"):
         refresh(port=1234, tables=None, timeout_sec=5, refresh_type="Calculate")
 
@@ -338,7 +338,7 @@ def test_calculate_uses_legacy_banner_not_progress_row_count_liveness(monkeypatc
             pass
 
     monkeypatch.setattr(refresh_pbip_model, "_start_refresh_progress_trace", lambda *_args: pytest.fail("no trace"))
-    monkeypatch.setattr(refresh_pbip_model, "_load_adomd", lambda: lambda _dsn: _Conn())
+    monkeypatch.setattr(refresh_pbip_model, "_load_adomd", lambda _port=None: lambda _dsn: _Conn())
     monkeypatch.setattr(refresh_pbip_model, "_catalog_id", lambda _conn: "catalog-1")
 
     ok, message = refresh(
@@ -370,7 +370,7 @@ def test_an_error_from_the_worker_reaches_the_caller_unchanged(monkeypatch) -> N
             """Fail on connect - the failure must survive the thread hop."""
             raise ValueError("connection refused")
 
-    monkeypatch.setattr(refresh_pbip_model, "_load_adomd", lambda: lambda _dsn: _Boom())
+    monkeypatch.setattr(refresh_pbip_model, "_load_adomd", lambda _port=None: lambda _dsn: _Boom())
 
     with pytest.raises(ValueError, match="connection refused"):
         refresh(port=1234, tables=["Orders"], timeout_sec=5)
@@ -458,7 +458,7 @@ def test_progress_liveness_warns_but_does_not_kill_a_quiet_refresh(monkeypatch, 
 
     monitor = RefreshProgressMonitor(liveness_seconds=0.1, throttle_seconds=2)
     monkeypatch.setattr(refresh_pbip_model, "_start_refresh_progress_trace", lambda *_args: monitor)
-    monkeypatch.setattr(refresh_pbip_model, "_load_adomd", lambda: lambda _dsn: _Conn())
+    monkeypatch.setattr(refresh_pbip_model, "_load_adomd", lambda _port=None: lambda _dsn: _Conn())
     monkeypatch.setattr(refresh_pbip_model, "_catalog_id", lambda _conn: "catalog-1")
 
     ok, message = refresh(port=1234, tables=["Orders"], timeout_sec=1, progress_liveness_sec=0.1)

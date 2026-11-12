@@ -205,7 +205,7 @@ def legacy_token(observation: Observation) -> str | None:
 
 def measurement_refusal(code: str) -> str:
     """Explicit adaptation to unchanged receipt v2/v3 refusal enums; unknown codes reject."""
-    if code in {"DESKTOP_GONE", "REFRESH_IN_PROGRESS"}:
+    if code in {"ADOMD_UNAVAILABLE", "DESKTOP_GONE", "REFRESH_IN_PROGRESS"}:
         return "TOOL_UNAVAILABLE"
     if code in {
         "CREDENTIAL_MISSING",

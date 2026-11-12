@@ -1521,7 +1521,7 @@ def test_observer_adapter_maps_only_receipt_vocabulary() -> None:
     """The runtime adapter neither widens nor rewrites persisted v2/v3 refusal enums."""
     for code in receipt.MEASUREMENT_REFUSALS:
         assert receipt.observer_measurement_refusal(code) == code
-    for code in ("DESKTOP_GONE", "REFRESH_IN_PROGRESS"):
+    for code in ("ADOMD_UNAVAILABLE", "DESKTOP_GONE", "REFRESH_IN_PROGRESS"):
         assert receipt.observer_measurement_refusal(code) == "TOOL_UNAVAILABLE"
     for code in ("READY", "DATA_OK", "UNKNOWN_NEW_CODE"):
         with pytest.raises(ValueError):

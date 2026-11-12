@@ -338,7 +338,7 @@ def desktop_executor_fixture(monkeypatch: pytest.MonkeyPatch) -> tuple:
     connection = SimpleNamespace(
         Open=lambda: events.append("open"), CreateCommand=command, Close=lambda: events.append("close")
     )
-    monkeypatch.setattr(pdq, "_load_adomd", lambda: lambda _dsn: connection)
+    monkeypatch.setattr(pdq, "_load_adomd", lambda _port=None: lambda _dsn: connection)
     monkeypatch.setattr(pdq, "_credential_state", inspect_pid)
     monkeypatch.setattr(
         pdq,

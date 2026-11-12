@@ -103,7 +103,7 @@ class _Conn:
 
 
 def _wire(monkeypatch, module, conn: _Conn) -> None:
-    monkeypatch.setattr(module, "_load_adomd", lambda: lambda _dsn: conn)
+    monkeypatch.setattr(module, "_load_adomd", lambda _port=None: lambda _dsn: conn)
 
 
 # --- probe_desktop_query.probe: the read-only preflight verdict ---------------------------------
