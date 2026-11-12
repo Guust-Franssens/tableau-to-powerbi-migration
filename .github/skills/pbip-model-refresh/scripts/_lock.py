@@ -1,13 +1,7 @@
-"""Per-model interprocess lock for ``refresh_pbip_model`` persistence (issue #114).
+"""Per-model interprocess lock for ``refresh_pbip_model``'s Desktop Refresh and Save (issue #114).
 
-Persisting a cache is a multi-step transaction: snapshot ``database.tmdl``, provisionally raise its
-``compatibilityLevel`` to the live level, write-and-swap ``cache.abf``, then commit or roll the bump
-back. Two runs against the SAME model share two mutable resources across that transaction - the
-staging file (which :func:`_abf._staging_path` now gives each run a private name) AND, the one unique
-names cannot fix, the compatibility edit on ``database.tmdl``. A hostile interleaving of the compat
-edit alone leaves the project declaring a level no present cache was written at - unopenable, with NO
-visible Desktop error (the "CompatibilityLevel downgrade" brick). So the WHOLE transaction has to be
-serialised, not merely the temp file.
+Two runs against the SAME model must not interleave: one run's Refresh or Save could otherwise land
+between another run's checks and its own Save, so the whole UI operation is serialised per model.
 
 This module is the serialiser: a best-effort, cross-platform advisory lock built on an
 ``O_CREAT | O_EXCL`` lock file, so it needs no third-party dependency and travels with the skill
@@ -15,7 +9,7 @@ bundle. A lock held by a process that has since DIED is RECLAIMED - a dead holde
 tool forever - while a lock held by a LIVE process is waited for up to a timeout and then reported as
 :class:`ModelLockTimeout` rather than blocked on indefinitely. The safe direction on any uncertainty
 is to UNDER-reclaim (wait a little longer for a lock that is actually free) rather than OVER-reclaim
-(yank a lock from a live persist and re-open the #114 race).
+(yank a lock from a live run and re-open the #114 race).
 
 Self-contained: depends only on ``os``/``time``/``uuid``/``socket``/``contextlib`` (and ``ctypes`` on
 Windows, for process-liveness), so the bundle stays copyable with no external requirement.
@@ -30,13 +24,12 @@ import time
 import uuid
 from pathlib import Path
 
-# A persist writes ~114 KB and takes seconds, so a live concurrent holder should clear well within
-# this; the timeout only bites a genuinely STUCK live holder (a dead one is reclaimed at once, never
-# waited for).
+# The timeout only bites a genuinely STUCK live holder (a dead one is reclaimed at once, never
+# waited for). Callers pass their own timeout.
 _DEFAULT_TIMEOUT_SECONDS = 120.0
 _DEFAULT_POLL_SECONDS = 0.05
 # Fallback staleness for a lock we cannot pin to a live/dead PID (written by another host, or a torn
-# lock file): far longer than any real persist, so it never reclaims a lock a live local holder is
+# lock file): far longer than any real operation, so it never reclaims a lock a live local holder is
 # still using. Same-host liveness is checked first and takes precedence over this.
 _DEFAULT_STALE_AFTER_SECONDS = 600.0
 
@@ -119,7 +112,7 @@ def _process_alive_windows(pid: int) -> bool:
 class _ModelLock:
     """A non-reentrant, cross-process advisory lock backed by a single ``O_CREAT | O_EXCL`` lock file.
 
-    Non-reentrant on purpose: two persist transactions in one process (a nested/retried run) are two
+    Non-reentrant on purpose: two operations in one process (a nested/retried run) are two
     logical writers and must still contend, so a second acquire against a held lock blocks and then
     raises :class:`ModelLockTimeout` - it never silently re-enters.
     """
@@ -250,7 +243,6 @@ def model_lock(
 ) -> _ModelLock:
     """A per-model persistence lock as a context manager. See :class:`_ModelLock`.
 
-    Acquire it around the ENTIRE persist transaction (snapshot -> align -> write -> commit/rollback),
-    so a concurrent run cannot interleave with the shared compatibility edit.
+    Acquire it around the ENTIRE Desktop Refresh/Save operation, so a concurrent run cannot interleave.
     """
     return _ModelLock(path, timeout=timeout, poll=poll, stale_after=stale_after)

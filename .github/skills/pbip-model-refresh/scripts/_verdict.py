@@ -2,10 +2,10 @@
 purpose: choose the canary set and print the machine-readable verdict for a refresh run
 usage:   imported by refresh_pbip_model.py (re-exported there; not a CLI of its own)
 
-Split out of `refresh_pbip_model.py` for the same reason as `_abf` and `_lock`: that module is at its
-line cap, and this is a self-contained layer - it decides WHICH tables get verified and turns the
-results into the one line a calling agent parses. It touches no engine and no filesystem beyond
-stat()ing the cache, so it is cheap to test directly.
+Split out of `refresh_pbip_model.py` to keep that module under its line cap. This self-contained
+layer decides WHICH tables get verified and turns the results into the one line a calling agent
+parses. It touches no engine and no filesystem beyond stat()ing the cache, so it is cheap to test
+directly.
 """
 
 from __future__ import annotations
@@ -20,11 +20,11 @@ from typing import Literal
 class DataVerdict:
     """Legacy data/scope vocabulary, not source coverage or a persistence observation."""
 
-    code: Literal["NO_DATA", "TABLE_OK", "TABLES_OK", "DATA_OK"]
+    code: Literal["NO_DATA", "TABLE_OK", "DATA_OK"]
     empty_tables: tuple[str, ...]
 
 
-def derive_data_verdict(results: list[tuple[str, int]], implicit: bool, *, narrowed: bool = False) -> DataVerdict:
+def derive_data_verdict(results: list[tuple[str, int]], implicit: bool) -> DataVerdict:
     """Derive the shared legacy classification; observation producers validate their inputs.
 
     Keep historical CLI semantics here, including repeated canaries. The stricter observation
@@ -32,25 +32,13 @@ def derive_data_verdict(results: list[tuple[str, int]], implicit: bool, *, narro
     No cache timestamps, UI flags or save booleans enter this record.
     """
     empty = tuple(table for table, rows in results if rows <= 0)
-    code = "NO_DATA" if empty else "TABLE_OK" if implicit else "TABLES_OK" if narrowed else "DATA_OK"
+    code = "NO_DATA" if empty else "TABLE_OK" if implicit else "DATA_OK"
     return DataVerdict(code, empty)
 
 
 def _canary_tables(args: argparse.Namespace) -> list[str] | None:
-    """The tables to VERIFY, which is deliberately NOT the same knob as the tables to REFRESH.
-
-    Coupling them (the round-3 behaviour: ``--tables`` was both) built a trap. The only documented way
-    to earn a model-level ``DATA_OK`` was to name canaries in ``--tables`` - which simultaneously
-    narrowed the refresh to just those tables, certifying a MODEL-level verdict over a PARTIALLY
-    refreshed model. An agent following the host-repo gate would have done exactly that, and the
-    "next agent gets an empty model" failure this bundle exists to prevent would have shipped wearing
-    a green verdict. ``--canaries`` verifies without narrowing; ``--tables`` still supplies the canary
-    set when it is the only flag given, so existing callers keep working - but see
-    :func:`_emit_data_verdict`, which no longer lets a narrowed refresh claim a model-level verdict.
-    """
-    if args.canaries:
-        return list(args.canaries)
-    return list(args.tables) if args.tables else None
+    """The tables to verify: the named canaries, or None so the first queryable table is probed."""
+    return list(args.canaries) if args.canaries else None
 
 
 def _emit_data_verdict(
@@ -62,9 +50,8 @@ def _emit_data_verdict(
 ) -> int:
     """Print the data/cache lines and the machine-readable verdict; return the process exit code.
 
-    Split out of `main()` so the mutating path (identity gate + refresh + persist) and the reporting
-    path stay individually simple. The timestamp-based legacy display is compatibility output only:
-    it never constructs an ImageObservation or PersistenceObservation.
+    The cache timestamp check is compatibility output only, never a persistence observation.
+    `--save-only` earns `SAVE_OK`, never a claim of fresh source data.
     """
     after_stamp = cache.stat().st_mtime if cache and cache.exists() else 0.0
     persisted = cache is not None and after_stamp > before_stamp
@@ -83,7 +70,7 @@ def _emit_data_verdict(
     else:
         print("  cache  : legacy timestamp check did not observe a newer cache (write outcome unconfirmed)")
 
-    verdict = derive_data_verdict(results, implicit, narrowed=bool(args.tables and not args.verify_only))
+    verdict = derive_data_verdict(results, implicit)
     if verdict.code == "NO_DATA":
         empty = verdict.empty_tables
         print(f"REFRESH: NO_DATA (empty: {', '.join(empty)} - check the source and credentials)")
@@ -95,6 +82,9 @@ def _emit_data_verdict(
             "write outcome unconfirmed)"
         )
         return 1
+    if getattr(args, "save_only", False):
+        print("REFRESH: SAVE_OK")
+        return 0
     suffix = " + PERSISTED" if wanted_save else ""
     if verdict.code == "TABLE_OK":
         # No canaries were named, so only the first queryable table was probed. That is NOT a
@@ -105,21 +95,8 @@ def _emit_data_verdict(
         print(
             f"  note   : single-table probe of '{only}' only - NOT a model-level DATA_OK. A static "
             "parameter/CSV table can return rows while a live source never loaded. Pass "
-            "--canaries <one per live source> to certify every source WITHOUT narrowing the refresh "
+            "--canaries <one per live source> to certify every source "
             "(this mirrors the powerbi-semantic-model-gotchas rule: prove a REAL read per live source)."
-        )
-        return 0
-    if verdict.code == "TABLES_OK":
-        # Canaries all returned rows, but --tables narrowed the REFRESH, so the tables outside that
-        # list still hold whatever they held before (possibly nothing). A model-level DATA_OK over a
-        # partially refreshed model is exactly the false certificate #115 was filed about, so the
-        # verdict is scoped to what was actually refreshed and verified.
-        named = ", ".join(f"'{table}'" for table, _ in results)
-        print(f"REFRESH: TABLES_OK {named}{suffix}")
-        print(
-            "  note   : --tables narrowed the REFRESH, so this is NOT a model-level DATA_OK - tables "
-            "outside that list were not reloaded. Re-run without --tables (add --canaries <one per "
-            "live source>) to certify the whole model."
         )
         return 0
     print(f"REFRESH: DATA_OK{suffix}")
