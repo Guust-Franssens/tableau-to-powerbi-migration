@@ -23,14 +23,14 @@ there `--tables` narrows the refresh itself, which is why `--canaries` exists.)
 Emits a final line: PREFLIGHT: DATA_OK (all canaries returned rows) / PREFLIGHT: TABLE_OK '<table>'
 (implicit single-table probe only) / PREFLIGHT: NO_DATA / PREFLIGHT: ERROR <msg>.
 
-Windows-only: queries the Desktop's local AS via ADOMD.NET (pythonnet). This is the sanctioned
-Windows-API exception to the "committed scripts default to .py/.sh" rule.
+Windows-only: queries the Desktop's local AS through the ADOMD client that ships beside that Desktop
+(pythonnet, .NET Framework). This is the sanctioned Windows-API exception to the "committed scripts
+default to .py/.sh" rule.
 """
 
 from __future__ import annotations
 
 import argparse
-import glob
 import inspect
 import json
 import os
@@ -64,19 +64,18 @@ from _desktop_observer import (
     POLL_INTERVAL_SECONDS,
 )
 
-# ADOMD.NET assembly shipped in the nuget cache (netcore build).
-_ADOMD_PKG = "microsoft.analysisservices.adomdclient.netcore*"
-_ADOMD_DLL = "Microsoft.AnalysisServices.AdomdClient.dll"
+# The ADOMD client every Power BI Desktop ships in its own `bin` folder (a .NET Framework build).
+ADOMD_CLIENT_DLL = "Microsoft.PowerBI.AdomdClient.dll"
+_DESKTOP_ENGINE_EXES = frozenset({"msmdsrv.exe", "pbidesktop.exe"})
+# Per port, the loaded AdomdConnection type; and the one client DLL this process has loaded.
+_ADOMD_BY_PORT: dict[int, object] = {}
+_ADOMD_LOADED: dict[str, Path] = {}
 
 
+# Unused here: kept only because the base refresh_pbip_model still imports it; delete after integration.
 def nuget_packages_root() -> Path:
     """Return the NuGet global-packages cache root, matching dotnet's NUGET_PACKAGES precedence."""
     return Path(os.environ.get("NUGET_PACKAGES") or (Path.home() / ".nuget" / "packages"))
-
-
-def adomd_dll_globs() -> list[str]:
-    """Glob patterns that can locate ADOMD.NET in the active NuGet global-packages cache."""
-    return [str(nuget_packages_root() / _ADOMD_PKG / "**" / _ADOMD_DLL)]
 
 
 # Desktop binds its msmdsrv port a moment AFTER the process appears, so a scoped lookup needs a
@@ -541,45 +540,87 @@ def is_auto_date_table_name(name: str) -> bool:
     return bool(_AUTO_DATE_TABLE_RE.match(name))
 
 
-def _load_adomd(port: int | None = None):  # pylint: disable=unused-argument
-    """Load the ADOMD.NET AdomdConnection type via pythonnet, or exit with a clear message.
+def _adomd_port_owner(port: int) -> tuple[str, str]:
+    """The executable path of the process listening on `port`, and the PBIDesktop.exe version beside it.
 
-    ``port`` names the engine whose own Desktop supplies the client; the bound-Desktop loader uses it.
+    Each is "" when unreadable. Kept on its own so a real-Desktop finding (for example an unreadable
+    engine path) changes only this function.
     """
-    # Imports are deliberately inside this function: pythonnet must host CoreCLR (the ADOMD assembly is
-    # a netcoreapp build) BEFORE `import clr`, and the .NET types only exist after AddReference.
+    ps = (
+        "$ErrorActionPreference='SilentlyContinue';"
+        "$owner = Get-NetTCPConnection -LocalPort ([int]$env:ADOMD_PORT) -State Listen | "
+        "Select-Object -First 1 -ExpandProperty OwningProcess;"
+        'if ($owner) { $exe = (Get-CimInstance Win32_Process -Filter "ProcessId=$owner").ExecutablePath };'
+        "if ($exe) { $exe; (Get-Item -LiteralPath (Join-Path (Split-Path -Parent $exe) 'PBIDesktop.exe'))"
+        ".VersionInfo.FileVersion }"
+    )
+    try:
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=60,
+            env=_merged_env({"ADOMD_PORT": str(port)}),
+        ).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return "", ""
+    lines = [line.strip() for line in out.splitlines() if line.strip()] + ["", ""]
+    return lines[0], lines[1]
+
+
+def _load_adomd(port: int):
+    """The AdomdConnection type from the Power BI Desktop that owns `port`, memoized per port.
+
+    The client is the DLL beside that engine's executable and nothing else: no CWD, PATH, NuGet, GAC
+    or newest-version lookup, so a Desktop update needs no config change. Every failure raises
+    AdomdUnavailable with a short, path-free detail.
+    """
+    if port in _ADOMD_BY_PORT:
+        return _ADOMD_BY_PORT[port]
+    exe, version = _adomd_port_owner(port)
+    if not exe:
+        raise AdomdUnavailable(f"no readable process is listening on port {port}")
+    engine = Path(exe)
+    if engine.name.lower() not in _DESKTOP_ENGINE_EXES:
+        raise AdomdUnavailable(f"the process on port {port} is not a Power BI Desktop engine")
+    try:
+        connection = _load_adomd_from(engine.parent)
+    except AdomdUnavailable as exc:
+        raise AdomdUnavailable(f"{f'Power BI Desktop {version}'.strip()}: {exc.detail}") from exc
+    _ADOMD_BY_PORT[port] = connection
+    return connection
+
+
+def _load_adomd_from(bin_dir: Path):
+    """Load AdomdConnection from the Desktop ADOMD client in `bin_dir`, under .NET Framework.
+
+    One client DLL per process: the CLR cannot load two builds of one assembly, so a request for a
+    different DLL raises and the fix is a new process.
+    """
+    dll = Path(bin_dir) / ADOMD_CLIENT_DLL
+    loaded = _ADOMD_LOADED.get("dll")
+    if loaded is not None and loaded != dll:
+        raise AdomdUnavailable("another Desktop build's ADOMD client is already loaded in this process; restart it")
+    if not dll.is_file():
+        raise AdomdUnavailable(f"{ADOMD_CLIENT_DLL} is not beside the Power BI Desktop executable")
+    # Imported here: pythonnet must select the .NET Framework runtime (the DLL targets v4.0.30319)
+    # before `import clr`, and the .NET types exist only after AddReference.
     # pylint: disable=import-outside-toplevel,import-error
     try:
-        from pythonnet import load
-
-        load("coreclr")
-        import clr
+        import pythonnet
     except ImportError:
-        print("PREFLIGHT: ERROR pythonnet not installed (uv pip install pythonnet)")
-        sys.exit(2)
+        raise AdomdUnavailable("pythonnet is not installed in this Python") from None
+    try:
+        pythonnet.load("netfx")
+        import clr
 
-    for pattern in adomd_dll_globs():
-        hits = glob.glob(pattern, recursive=True)
-        if hits:
-            dll = Path(hits[0])
-            # AddReference resolves by assembly name with the folder on sys.path (a full path is
-            # treated as a name and fails), so add the dir first, then reference by simple name.
-            if str(dll.parent) not in sys.path:
-                sys.path.append(str(dll.parent))
-            # pylint: disable-next=no-member  # clr's members are generated at runtime by pythonnet
-            clr.AddReference(dll.stem)
-            from Microsoft.AnalysisServices.AdomdClient import AdomdConnection
-
-            return AdomdConnection
-    print(
-        "PREFLIGHT: ERROR Microsoft.AnalysisServices.AdomdClient.dll not found in the nuget cache - "
-        "restore it (a DIFFERENT nuget package from the TOM/AMO one), forcing a supported TFM so the "
-        "add cannot silently no-op on a net10 default: "
-        r"dotnet new console -o $env:TEMP\adomd --framework net8.0; "
-        r"dotnet add $env:TEMP\adomd package Microsoft.AnalysisServices.AdomdClient.NetCore.retail.amd64 "
-        "--version 19.84.1"
-    )
-    sys.exit(2)
+        clr.AddReference(str(dll))  # pylint: disable=no-member
+        from Microsoft.AnalysisServices.AdomdClient import AdomdConnection
+    except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+        raise AdomdUnavailable(f"loading {ADOMD_CLIENT_DLL} failed ({type(exc).__name__})") from exc
+    _ADOMD_LOADED["dll"] = dll
+    return AdomdConnection
 
 
 def _msmdsrv_ports(desktop_pid: int | None) -> list[int]:
@@ -637,8 +678,8 @@ def discover_port(desktop_pid: int | None) -> int:
 
     A named pid is AUTHORITATIVE and is never widened. The old code fell back to "any msmdsrv on the
     machine" whenever the scoped query came back empty - harmless on a one-instance box, a
-    data-corruption path in a parallel batch: the caller then refreshes, row-counts and (via
-    `refresh_pbip_model.image_save`) persists a *sibling's* model into its own correct `cache.abf`.
+    data-corruption path in a parallel batch: the caller then refreshes, row-counts and saves a
+    *sibling's* model as if it were its own.
     Every downstream check still passes, because file metadata cannot tell you whose rows are in the
     blob. The likeliest trigger is not a wrong pid but timing - Desktop is up before its msmdsrv has
     bound a port - so the scoped lookup retries briefly and then fails loudly instead of guessing.
@@ -1004,6 +1045,11 @@ def main(argv: list[str] | None = None) -> int:
         if early_verdict is not None:
             return early_verdict
     port = args.port or discover_port(args.pid)
+    try:
+        _load_adomd(port)
+    except AdomdUnavailable as exc:
+        print(f"PREFLIGHT: ERROR ADOMD_UNAVAILABLE {exc.detail}")
+        return 2
     try:
         return _probe_with_credential_poll(
             args.pid,
