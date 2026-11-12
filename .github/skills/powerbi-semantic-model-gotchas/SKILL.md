@@ -27,9 +27,9 @@ Use the explicit returned `connectionName` on each supported operation; independ
 
 Refresh/persist/export/reopen mechanisms belong to host `.github\skills\pbip-model-refresh\SKILL.md` (“Order matters” and “Bind to the right instance”), held out of the playbook. Resolve that owner path in the fresh role or block the dependent handoff; do not assume a registered plugin skill.
 
-Until #730 establishes a measured replacement, local custody/persist/export rules outrank generic upstream claims of desync-free live MCP changes or no need for explicit persistence. Preserve explicit export/persistence/current-definition checks and unresolved reload/cold-reopen safeguards; no unproved workaround retires.
+Edited TMDL reaches a running Desktop only through the host's reload of a clean Desktop (`hasUnsavedChanges: false`); a dirty reload discards unsaved edits, so stop for a human. Otherwise local custody/persist/export rules outrank generic upstream claims of desync-free live MCP changes or no need for explicit persistence. Preserve explicit export/persistence/current-definition checks and cold-reopen safeguards; no unproved workaround retires.
 
-Only for wrong-model reads, stale-save conflicts or empty reopen: load the relevant owner section or host-only `docs\gotcha-dedup-plan.md` symptom index. If the index is absent, current attribution is unestablished. Optional pinned history is not a portable owner or a universal ban on current preview/reload; newer versions/mtime cannot settle #730.
+Only for wrong-model reads, stale-save conflicts or empty reopen: load the relevant owner section or host-only `docs\gotcha-dedup-plan.md` symptom index. If the index is absent, current attribution is unestablished. Optional pinned history is not a portable owner or a universal ban on current preview/reload; newer versions or cache mtime do not prove persistence.
 
 ## 4. Model integrity, table calcs, cross-agent hand-offs, and scale
 

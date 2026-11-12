@@ -55,8 +55,9 @@ retains `-Update`, not the runbook's session-start arguments.
 
 Preflight is the contract — it prints an install hint beside anything missing and exits non-zero.
 Beyond the Fabric skills, the Power BI Desktop bridge and the `powerbi-report-author` CLI, the one
-extra dependency people miss is **.NET** plus the tabular client assemblies (ADOMD/AMO). Without them
-a refresh still runs, but you lose live per-table row counts and fall back to the MCP path.
+extra dependency people miss is `pythonnet`, which loads the ADOMD client Desktop already ships
+(preflight's `adomd_client` check). Open models with `python scripts/open_desktop.py <pbip>`; it
+finds the installed Desktop itself and prints the PID.
 
 `uv sync --all-extras` matters more than it looks: without the extras, `parse_tableau.py` cannot
 import `lxml` and several scripts fail on a fresh clone.

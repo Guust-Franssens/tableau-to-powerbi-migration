@@ -60,7 +60,7 @@ Shared builder wording/stage outputs/tools grant no repair authority.
   live-Snowflake connectivity for **129 minutes / 298 tool calls** without ever surfacing the
   problem. Waiting is not progress.
   - **Cap it: ~2 minutes or 3 attempts, whichever comes first** — any unresponsive external system
-    (database/warehouse/gateway, MCP server, XMLA refresh, the Desktop bridge). Cap *relaunches* at 2
+    (database/warehouse/gateway, MCP server, the Desktop bridge). Cap *relaunches* at 2
     as well; "kill it and retry" is otherwise an unbounded loop.
   - **Unless the tool tells you it IS the timer** — some scripts self-bound and announce their own
     deadline. Measured: an agent applied the cap to such a script, killed it at 120 s and recorded
@@ -154,7 +154,7 @@ Host [refresh](../skills/pbip-model-refresh/SKILL.md), `check_migration_progress
 `capture_powerbi_pages.py` ([help](../../scripts/README.md)) own
 exact PID/model/`connectionName`, current definitions and reload/refresh/export/cache/persist/cold-reopen.
 Host wins conflicting upstream host/PID/reload advice; log deviations; missing owner blocks operation/no DIY.
-**#730 UNMEASURED:** retain safeguards/no runtime winner; never stale Desktop Save over disk edits.
+**Reload only a clean Desktop (`hasUnsavedChanges: false`):** a dirty one is a human stop; never stale Desktop Save over disk edits.
 Commissioned data/custody claims need current per-table rows + refresh/save/cache/cold proof, not
 mtime/echoed identity/arbitrary rows. Structural/parse/schema/`rebuilt`/`READY`/`PERSISTED`/screenshots
 aren't DATA_OK/fidelity/COMPLETE.

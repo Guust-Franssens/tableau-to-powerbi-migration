@@ -4,6 +4,11 @@
 and the GUI test tier described below were retired. Any blocking dialog is now a human stop named by
 its sanitized title; see the `pbip-model-refresh` skill. This record is kept as history.
 
+**Superseded in part by the UIA-default change:** refresh and Save now run through Desktop's own UI
+(UI Automation), reads use Desktop's bundled ADOMD client, and the AMO/TOM, ImageSave, NuGet and
+XMLA-refresh machinery (including `_abf.py`) was deleted. Rows below that name them describe removed
+code, not current obligations.
+
 **Implementation note:** sections 1–11 preserve the pre-implementation investigation and estimates.
 The approved amendments and implemented slice-1 contract in §12 supersede the proposed identity types,
 timestamps and API examples below. The historical census is not rewritten to look like the new tree.

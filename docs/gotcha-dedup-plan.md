@@ -45,9 +45,10 @@ validation, one arbitrary row, `PERSISTED`, mtime or a screenshot cannot establi
 table coverage or durable cold reopen. Returned connection names still need independent current
 contents/definition checks against the intended working model.
 
-Pending [#730's measurement contract](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/issues/730#issuecomment-6233480308),
-the supported host capture/reload/identity and custody/persist/export rules outrank generic upstream
-assumptions. ❌ No winner, universal MCP/reload ban or workaround retirement is established here.
+Measured reload rule: the host reloads edited TMDL only into a clean Desktop (`hasUnsavedChanges:
+false`); a dirty reload discarded the unsaved edit, so a dirty Desktop is a human stop. The supported
+host capture/reload/identity and custody/persist/export rules outrank generic upstream assumptions.
+❌ No universal MCP/reload ban or workaround retirement is established here.
 Published schema definitions do not prove this host can reach their endpoints; unreachable/skipped
 checks stay unverified. No “2.9 newest,” “ShapeMap unusable” or “PBIP has no data cache” claim survives
 in the compact cores; no schema bump or “all old defects fixed” claim replaces them.

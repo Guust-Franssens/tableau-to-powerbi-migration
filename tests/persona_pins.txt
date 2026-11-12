@@ -34,7 +34,7 @@ cb21982d44fa42c19b0fe01857edf4b6e47ffa38e08f82e25874db1e9b5add68  - **Keep `limi
 35c45012ca2fca732fd8d5484db7af47ffc3d8854c3b21b84e2b00ce2b749bfa  - **Declare generated edits.** TMDL/PBIR/`.pbip`: file/chang
 7f84d9b33171068ee1749ce30a7c292044f1a842a04b837371a1f8da52c7c5e7  - **Surface complexity mismatches proactively.** If the pars
 6219b337903decdb2aaf2efa84c8a1de2555b3c8faf54934641efbb28a96111d  - **NEVER block silently on an external system ~ time-box it
-8e707b79fd53cba431d981353b74d9f7c7bf702766e6335d186d0396ae801c53  - **Cap it: ~2 minutes or 3 attempts, whichever comes first*
+8e86c78d24c7f2d39fa951120b5b8e38003291da5c41a4e63ef897e128cccd79  - **Cap it: ~2 minutes or 3 attempts, whichever comes first*
 ea6da7a18d7de674ec6ae089f773bad8e34c5b0ee66b88a221ec2d9155c4c7c6  - **Unless the tool tells you it IS the timer** ~ some scrip
 e81a04f9635331f4b0b7d864a3e50caf047681a7791231c5ab6685061ad3f750  - **A MISSING CREDENTIAL is not transient ~ try ONCE.** The
 a20683f57acd1d70225876a96b1be82b2f8b56a541c594a9ea2f3c55d612464d  - **AUTOPILOT / auto-approve DOES NOT override a credential
@@ -76,7 +76,7 @@ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 5818b20d1c65b088965fe8e406ec4e9e6ba8f238f1552a2371b55c6be40bccc3  Check only commissioned current [live-source](../skills/live
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-6648bfa8c6c187cb41a1bb0770d2a019b792e0c68b89c1b758255eee6eb3f5fd  Host [refresh](../skills/pbip-model-refresh/SKILL.md), `chec
+1e52a3aae64820426c52bd8b24ce69993edc8006d2011ca4c7e56e2c098a60b6  Host [refresh](../skills/pbip-model-refresh/SKILL.md), `chec
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 b5bff4a0b68e5e9d441cbdc03e2fcf09e4b00fdea8a2af6b9bffd0eac9bcdddd  ## Private findings and handoff
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
@@ -103,7 +103,7 @@ b9c17c5644f5676e7fa461f454e655b428643c74e7a41d99c81be86c7a61021a  Require curren
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 64ef8b89c4f9f3b842d698c59d4974fa02ebf771cb3a2cdd7d1c128d0613d994  ## Reachable read-only owners
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-d387d0c17bd69ebd734e2b85e8776172fd93259ecc4b8e80d14afd6d5ef59f4d  Invoke `powerbi-report-gotchas` ~~3/8/10; `powerbi-report-cl
+dc827e79047b24e080b2be094b510cb04f9d30108f995403cd50e6b9f3fbc4c0  Invoke `powerbi-report-gotchas` ~~3/8/10; `powerbi-report-cl
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 bd4a85861c7662cba45984bcc3599c9c0691150542a7db241cc1d2cfbfa24299  ## Independent phases
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
@@ -146,7 +146,7 @@ bdd0ce3c39397697ce79b83f3678c5598bd73d6c1a3380b2cff186e77f0c5642  ## Warm-model 
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 34795df6993de2c14654f823f7d362333ff91839c72663b28e08f3cec5fa92eb  Before report work/opening Desktop require semantic-owner **
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-b5ecc31ba5e6d644fcb5c9b1badeba56abbabcc532ea275603dc70f3939ec892  Host `.github\skills\pbip-model-refresh\SKILL.md` (~Order ma
+a70b532a25eca99dac4c73b85f996069b20cbb6bbf76790014cfd84821450910  Host `.github\skills\pbip-model-refresh\SKILL.md` (~Order ma
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 215719e090c9e3085d4c740e5a393634bad646a6d59b5a1637ad02a74b0849c5  ## Repair decisions
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
@@ -222,11 +222,11 @@ d3ad490945825fc48a78e36cec26c82b139033dd594f1af9bfd7d455b4f68401  ## Current-mod
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 270eaf908967e66a668efd766c2ce1028a3bd154c17ae4069a5305569ed0206d  Use returned `connectionName` on every supported operation;
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-8891af7d6482d511e8e9c7136196cf792f6f36a958c1e33f57f7e84ff8ee7297  **Host-only pbip-model-refresh skill file:** `.github\skills
+56ce72431bc8388a5100baede61e2edeb262220e2c7ec29d007502571f98c269  **Host-only pbip-model-refresh skill file:** `.github\skills
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 4e75caba3978daa34f4346ac637cc9c404a7ca5f2466afbce5275cf24e06882a  ### Blocking Desktop dialog
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-68b3a08deefb132f1ad960f2e446e3128a474d96730ea006b4462cb9a6d33567  Any blocking Desktop dialog is a human stop. Relay the sanit
+5c591bc39222dbe2e52de44664831d09f5fa45a36f53089ae902e76c8dc04f3f  Any blocking Desktop dialog is a human stop. Relay the sanit
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 5af66ae1a0d6127654bb2d737a55435dd6a29d21e08216cbab686d4c3b3acb15  ## AI seal and data-bearing handoff
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
@@ -274,7 +274,7 @@ f63d7c87c543bb362a8d572e9112234b4618df3c4eed804184346954f86c859c  3. Host `.gith
 8109a296571ea4b280160dca4db61dc3ca42238fa8f30cf9922e453d27b7e18b  4. R works on shipped bytes with triage/references. Bundle e
 29c5d7160d19b12cc94f3e4fc4fb4a39e4a4f7cec01eb9640406021009233978  5. Regenerate `limitations_encountered` from final artifacts
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-97cff9e878b737bbb22e6a06351a64bfc17d8883d4d3e3231d737c5bc1a64914  **#730 UNMEASURED:** supported host refresh/persist/cache/cu
+7004cf7e8ef8745c717cadb8141e039ac9380d935a702d997c13d1dae0e59f00  **Host refresh is UIA by default:** Desktop's own Refresh an
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 6dcc1747c914f0113970b11eee7b024152bce9683b90aae03f6649a5ba688f19  ## Fix, certify, then ship
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)

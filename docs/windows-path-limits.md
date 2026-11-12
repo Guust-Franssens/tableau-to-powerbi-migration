@@ -287,9 +287,8 @@ nothing else. **One character decides it.**
 # 1. copy examples/shipping-kpis/fabric to a root of length (target - 99); its deepest tail is 99.
 #    Python is long-path aware, so it can WRITE a copy Desktop cannot read.
 
-# 2. launch, naming the PID
-$p = Start-Process -FilePath $env:PBI_DESKTOP_PATH -ArgumentList "`"<path>\ShippingKPIs.pbip`"" -PassThru
-$p.Id
+# 2. launch, naming the PID (printed at once; exit 2 with the PID on a dialog or timeout)
+python scripts/open_desktop.py "<path>\ShippingKPIs.pbip"
 
 # 3. wait >= 90 s, then judge with the BRIDGE, not the title
 npx --yes @microsoft/powerbi-desktop-bridge-cli status --pid <literal pid> --wait-seconds 60
@@ -410,8 +409,7 @@ if (-not (Test-Path -LiteralPath 'R:\')) { throw 'R: did not appear - open nothi
 
 # 4. only now open the mapped project, and keep the PID
 $pbip = 'R:\pbip\<Unit>\<Unit>.pbip'
-$p = Start-Process -FilePath $env:PBI_DESKTOP_PATH -ArgumentList "`"$pbip`"" -PassThru
-$p.Id
+python scripts/open_desktop.py $pbip    # prints the PID; keep it
 
 # 5. all Desktop work is PID-scoped (bridge status / refresh / capture), then close that exact PID
 Stop-Process -Id <literal pid> -Force

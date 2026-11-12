@@ -2964,11 +2964,10 @@ def write_path_ceiling_report(out_dir: Path, report: dict) -> Path | None:
     rather than being destroyed by the very run that could not describe itself. On any failure only
     THIS call's exact staging file is removed, best effort - never the report, never a sibling.
 
-    ⚠️ The pattern is deliberately the repo's existing one (`_abf._staged_image_write`,
-    `generated_edit_declarations._append_record`): unique-per-process staging name, `os.replace`,
-    staging removed when the swap did not happen. Neither is imported: `_append_record` is private
-    to another module, generates its own filename and injects its own `version`/`recorded_at` keys,
-    so its semantics do not fit publishing one named report - and `_abf` belongs to a skill bundle.
+    ⚠️ The pattern is deliberately the repo's existing one (`generated_edit_declarations._append_record`):
+    unique-per-process staging name, `os.replace`, staging removed when the swap did not happen. It is
+    not imported: `_append_record` is private to another module, generates its own filename and
+    injects its own `version`/`recorded_at` keys, so its semantics do not fit publishing one named report.
     """
     final_path = out_dir / PATH_CEILING_REPORT
     staging_path = final_path.with_name(f"{final_path.name}.{os.getpid()}-{uuid.uuid4().hex}.tmp")
