@@ -338,7 +338,7 @@ def desktop_executor_fixture(monkeypatch: pytest.MonkeyPatch) -> tuple:
     connection = SimpleNamespace(
         Open=lambda: events.append("open"), CreateCommand=command, Close=lambda: events.append("close")
     )
-    monkeypatch.setattr(pdq, "_load_adomd", lambda: lambda _dsn: connection)
+    monkeypatch.setattr(pdq, "_load_adomd", lambda _port=None: lambda _dsn: connection)
     monkeypatch.setattr(pdq, "_credential_state", inspect_pid)
     monkeypatch.setattr(
         pdq,
@@ -398,6 +398,31 @@ def test_desktop_persistent_requests_are_each_checked(desktop_executor: tuple, c
     assert capsys.readouterr().err.count("a Power BI Desktop dialog is open") == 1
     execute.close()
     assert events[-1] == "close"
+
+
+def test_an_unavailable_adomd_client_names_its_detail_and_the_server_keeps_serving(
+    desktop_executor: tuple, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The loader raises with a detail; the old one called sys.exit, which escaped and killed the server."""
+    _, _, _, connection, _ = desktop_executor
+    pdq = sys.modules["probe_desktop_query"]
+    failures = iter([pdq.AdomdUnavailable("pythonnet is not installed in this Python")])
+
+    def load(_port: int):
+        failure = next(failures, None)
+        if failure is not None:
+            raise failure
+        return lambda _dsn: connection
+
+    monkeypatch.setattr(pdq, "_load_adomd", load)
+    output = StringIO()
+    requests = iter(['{"dax":"EVALUATE ROW(\\"v\\", 1)"}\n'] * 2)
+
+    assert dos.serve(dos.make_oracle(dos.adomd_executor(55001, 111)), requests, output) == 0
+    assert [json.loads(line) for line in output.getvalue().splitlines()] == [
+        {"error": "ADOMD_UNAVAILABLE pythonnet is not installed in this Python"},
+        {"rows": [{"v": 7}]},
+    ]
 
 
 def test_desktop_repeated_refusals_print_each_title_once(desktop_executor: tuple, capsys) -> None:

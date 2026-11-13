@@ -3360,7 +3360,9 @@ def _data_observations(generated: dict[str, Any]) -> dict[str, Any]:
     if not requested["refresh"] or not requested["persist"] or not requested["canaries"]:
         code = "a1_full_refresh_persistence_named_canaries_required"
     else:
-        for name, fact in facts.items():
+        # Operation order, not the receipt's sorted key order, so a skipped Save names its failed refresh.
+        for name in ("binding", "refresh", "canaries", "persistence"):
+            fact = facts[name]
             if fact["status"] != "observed":
                 code = f"a1_{name}_{fact['status']}"
                 break
@@ -3373,7 +3375,7 @@ def _data_observations(generated: dict[str, Any]) -> dict[str, Any]:
         "requested": requested,
         "observations": facts,
         "persistence_limit": (
-            "ImageSave/readback software observations only; persistence commitment remains UNESTABLISHED."
+            "Cache readback software observations only; persistence commitment remains UNESTABLISHED."
         ),
     }
 

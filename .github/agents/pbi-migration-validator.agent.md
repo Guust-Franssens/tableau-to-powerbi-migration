@@ -69,7 +69,7 @@ V writes private review outputs only.
   live-Snowflake connectivity for **129 minutes / 298 tool calls** without ever surfacing the
   problem. Waiting is not progress.
   - **Cap it: ~2 minutes or 3 attempts, whichever comes first** — any unresponsive external system
-    (database/warehouse/gateway, MCP server, XMLA refresh, the Desktop bridge). Cap *relaunches* at 2
+    (database/warehouse/gateway, MCP server, the Desktop bridge). Cap *relaunches* at 2
     as well; "kill it and retry" is otherwise an unbounded loop.
   - **Unless the tool tells you it IS the timer** — some scripts self-bound and announce their own
     deadline. Measured: an agent applied the cap to such a script, killed it at 120 s and recorded
@@ -128,7 +128,7 @@ endpoints/`definition.pbir` binding. ConnectFolder = metadata-only; offline Exec
 Host `.github\skills\pbip-model-refresh\SKILL.md` (“Order matters”/“Bind to the right instance”/
 persistence output), `scripts\check_migration_progress.py --handoff`; live evidence:
 `.github\skills\live-source-reachability\SKILL.md`; live COMPLETE needs check_unit's PASS `data-evidence`.
-**#730 UNMEASURED:** preserve host capture/reload/
+**Reload only a clean Desktop (`hasUnsavedChanges: false`):** preserve host capture/reload/
 PID/identity/current-definition/export/cache/persist overrides over conflicting upstream host/
 `--pid`/reload guidance; log deviations. No stale Save over newer bytes. Inspect OWNER final-definition
 load/reopen → refresh → save/persist, rows for every commissioned import/live table, cache freshness/

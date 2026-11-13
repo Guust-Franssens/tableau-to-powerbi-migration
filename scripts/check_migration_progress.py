@@ -39,7 +39,7 @@ Packages are found beside the bundle by default (`_runs/<NNN>-<slug>/{bundle,pac
 `--packages` names a different root.
 
 ⚠️ **A stall is not a failure, and a fast run is not a success.** A migration can legitimately go
-quiet while Power BI Desktop loads a model (~60-90s) or an XMLA refresh runs (measured 93s), and a
+quiet while Power BI Desktop loads a model (~60-90s) or a model refresh runs (measured 93s), and a
 correct early STOP - an unreachable source, a missing credential - produces almost no artifacts at
 all and is the RIGHT outcome. Read the verdict together with what the run was asked to do.
 """
@@ -96,7 +96,7 @@ PACKAGE_MANIFEST_NAME = "package-manifest.json"
 #: future batch convention might add without turning this into an unbounded tree walk.
 PACKAGE_SEARCH_DEPTH = 3
 
-# A Desktop model load is 60-90s and a refresh + ImageSave was measured at 93s, so a window shorter
+# A Desktop model load is 60-90s and a refresh plus Save was measured at 93s, so a window shorter
 # than this cannot distinguish "loading" from "stuck" and must not try.
 SHORT_WINDOW_MINUTES = 10
 BURST_GRACE_MULTIPLIER = 2

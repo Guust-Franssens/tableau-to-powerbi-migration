@@ -299,7 +299,7 @@ def test_the_classifier_hands_off_to_the_refresh_and_still_forbids_building(tmp_
     )
     assert proc.returncode == 1, proc.stdout + proc.stderr
     out = (proc.stdout + proc.stderr).lower()
-    assert "refresh_pbip_model.py" in out and "--ui-refresh --canaries" in out
+    assert "refresh_pbip_model.py" in out and "--pid <pid> --canaries" in out
     assert "check_bundle_sources.py" in out
     for phrase in ("terminate the run", "a human must act", "you cannot fix this yourself", "probe_live_source"):
         assert phrase not in out
@@ -453,4 +453,4 @@ def test_refresh_guidance_enforces_automatic_source_scope(  # pylint: disable=to
     if mismatch:
         assert "automatic source scope: expected sources: Orders: database" in capsys.readouterr().out
     assert parsed.automatic_source_scope == scoped_args.automatic_source_scope
-    assert parsed.ui_refresh and parsed.pid == 123 and parsed.canaries == ["Orders"]
+    assert parsed.pid == 123 and parsed.canaries == ["Orders"]

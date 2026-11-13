@@ -169,7 +169,7 @@ def test_publication_rejects_withheld_claims(built: Path) -> None:
     for surface in ("README", "plugin description"):
         path = built / ("README.md" if surface == "README" else ".claude-plugin/marketplace.json")
         original = path.read_bytes()
-        for claim in ("ImageSave", "cache.abf", "pbip-model-refresh"):
+        for claim in ("hasUnsavedChanges", "cache.abf", "pbip-model-refresh"):
             advertisement = f"\nThis plugin includes {claim} for local model persistence.\n"
             text = original.decode("utf-8")
             if surface == "README":

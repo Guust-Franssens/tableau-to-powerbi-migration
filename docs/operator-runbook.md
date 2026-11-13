@@ -140,23 +140,18 @@ Which is which ✅ verified by reading every `Add-Check`/`Add-Cli` tier in `pref
 | `engine: plugin installed` (`engine: single source` only when `engine_source.py` cannot report) | **yes** — step 5 resolves the plugin (§1.2) | yes |
 | `cli: powerbi-report-author` + its version floor | no | yes — it is the PBIR validator |
 | `plugin: powerbi-authoring@…`, `skill bundles installed`, `skill bundles match published plugin` | no | yes |
-| `cli: npx`, `cli: powerbi-desktop`, `Power BI Desktop`, **`PBI_DESKTOP_PATH`** | no | yes |
+| `cli: npx`, `cli: powerbi-desktop`, `Power BI Desktop`, `adomd_client` | no | yes |
 | `cli: dotnet` | no | yes — offline TMDL validator |
 
 And the reverse trap, which is the more dangerous direction: **`az` is tiered `optional`, but step 6
 cannot run without it** ✅ verified — `deploy_estate.py` mints its token by shelling out to
 `az account get-access-token`. A green preflight is not a green light for the deploy; §1.3b is.
 
-⚠️ **`PBI_DESKTOP_PATH` is the one that stops a cold start** (⚠️ reported: ~5 minutes lost,
-2026-08-13). A machine with everything else in place reports NOT READY with:
-
-```
-[MISS] PBI_DESKTOP_PATH (bridge exe pin) - not set - the bridge is using its own version-pinned discovery
-```
-
-It is critical for a real reason — it removes a mismatch rather than detecting one, so a Desktop
-auto-update stops silently breaking the Bridge — but it gates **nothing in steps 1–6**. See §1.4 for
-how to set it, including why the hint preflight prints does not fix your current shell.
+`adomd_client` loads `Microsoft.PowerBI.AdomdClient.dll` from beside the installed Desktop through
+`pythonnet`. It misses with `pythonnet_missing` (install `pythonnet` into the venv) or
+`assembly_missing` (install or repair Desktop); there is no separate client download. It gates
+**nothing in steps 1 to 6**. `PBI_DESKTOP_PATH` is an optional override, not a pin: unset is fine, a
+valid path is used, and a dead path is a WARN (ignored; the installed Desktop is used). See §1.4.
 
 `-CheckUpstream` costs ~3s of network and is **advisory only**. It is the only check that asks *"has
 the world moved"* rather than *"is what I have good enough"* — every other check compares against a
@@ -567,23 +562,11 @@ of its prerequisites are checked *early*, so do them the day before.
 
 **Two prerequisites, and preflight can only see one of them.**
 
-**a. `PBI_DESKTOP_PATH` — critical in preflight, and the hint it prints will not fix your shell.**
-✅ verified from `preflight.ps1`: it is tiered `critical`, and unset it reports
-`not set - the bridge is using its own version-pinned discovery`. It exists to *remove* a mismatch
-rather than detect one — the Bridge honours it and it wins over the Bridge's built-in, version-pinned
-exe discovery, so a Desktop auto-update stops silently breaking every downstream call.
-
-⚠️ The printed hint is `setx PBI_DESKTOP_PATH "…" (then reopen the shell)`. **`setx` does not affect
-an already-open shell**, and an agent's tool shells inherit the parent environment — so following it
-verbatim leaves preflight failing in the session you are actually working in. Set both:
-
-```powershell
-$exe = (Join-Path (Get-AppxPackage Microsoft.MicrosoftPowerBIDesktop).InstallLocation 'bin\PBIDesktop.exe')
-$env:PBI_DESKTOP_PATH = $exe     # this shell, right now
-setx PBI_DESKTOP_PATH $exe       # every future shell
-```
-
-Re-set it after a Desktop auto-update — preflight's `version: Power BI Desktop` WARN is the reminder.
+**a. Desktop and its bundled client: preflight checks both, and nothing needs pinning.** Open a model
+with `python scripts/open_desktop.py <pbip>`. It looks Desktop up live at every launch (a valid
+`PBI_DESKTOP_PATH` override, else the Store install, else classic), prints the PID, waits for the
+bridge and fits the frame; `--check` starts nothing and prints which exe it would use. Leave
+`PBI_DESKTOP_PATH` unset unless you need a specific install. A Desktop auto-update needs no re-pin.
 
 **b. Privacy Levels — preflight cannot check this at all**, and states so honestly rather than
 asserting a check it cannot perform (Desktop is MSIX; the setting lives in the package's private
@@ -624,7 +607,8 @@ Ask **once**, in one message, reusing known answers:
    numeric comparison `none|required` (**no default**);
 4. **if we hit a wall — stop, or degrade?** (pre-authorising the fallback is what lets an unattended
    run survive one);
-5. **who drives refreshes?** — `scripted` (default), `operator` or manual `xmla`.
+5. **who drives refreshes?** `uia` (default automated route) or `operator` (human-driven Desktop
+   handoff only).
 
 Record exact source/working paths, dependencies, limitations and reference provider/capabilities/
 grade/ceiling. Pass the brief in every delegation, providers first; never fabricate a spec.
@@ -653,21 +637,24 @@ never pretend a source was reachable or infer authorization.
 
 #### Refresh strategy and evidence
 
-The verified contract comes from `refresh_pbip_model.py`'s constants and branches; re-read them
-before quoting a timeout. This runbook, not stale skill prose, owns the strategy explanation.
+The verified contract comes from `refresh_pbip_model.py`; re-read it before quoting a timeout. The
+[refresh skill](../.github/skills/pbip-model-refresh/SKILL.md) owns the procedure.
 
-| strategy/path | who drives it / ceiling | evidence |
+| strategy | who drives it / ceiling | evidence |
 |---|---|---|
-| **`scripted`** default full refresh | `refresh_pbip_model.py`; **3600 s** absolute backstop, configurable with `--refresh-absolute-timeout-seconds` | Rows only when `ProgressReportCurrent` emits counts; otherwise elapsed heartbeat. Traced silence warning defaults to **120 s** (`--progress-liveness-seconds`) and is **non-fatal**. |
-| Trace setup unavailable | Same absolute backstop, not a return to 300 s | Loses trace row counts/liveness. AMO/TOM availability changes observability and the `ImageSave` persist path, not the timeout. |
-| `--no-progress`, `--calculate-only` / `--measures-only` | Legacy XMLA **300 s** plus **30 s** outer grace | Calculate-only does not reread source rows. |
-| `operator` | Agent prepares, stops and asks the operator to hit Refresh in Desktop; no script-imposed ceiling | UI per-table row counts. |
-| `xmla` | Manual XMLA/TOM; no script-imposed ceiling | Partial evidence; **whole-database** refresh when calculated objects depend on refreshed tables. |
+| **`uia`** (default) | `refresh_pbip_model.py --pid <pid>`: Desktop's own Refresh and guarded Save through UI Automation; **3600 s** absolute backstop, configurable with `--refresh-absolute-timeout-seconds` | Always-on `REFRESH_STATUS` lines (phase, Process job count, dialog title) and a `REFRESH_SUMMARY`; only the `REFRESH:` verdict decides. |
+| `operator` | Agent prepares, stops and asks the operator to hit Refresh and Save in Desktop; never an automated fallback; no script-imposed ceiling | UI per-table row counts; then the same canary and cold-reopen evidence. |
 
-Small tables can emit only Begin/End events, so trace setup does not guarantee row-count evidence.
+The old recalculation, table-narrowing and progress-tuning flags were removed and fail at argument
+parsing with exit 2. DAX-only edits need no source refresh: MCP Calculate (MCP-made DAX) or a reload
+of a clean Desktop (file-made DAX), then `--save-only`. MCP never runs a source refresh.
+`DATA_OK + PERSISTED` means the guarded Save ran and its checks passed; it is not durability proof.
+The handoff still needs warm-cache canaries, a cold reopen and `check_migration_progress.py --handoff`
+exit 0.
+
 Read a self-timed tool's announced deadline; do not kill it at the generic external-system cap.
-A **detected** credential modal aborts with a specific error; an unclassifiable timeout is unknown,
-not proof of a credential failure. The absolute backstop is fatal; a liveness warning is not.
+Any Desktop dialog is a human stop (`DIALOG_NEEDS_HUMAN`, exit 3); an unclassifiable timeout is
+unknown, not proof of a credential failure.
 
 #### Run identity and cost attribution
 

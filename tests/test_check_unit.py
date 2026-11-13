@@ -4651,7 +4651,7 @@ def _r2_seal(
     import iteration_receipt as receipt
     from probe_desktop_query import DesktopIdentity
     from png_fixtures import valid_png
-    from refresh_pbip_model import ImageObservation
+    from refresh_pbip_model import SavedCache
 
     events = []
     bound = capture.BoundDesktop(
@@ -4671,12 +4671,8 @@ def _r2_seal(
             ],
         }
 
-    def refresh(port: int, tables: object, **kwargs: object) -> object:
-        assert (port, tables, kwargs) == (
-            55001,
-            None,
-            {"refresh_type": "full", "desktop_pid": 1234, "bound": bound, "return_observation": True},
-        )
+    def refresh(held: object, cache: Path, **kwargs: object) -> object:
+        assert held is bound and cache == package / R2_MODEL / ".pbi" / "cache.abf" and not kwargs
         events.append("full-database-refresh")
         if unavailable == "refresh":
             raise capture.ObservationUnavailable("TOOL_UNAVAILABLE")
@@ -4689,19 +4685,16 @@ def _r2_seal(
             return None
         return (capture.CanaryObservation(bound.catalogue, "Sales", "EVALUATE TOPN(1, 'Sales')", rows, bound.identity),)
 
-    def persist(port: int, cache: Path, model: Path, **kwargs: object) -> object:
-        assert port == 55001 and kwargs == {"bound": bound, "return_observation": True}
-        assert model == package / R2_MODEL and cache == package / R2_MODEL / ".pbi" / "cache.abf"
-        events.append("image-readback")
+    def persist(held: object, cache: Path, **kwargs: object) -> object:
+        assert held is bound and cache == package / R2_MODEL / ".pbi" / "cache.abf" and not kwargs
+        events.append("cache-readback")
         if unavailable == "persistence":
             raise capture.ObservationUnavailable("TOOL_UNAVAILABLE")
         blob = b"R2 synthetic A1 cache bytes; software observations, not native ABF qualification."
         cache.parent.mkdir(exist_ok=True)
         cache.write_bytes(blob)
         digest = hashlib.sha256(blob).hexdigest()
-        return capture.PersistenceObservation(
-            bound.catalogue, 1604, ImageObservation(digest, len(blob), digest, len(blob)), bound.identity
-        )
+        return capture.SaveObservation(bound.catalogue, SavedCache(digest, len(blob)), bound.identity)
 
     clock = [0.0]
 
@@ -4720,9 +4713,9 @@ def _r2_seal(
     with monkeypatch.context() as native:
         native.setattr(capture, "bind_desktop", lambda pid: bound if pid == 1234 else pytest.fail("wrong PID"))
         native.setattr(capture, "bound_call", recheck)
-        native.setattr(capture, "refresh", refresh)
+        native.setattr(capture, "ui_refresh_observed", refresh)
         native.setattr(capture, "probe_observations", canaries)
-        native.setattr(capture, "image_save", persist)
+        native.setattr(capture, "ui_save_observed", persist)
         pending = capture.run_iteration(
             capture.IterationRequest(
                 package,
@@ -4808,14 +4801,14 @@ def test_r2_complete_reaches_every_gate_with_exact_pin_and_no_numeric_csv(
     package = _r2_package(tmp_path)
     _r2_expand_report(package)
     token, final, events = _r2_seal(package, monkeypatch)
-    assert events == ["full-database-refresh", "named-canary", "image-readback", *["frame"] * 6]
+    assert events == ["full-database-refresh", "named-canary", "cache-readback", *["frame"] * 6]
     assert [(page["page_id"], page["expected_visual_ids"]) for page in final["generated"]["pages"]] == [
         ("p1", ["v1", "v2"]),
         ("p2", ["v3"]),
     ]
     head = receipt.read_chain(package, token)[-1]
     assert head.receipt_bytes == (head.directory / receipt.RECEIPT_NAME).read_bytes()
-    assert final["generated"]["data_evidence"]["persistence"]["observation"]["image"]["commitment"] == "UNESTABLISHED"
+    assert final["generated"]["data_evidence"]["persistence"]["observation"]["cache"]["commitment"] == "UNESTABLISHED"
     with Image.open(package / "reference/tableau-Executive.png") as image:
         image.load()
         assert image.size == (320, 240)
@@ -5425,6 +5418,8 @@ def test_r2_neutral_a1_observations_do_not_mean_positive_data(
     requests = {"refresh": True, "persist": True, "canaries": ("Sales",)}
     if change.startswith("no-"):
         requests[change[3:]] = () if change == "no-canaries" else False
+    if change == "no-persist":
+        requests["refresh"] = False  # capture refuses --refresh without --persist
     token, _, _ = _r2_seal(
         package,
         monkeypatch,
@@ -5581,8 +5576,8 @@ def _r2_rewrite_receipt(package: Path, payload: dict) -> str:
     [
         ("binding", "A1_BINDING_MISMATCH"),
         ("catalogue", "A1_BINDING_MISMATCH"),
-        ("image", "A1_CACHE_MISMATCH"),
-        ("readback", "A1_CACHE_MISMATCH"),
+        ("cache-sha256", "A1_CACHE_MISMATCH"),
+        ("cache-size", "A1_CACHE_MISMATCH"),
         ("commitment", "SCHEMA"),
         ("empty-canary", "A1_CANARY_SET"),
         ("refused-canary", "a1_canaries_refused"),
@@ -5601,10 +5596,10 @@ def test_r2_receipt_observations_and_denominators_cannot_be_relabelled(
         facts["canaries"]["observation"][0]["identity"]["port"] += 1
     elif change == "catalogue":
         facts["refresh"]["observation"]["catalogue"] = OTHER_LUID
-    elif change in ("image", "readback", "commitment"):
-        image = facts["persistence"]["observation"]["image"]
-        image[{"image": "intended_sha256", "readback": "installed_sha256", "commitment": "commitment"}[change]] = (
-            "ESTABLISHED" if change == "commitment" else "f" * 64
+    elif change in ("cache-sha256", "cache-size", "commitment"):
+        cache = facts["persistence"]["observation"]["cache"]
+        cache[change.removeprefix("cache-")] = {"cache-sha256": "f" * 64, "cache-size": cache["size"] + 1}.get(
+            change, "ESTABLISHED"
         )
     elif change == "empty-canary":
         facts["canaries"]["observation"] = []

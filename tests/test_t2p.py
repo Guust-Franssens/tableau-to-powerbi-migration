@@ -396,11 +396,11 @@ STATUS_FROZEN_JSON = {
 }
 
 
-PIN_BLOCKER = {
-    "id": "desktop_pin",
-    "source": "process_environment",
-    "reason": "configured_path_missing",
-    "remedy": "refresh_current_process_pin",
+ADOMD_BLOCKER = {
+    "id": "adomd_client",
+    "source": None,
+    "reason": "pythonnet_missing",
+    "remedy": "restore_adomd",
 }
 
 
@@ -1603,27 +1603,20 @@ def test_status_presentation_has_no_extra_io(monkeypatch, tmp_path, capsys, json
         ),
         pytest.param(
             "preflight.ps1",
-            "-DoctorReason 'configured_path_missing'",
-            "-DoctorReason 'not_set'",
+            "$adomdReason = 'pythonnet_missing'",
+            "$adomdReason = 'assembly_missing'",
             "test_preflight_contract.py::test_doctor_actual_windows_child[blocked-ids1]",
-            "dead Desktop needs the exact owner ID/source/reason/remedy tuple",
+            "each ADOMD failure needs the exact owner ID/reason/remedy tuple",
             marks=pytest.mark.skipif(
                 os.name != "nt", reason="requires Windows PowerShell/PowerShell 7 on Windows and NTFS"
             ),
         ),
         (
             "t2p.py",
-            "verified, reload it and rerun doctor in the SAME invocation",
-            "verified, persist it again with setx for a later invocation",
+            '"adomd_client": ({"assembly_missing", "pythonnet_missing"}, "restore_adomd")',
+            '"adomd_client": ({"assembly_missing"}, "restore_adomd")',
             "test_doctor_all_blockers_sources_and_safe_remedies",
-            "dead Desktop needs a current-process same-invocation remedy",
-        ),
-        (
-            "t2p.py",
-            "Do not merely persist it again with setx or remove the pin to pass.",
-            "Remove the pin to pass.",
-            "test_doctor_all_blockers_sources_and_safe_remedies",
-            "dead Desktop must not be repersisted or unpinned just to pass",
+            "complete owner blockers must not be lost",
         ),
         (
             "t2p.py",
@@ -1647,8 +1640,7 @@ def test_status_presentation_has_no_extra_io(monkeypatch, tmp_path, capsys, json
             "except (ValueError, TypeError, UnicodeError, RecursionError):\n        return unavailable",
             'except (ValueError, TypeError, UnicodeError, RecursionError):\n        return {"availability":"available",'
             '"reason":"available","critical_missing":1,"recommended_warnings":0,"blockers":'
-            '[{"id":"desktop_pin","source":"process_environment","reason":"configured_path_missing",'
-            '"remedy":"refresh_current_process_pin"}]}',
+            '[{"id":"adomd_client","source":None,"reason":"pythonnet_missing","remedy":"restore_adomd"}]}',
             "test_doctor_unavailable_detail_preserves_native_policy",
             "malformed/noisy/unknown detail must be unavailable, never a guessed cause",
         ),
@@ -1836,7 +1828,7 @@ def test_doctor_all_blockers_sources_and_safe_remedies(monkeypatch, tmp_path, ca
         t2p.subprocess,
         "run",
         lambda *a, **k: subprocess.CompletedProcess(
-            a, 1, _preflight_bytes(PIN_BLOCKER, import_blocker, warnings=2), b""
+            a, 1, _preflight_bytes(ADOMD_BLOCKER, import_blocker, warnings=2), b""
         ),
     )
     monkeypatch.setattr(socket, "socket", lambda *a, **k: pytest.fail("doctor must not open a socket"))
@@ -1864,7 +1856,7 @@ def test_doctor_all_blockers_sources_and_safe_remedies(monkeypatch, tmp_path, ca
             {"source": "selected_env", "keys": ["TABLEAU_PAT_SECRET", "TABLEAU_PAT_VALUE"], "conflict": True},
             {"source": "environment", "keys": ["TABLEAU_PAT_SECRET"], "conflict": False},
         ], "losing-file conflict must be located in the selected file"
-        assert detail["preflight"]["blockers"] == [PIN_BLOCKER, import_blocker], (
+        assert detail["preflight"]["blockers"] == [ADOMD_BLOCKER, import_blocker], (
             "complete owner blockers must not be lost"
         )
         assert detail["preflight"]["recommended_warnings"] == 2
@@ -1877,16 +1869,13 @@ def test_doctor_all_blockers_sources_and_safe_remedies(monkeypatch, tmp_path, ca
             "canonical PAT preservation must precede legacy removal"
         )
         assert "If TABLEAU_PAT_VALUE holds the intended value, move it to TABLEAU_PAT_SECRET first." in captured.out
-        assert "PBI_DESKTOP_PATH is configured but its target was not found" in captured.out
+        assert (
+            "Preflight blocker: Power BI Desktop's bundled ADOMD client could not be loaded;"
+            " reason: pythonnet_missing.\nAction: install pythonnet into the Python that runs the toolkit;"
+            " otherwise install or repair Power BI Desktop; then rerun." in captured.out
+        )
         assert "Preflight blocker: Python cannot import lxml; reason: import_failed." in captured.out, (
             "every safe preflight blocker must be rendered"
-        )
-        assert "inherited process environment" in captured.out
-        assert "reload it and rerun doctor in the SAME invocation" in captured.out, (
-            "dead Desktop needs a current-process same-invocation remedy"
-        )
-        assert "Do not merely persist it again with setx or remove the pin to pass." in captured.out, (
-            "dead Desktop must not be repersisted or unpinned just to pass"
         )
         assert "Recommended warnings: 2 (non-blocking)." in captured.out
         assert "Preflight owner: preflight.ps1; native exit: 1." in captured.out
@@ -1929,11 +1918,11 @@ def test_doctor_alias_warning_is_nonblocking(monkeypatch, tmp_path, capsys, lega
         (b'{"critical_missing":0,"recommended_warnings":false,"blockers":[]}', b""),
         (b'{"critical_missing":0,"recommended_warnings":-1,"blockers":[]}', b""),
         (b'{"critical_missing":0,"blockers":[]}', b""),
-        (_preflight_bytes({**PIN_BLOCKER, "id": "PRIVATE_UNKNOWN_ID"}), b""),
-        (_preflight_bytes({**PIN_BLOCKER, "reason": "PRIVATE_UNKNOWN_REASON"}), b""),
-        (_preflight_bytes({**PIN_BLOCKER, "source": "PRIVATE_HOST_PATH"}), b""),
-        (_preflight_bytes({**PIN_BLOCKER, "remedy": "PRIVATE_HELPER_OUTPUT"}), b""),
-        (_preflight_bytes({**PIN_BLOCKER, "Detail": "PRIVATE_HINT_CANARY"}), b""),
+        (_preflight_bytes({**ADOMD_BLOCKER, "id": "PRIVATE_UNKNOWN_ID"}), b""),
+        (_preflight_bytes({**ADOMD_BLOCKER, "reason": "PRIVATE_UNKNOWN_REASON"}), b""),
+        (_preflight_bytes({**ADOMD_BLOCKER, "source": "PRIVATE_HOST_PATH"}), b""),
+        (_preflight_bytes({**ADOMD_BLOCKER, "remedy": "PRIVATE_HELPER_OUTPUT"}), b""),
+        (_preflight_bytes({**ADOMD_BLOCKER, "Detail": "PRIVATE_HINT_CANARY"}), b""),
     ],
 )
 def test_doctor_unavailable_detail_preserves_native_policy(
@@ -2006,7 +1995,7 @@ def test_doctor_preexisting_json_is_byte_equivalent(
         if native is None:
             raise OSError("PRIVATE_LAUNCH_EXCEPTION")
         return subprocess.CompletedProcess(
-            a, native, _preflight_bytes(PIN_BLOCKER) if native == 1 else _preflight_bytes(), b""
+            a, native, _preflight_bytes(ADOMD_BLOCKER) if native == 1 else _preflight_bytes(), b""
         )
 
     monkeypatch.setattr(t2p.subprocess, "run", child)

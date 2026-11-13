@@ -39,6 +39,7 @@ MD_LINK_RE = re.compile(r"\[[^\]]*\]\((?!https?:|mailto:|#)([^)\s]+)\)")
 FORWARDING_SHIMS = {
     "probe_desktop_query": ("pbip-model-refresh", "--table"),
     "refresh_pbip_model": ("pbip-model-refresh", "--ui-refresh"),
+    "open_desktop": ("pbip-model-refresh", "--check"),
     "set_ai_instructions": ("powerbi-ai-readiness", "--strict"),
     "check_ai_readiness": ("powerbi-ai-readiness", "--all"),
 }
@@ -61,6 +62,11 @@ PBIP_REFRESH_SKILL = SKILLS_DIR / "pbip-model-refresh" / "SKILL.md"
 LIVE_SOURCE_SKILL = SKILLS_DIR / "live-source-reachability" / "SKILL.md"
 CREDENTIAL_DOC = REPO_ROOT / "docs" / "data-source-credentials.md"
 SCRIPTS_README = REPO_ROOT / "scripts" / "README.md"
+AGENTS_DOC = REPO_ROOT / "AGENTS.md"
+RUNBOOK = REPO_ROOT / "docs" / "operator-runbook.md"
+CAPABILITY_WIRING = REPO_ROOT / "docs" / "agent-capability-wiring.md"
+# Refresh machinery the UIA-default change removed; teaching any of it hands the operator an exit 2.
+REMOVED_REFRESH_MACHINERY = ("--calculate-only", "--measures-only", "ImageSave", "NuGet")
 # Issue #831: any blocking dialog is a human stop, so a verdict table carries only these live tokens.
 LIVE_VERDICT_TOKENS = (
     "READY",
@@ -302,10 +308,10 @@ def _imported_top_level_names(script: Path) -> set[str]:
 def test_no_bundled_script_imports_a_module_that_only_exists_in_this_repo(skill_dir: Path) -> None:
     """Static counterpart to the copy-and-run gate above, which only sees imports that EXECUTE.
 
-    Both bundled scripts import their Windows dependencies lazily, inside functions (`_load_adomd`,
-    `_load_amo`), and the bundled suite monkeypatches ADOMD/AMO rather than reaching those bodies -
-    so a repo-local import added there would run in nobody's test, pass the copy-and-run gate, and
-    break only in the repo that copied the folder. `ast.walk` sees it whatever code path it is on.
+    Bundled scripts import their Windows dependencies lazily, inside functions (`_load_adomd_from`),
+    and the bundled suite fakes pythonnet/clr rather than loading the CLR - so a repo-local import
+    added there would run in nobody's test, pass the copy-and-run gate, and break only in the repo
+    that copied the folder. `ast.walk` sees it whatever code path it is on.
     """
     bundled = {path.stem for path in (skill_dir / "scripts").glob("*.py")}
     repo_local = {path.stem for path in (REPO_ROOT / "scripts").glob("*.py")}
@@ -542,7 +548,7 @@ def test_compact_cores_keep_owner_availability_and_evidence_direction() -> None:
 
 
 def test_semantic_core_keeps_runtime_identity_and_policy_owners() -> None:
-    """Keep unresolved #730 safeguards without claiming a current runtime qualification."""
+    """Keep the measured clean-reload rule and the local safeguards without a broader runtime claim."""
     text = SEMANTIC_GOTCHAS.read_text(encoding="utf-8")
     report = REPORT_GOTCHAS.read_text(encoding="utf-8")
     for boundary, rule in (
@@ -556,6 +562,7 @@ def test_semantic_core_keeps_runtime_identity_and_policy_owners() -> None:
         ("held-out refresh", "held out of the playbook"),
         ("refresh resolution", "Resolve that owner path in the fresh role or block the dependent handoff"),
         ("local precedence", "local custody/persist/export rules outrank generic upstream claims"),
+        ("clean reload", "reload of a clean Desktop (`hasUnsavedChanges: false`)"),
         ("no retirement", "no unproved workaround retires"),
         ("table coverage", "current-model row canaries for every commissioned import/live table"),
         ("durability", "commissioned persistence/cold-reopen checks"),
@@ -571,6 +578,7 @@ def test_semantic_core_keeps_runtime_identity_and_policy_owners() -> None:
     assert "host's supported capture/reload/identity route outranks generic upstream" in report, (
         "report local precedence"
     )
+    assert "reloads edited TMDL only into a clean Desktop (`hasUnsavedChanges: false`)" in report, "report clean reload"
     assert "an unreachable/skipped schema check is unverified, not a pass" in report, "report skipped schema"
 
 
@@ -692,7 +700,7 @@ def test_live_source_skill_routes_through_the_shipped_model_and_a_human_stop() -
     text = LIVE_SOURCE_SKILL.read_text(encoding="utf-8")
     for needle, diagnostic in [
         (r"python scripts\check_bundle_sources.py <bundle> --spec <spec>", "live-source skill lost static check"),
-        ("--ui-refresh --canaries", "live-source skill lost canary refresh"),
+        ("--pid <pid> --canaries", "live-source skill lost canary refresh"),
         ("**before dispatching builders**", "live-source skill lost builder order"),
         ("**A dialog is a human stop.**", "live-source skill lost human stop"),
         ("Never type, paste or store", "live-source skill lost no-secrets rule"),
@@ -704,6 +712,10 @@ def test_live_source_skill_routes_through_the_shipped_model_and_a_human_stop() -
             "live-source skill lost structural stop distinction",
         ),
         ("Never drop the flag or switch refresh routes", "live-source skill lost fail-closed qualification"),
+        (
+            "A refresh without `--automatic-source-scope` remains operator-only",
+            "live-source skill lost operator-only consent",
+        ),
         (
             "[<table> ...] --automatic-source-scope <expected-sources.json>",
             "live-source skill lost mandatory automatic source scope",
@@ -717,6 +729,36 @@ def test_live_source_skill_routes_through_the_shipped_model_and_a_human_stop() -
     assert "Offline, credential-free source checks" in static_row, "script index lost static source check"
     assert "M_PARAM_UNDEFINED" in static_row and "SOURCE_COLLAPSED" in static_row
     assert not _table_row(SCRIPTS_README, "probe_live_source.py"), "script index routes to retired live probe"
+
+
+def test_host_refresh_contract_is_uia_default_with_operator_handoff() -> None:
+    """One automated refresh (Desktop's own Refresh, then its guarded Save) plus a human handoff.
+
+    The removed flags fail at argument parsing, so guidance that still teaches them is a guaranteed
+    exit 2; the reload rule is the measured one (a dirty reload discards unsaved edits).
+    """
+    agents = " ".join(AGENTS_DOC.read_text(encoding="utf-8").split())
+    assert "refresh strategy (`uia` default or `operator` human handoff only)" in agents, "AGENTS lost uia default"
+    runbook = " ".join(RUNBOOK.read_text(encoding="utf-8").split())
+    for needle, diagnostic in (
+        ("`uia` (default automated route)", "runbook lost uia default"),
+        ("`operator` (human-driven Desktop handoff only)", "runbook lost operator handoff"),
+        ("REFRESH_STATUS", "runbook lost progress lines"),
+        ("fail at argument parsing with exit 2", "runbook lost removed-flag exit"),
+    ):
+        assert needle in runbook, diagnostic
+    skill = " ".join(PBIP_REFRESH_SKILL.read_text(encoding="utf-8").split())
+    for needle, diagnostic in (
+        ("`process_jobs=0` is not completion", "refresh skill lost typed completion"),
+        ("--save-only --pid <pid> --canaries", "refresh skill lost save-only"),
+        ("bridge reports `hasUnsavedChanges: false`; otherwise stop for a human", "refresh skill lost clean reload"),
+        ("A refresh without `--automatic-source-scope` is operator-only.", "refresh skill lost operator-only"),
+    ):
+        assert needle in skill, diagnostic
+    for retired in REMOVED_REFRESH_MACHINERY:
+        assert retired not in skill, f"refresh skill teaches removed machinery {retired}"
+        assert retired not in runbook, f"runbook teaches removed machinery {retired}"
+    assert _table_row(CAPABILITY_WIRING, "scripts/open_desktop.py"), "wiring lost open_desktop row"
 
 
 @pytest.mark.parametrize(
@@ -981,6 +1023,76 @@ def test_live_source_skill_routes_through_the_shipped_model_and_a_human_stop() -
             test_semantic_core_keeps_runtime_identity_and_policy_owners,
             "semantic runtime lost AI owner",
         ),
+        (
+            SEMANTIC_GOTCHAS,
+            "reload of a clean Desktop (`hasUnsavedChanges: false`)",
+            "reload of any Desktop",
+            test_semantic_core_keeps_runtime_identity_and_policy_owners,
+            "semantic runtime lost clean reload",
+        ),
+        (
+            REPORT_GOTCHAS,
+            "reloads edited TMDL only into a clean Desktop (`hasUnsavedChanges: false`)",
+            "reloads edited TMDL into any Desktop",
+            test_semantic_core_keeps_runtime_identity_and_policy_owners,
+            "report clean reload",
+        ),
+        (
+            LIVE_SOURCE_SKILL,
+            "--pid <pid> --canaries",
+            "--pid <pid> --ui-refresh --canaries",
+            test_live_source_skill_routes_through_the_shipped_model_and_a_human_stop,
+            "live-source skill lost canary refresh",
+        ),
+        (
+            LIVE_SOURCE_SKILL,
+            "A refresh without `--automatic-source-scope` remains operator-only",
+            "A refresh without `--automatic-source-scope` is automatic",
+            test_live_source_skill_routes_through_the_shipped_model_and_a_human_stop,
+            "live-source skill lost operator-only consent",
+        ),
+        (
+            AGENTS_DOC,
+            "refresh strategy (`uia` default",
+            "refresh strategy (`scripted` default",
+            test_host_refresh_contract_is_uia_default_with_operator_handoff,
+            "AGENTS lost uia default",
+        ),
+        (
+            RUNBOOK,
+            "`uia` (default automated route)",
+            "`scripted` (default automated route)",
+            test_host_refresh_contract_is_uia_default_with_operator_handoff,
+            "runbook lost uia default",
+        ),
+        (
+            PBIP_REFRESH_SKILL,
+            "reports `hasUnsavedChanges: false`; otherwise stop for a human",
+            "reports any state; reload anyway",
+            test_host_refresh_contract_is_uia_default_with_operator_handoff,
+            "refresh skill lost clean reload",
+        ),
+        (
+            PBIP_REFRESH_SKILL,
+            "A refresh without `--automatic-source-scope` is",
+            "A refresh without `--automatic-source-scope` is not",
+            test_host_refresh_contract_is_uia_default_with_operator_handoff,
+            "refresh skill lost operator-only",
+        ),
+        (
+            PBIP_REFRESH_SKILL,
+            "`--verify-only` is read-only.",
+            "`--verify-only` is read-only. Use `--calculate-only` after DAX edits.",
+            test_host_refresh_contract_is_uia_default_with_operator_handoff,
+            "refresh skill teaches removed machinery --calculate-only",
+        ),
+        (
+            CAPABILITY_WIRING,
+            "| `scripts/open_desktop.py` | `advanced` | Skill shim. |",
+            "",
+            test_host_refresh_contract_is_uia_default_with_operator_handoff,
+            "wiring lost open_desktop row",
+        ),
     ],
     ids=lambda case: case[-1],
 )
@@ -1062,3 +1174,4 @@ def test_compact_contract_noop_control(monkeypatch: pytest.MonkeyPatch) -> None:
     test_semantic_core_keeps_runtime_identity_and_policy_owners()
     test_credential_guidance_states_only_what_the_desktop_arbiter_establishes()
     test_live_source_skill_routes_through_the_shipped_model_and_a_human_stop()
+    test_host_refresh_contract_is_uia_default_with_operator_handoff()

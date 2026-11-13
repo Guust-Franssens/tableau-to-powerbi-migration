@@ -91,10 +91,9 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $results = New-Object System.Collections.Generic.List[object]
 
 function Add-Check([string]$Name, [string]$Tier, [bool]$Ok, [string]$Detail, [string]$Hint = '',
-    [string]$DoctorId = '', [string]$DoctorReason = '', [string]$DoctorRemedy = '', [string]$DoctorSource = '') {
+    [string]$DoctorId = '', [string]$DoctorReason = '', [string]$DoctorRemedy = '') {
     $blocker = if ($Tier -eq 'critical' -and -not $Ok) {
-        [ordered]@{ id = $DoctorId; source = $(if ($DoctorSource) { $DoctorSource } else { $null })
-            reason = $DoctorReason; remedy = $DoctorRemedy }
+        [ordered]@{ id = $DoctorId; source = $null; reason = $DoctorReason; remedy = $DoctorRemedy }
     } else { $null }
     $results.Add([pscustomobject]@{ Name = $Name; Tier = $Tier; Ok = $Ok; Detail = $Detail; Hint = $Hint
         DoctorBlocker = $blocker })
@@ -478,8 +477,8 @@ else {
 #   * powerbi-playbook plugin: repo-local skills still load in this repo; the critical bundle
 #     checks above enforce correctness when the installed plugin is present and shadowing the repo.
 #   * powerbi-modeling-mcp: useful authoring accelerator; local PBIP/TMDL edits can still proceed.
-#   * Power BI Desktop version drift: advisory re-verification trigger only; the exact bridge target
-#     is pinned by the recommended PBI_DESKTOP_PATH check below.
+#   * Power BI Desktop version drift: no check; open_desktop.py looks up the installed Desktop at
+#     each launch, so an update needs no action.
 # --- MCP servers ---
 $userMcp = Read-CopilotJson 'mcp-config.json'
 $workspaceMcp = $null
@@ -573,75 +572,44 @@ if ($CheckUpstream) {
 }
 
 
-# Get-DesktopPinVerdict decides PBI_DESKTOP_PATH's severity from operator BELIEF, not from whether
-# Desktop was eventually found via some OTHER path. Extracted to a function (not inlined) so the
-# three states (#86: unset / valid / dead) can be executed directly by
-# tests/test_preflight_contract.py without a real Desktop install, mirroring Get-TenantVerdict below.
-#
-# UNSET tells the truth: nothing is pinned, MSIX discovery is exactly what the operator gets and
-# expects (#124) - RECOMMENDED, a visible WARN, never a blocker.
-# VALID means the bridge and this script resolve the SAME exe - OK.
-# DEAD is a different belief, not a stricter version of unset: the operator set PBI_DESKTOP_PATH
-# deliberately, so they believe a specific build is selected and handled - and it silently is not.
-# The MSIX fallback papers over that belief with a DIFFERENT exe than the one named, which is
-# precisely the false-green class this whole script exists to prevent (#86) - CRITICAL, exit 1.
-function Get-DesktopPinVerdict([bool]$Configured, [bool]$Valid, [string]$ConfiguredPath, [string]$InstalledDesktop, [string]$FallbackExe) {
+# Get-DesktopPinVerdict: PBI_DESKTOP_PATH is optional. open_desktop.py and the Desktop check below use
+# it only when its file exists; otherwise they look up the installed Desktop at each launch. A versioned
+# Store path dies on every Desktop auto-update, and a dead pin is ignored, so it is a WARN, never a
+# blocker. A function so tests/test_preflight_contract.py can execute all three states (unset / valid
+# / dead) without a real Desktop install, mirroring Get-TenantVerdict below.
+function Get-DesktopPinVerdict([bool]$Configured, [bool]$Valid) {
     $dead = $Configured -and -not $Valid
-    $tier = if ($dead) { 'critical' } else { 'recommended' }
     $detail = if ($Valid) {
-        $ConfiguredPath
+        'set; its file is used at each launch'
     } elseif ($dead) {
-        "PBI_DESKTOP_PATH points at `"$ConfiguredPath`" which is not on disk; installed Desktop: $InstalledDesktop. The bridge honours this variable and will fail to launch until it is re-pinned."
+        'ignored; the installed Desktop is used'
     } else {
-        'not set - the bridge is using its own version-pinned discovery; needed only for the Desktop refresh/screenshot phase, not for the estate pipeline'
+        'not set; the installed Desktop is looked up at each launch'
     }
-    # The hint must work IN THE SHELL THAT READS IT. `setx` writes the user profile and is inherited
-    # only by processes started LATER - and an agent's tool shells inherit the environment of a
-    # parent that is already running, so "then reopen the shell" is advice they cannot act on.
-    # `$env:` is the fix that takes effect immediately; `setx` is offered second, for persistence,
-    # correctly labelled. It fires for BOTH the unset and the dead case (whenever Valid is false) - a
-    # critical dead pin needs the same actionable fix as a recommended unset one, just with a harder
-    # stop attached to it.
-    $hint = if ($FallbackExe) {
-        "THIS shell (takes effect now): `$env:PBI_DESKTOP_PATH = `"$FallbackExe`"   |   persist for NEW shells only (does NOT affect this one): setx PBI_DESKTOP_PATH `"$FallbackExe`""
-    } else {
-        'install Power BI Desktop first'
-    }
-    [pscustomobject]@{ Tier = $tier; Ok = $Valid; Detail = $detail; Hint = $hint }
+    $hint = if ($dead) { 'Unset PBI_DESKTOP_PATH, or point it at an existing PBIDesktop.exe.' } else { '' }
+    [pscustomobject]@{ Tier = 'recommended'; Ok = -not $dead; Detail = $detail; Hint = $hint }
 }
 
-#
-# TWO things are checked here, and the second one is the one that bites.
-#
-# 1. Is Desktop installed? (below)
-# 2. Can the BRIDGE find it? -- a different question with a different answer. Measured 2026-08-06:
-#    Desktop auto-updated 2.157.480.0 -> 2.157.627.0 mid-session. `Get-AppxPackage` (what THIS script
-#    uses) followed the move and reported [OK] with the new path, so preflight printed
-#    "Ready to migrate" -- and the very next `powerbi-desktop open` died with DESKTOP_EXE_NOT_FOUND,
-#    because the bridge resolves the exe from its OWN hard-coded list which still named ...480.0.
-#    A green preflight followed immediately by a broken Desktop call is the exact false-green class
-#    this script exists to prevent, so it must not happen again.
-#
-#    The bridge cannot be asked cheaply (only `open` resolves the exe; `status` returns
-#    not_connected without touching it), so instead of detecting the mismatch we REMOVE it:
-#    PBI_DESKTOP_PATH is honoured by the bridge and wins over its built-in discovery. Setting it
-#    makes Desktop auto-updates a non-event for every downstream call.
+# Launch Desktop through open_desktop.py, never through the bridge's `open`. Measured on bridge 1.0.0
+# (`powerbi-desktop`): its exe lookup tries PBI_DESKTOP_PATH, then fixed Program Files and
+# %LOCALAPPDATA%\Microsoft\WindowsApps paths, and does not find a Store install. open_desktop.py looks
+# up the installed Desktop at each launch: a valid pin, else the Store install, else the classic one.
+# This check uses the same order.
 $desktop = $null
 $desktopVia = ''
 $desktopPathConfigured = [bool]$env:PBI_DESKTOP_PATH
-$desktopPathValid = $desktopPathConfigured -and (Test-Path $env:PBI_DESKTOP_PATH)
-$desktopPathDead = $desktopPathConfigured -and -not $desktopPathValid
+$desktopPathValid = $desktopPathConfigured -and (Test-Path -LiteralPath $env:PBI_DESKTOP_PATH -PathType Leaf)
 if ($desktopPathValid) { $desktop = $env:PBI_DESKTOP_PATH; $desktopVia = 'PBI_DESKTOP_PATH' }
-$appx = Get-AppxPackage Microsoft.MicrosoftPowerBIDesktop -ErrorAction SilentlyContinue
 if (-not $desktop) {
-    $loc = $appx.InstallLocation
+    $loc = (Get-AppxPackage Microsoft.MicrosoftPowerBIDesktop -ErrorAction SilentlyContinue).InstallLocation
     if ($loc -and (Test-Path (Join-Path $loc 'bin\PBIDesktop.exe'))) {
         $desktop = (Join-Path $loc 'bin\PBIDesktop.exe')
-        $desktopVia = if ($desktopPathDead) { 'MSIX discovery (PBI_DESKTOP_PATH is set but dead)' } else { 'MSIX discovery' }
+        $desktopVia = 'Store install'
     }
 }
 if (-not $desktop) {
-    $classic = 'C:\Program Files\Microsoft Power BI Desktop\bin\PBIDesktop.exe'
+    $programFiles = if ($env:ProgramFiles) { $env:ProgramFiles } else { 'C:\Program Files' }
+    $classic = Join-Path $programFiles 'Microsoft Power BI Desktop\bin\PBIDesktop.exe'
     if (Test-Path $classic) { $desktop = $classic; $desktopVia = 'classic install' }
 }
 Add-Check 'Power BI Desktop' 'critical' ([bool]$desktop) `
@@ -649,23 +617,8 @@ Add-Check 'Power BI Desktop' 'critical' ([bool]$desktop) `
     'Install Power BI Desktop (Store/MSIX preferred) - needed for the refresh + screenshot verification loop.' `
     -DoctorId 'desktop_install' -DoctorReason 'executable_missing' -DoctorRemedy 'install_desktop'
 
-# The Desktop APP version is tracked like the two npm CLIs are, because it moves on its own schedule
-# and takes the bridge's exe discovery with it.
-if ($appx) {
-    $desktopKnownGood = '2.157.627.0'
-    Add-Check 'version: Power BI Desktop' 'recommended' ($appx.Version -eq $desktopKnownGood) `
-        "$($appx.Version)$(if ($appx.Version -eq $desktopKnownGood) { ' (known-good)' } else { " (known-good $desktopKnownGood)" })" `
-        "Desktop moved to $($appx.Version). Not an error - but re-set PBI_DESKTOP_PATH (below) and re-verify any version-specific Desktop behaviour."
-}
-
-# The mismatch-remover. A set PBI_DESKTOP_PATH means the bridge and this script resolve the SAME exe;
-# unset means the bridge is guessing from a version-pinned list and may already be wrong. See
-# Get-DesktopPinVerdict above for the tier decision (#124 unset -> recommended; #86 dead -> critical).
-$installedDesktop = if ($desktop -and $appx) { "$($appx.Version) at $desktop" } elseif ($desktop) { $desktop } else { 'not found' }
-$pinVerdict = Get-DesktopPinVerdict -Configured $desktopPathConfigured -Valid $desktopPathValid `
-    -ConfiguredPath $env:PBI_DESKTOP_PATH -InstalledDesktop $installedDesktop -FallbackExe $desktop
-Add-Check 'PBI_DESKTOP_PATH (bridge exe pin)' $pinVerdict.Tier $pinVerdict.Ok $pinVerdict.Detail $pinVerdict.Hint `
-    -DoctorId 'desktop_pin' -DoctorSource 'process_environment' -DoctorReason 'configured_path_missing' -DoctorRemedy 'refresh_current_process_pin'
+$pinVerdict = Get-DesktopPinVerdict -Configured $desktopPathConfigured -Valid $desktopPathValid
+Add-Check 'PBI_DESKTOP_PATH (optional Desktop pin)' $pinVerdict.Tier $pinVerdict.Ok $pinVerdict.Detail $pinVerdict.Hint
 
 # --- Privacy Levels: a MANUAL prerequisite this script cannot verify -------------------------------
 # Opening a model that spans more than one data source raises a modal ("Potential security risk: This
@@ -674,7 +627,7 @@ Add-Check 'PBI_DESKTOP_PATH (bridge exe pin)' $pinVerdict.Tier $pinVerdict.Ok $p
 #
 # It is worse for an agent than for a person: it blocks at LOAD, so it stalls before any refresh call
 # and no automation can dismiss it. Measured 2026-08-05, a run sat past 450s on this while
-# refresh_pbip_model.py's own 300s ceiling never fired - that ceiling wraps the XMLA refresh, not the
+# refresh_pbip_model.py's own refresh timeout never fired - that timeout covers the refresh, not the
 # open. To a supervising agent it looks like a hang with no error.
 #
 # This is stated rather than checked ON PURPOSE. Desktop ships as an MSIX package and keeps the setting
@@ -688,8 +641,8 @@ Add-Check 'Privacy Levels (manual)' 'optional' $true `
 # --- .NET SDK (builds tools/tmdl_oracle, the TMDL gate's parser) ---
 # NOTE: this replaced an older check for Microsoft.AnalysisServices.Tabular.dll under
 # the Copilot home's installed-plugins. The powerbi-authoring plugin no longer bundles Tabular Editor, so that
-# check could never pass. The .NET SDK is still needed to build/run the offline validator, but it does
-# NOT prove AMO/TOM or ADOMD assemblies exist in the NuGet cache; those file checks live below.
+# check could never pass. The .NET SDK is needed only to build/run the offline TMDL oracle; the
+# Desktop probe/refresh loads the ADOMD client that ships with Desktop (checked below).
 #
 # Since #254 this is load-bearing for a GATE, not only for an optional validator:
 # `check_datamodel.py` runs the TMDL oracle (tools/tmdl_oracle) to ask TmdlSerializer itself whether
@@ -697,57 +650,43 @@ Add-Check 'Privacy Levels (manual)' 'optional' $true `
 Add-Cli 'dotnet' 'critical' 'Install the .NET SDK - needed to build/run the TMDL oracle (tools/tmdl_oracle) that check_datamodel.py uses. Issue #413 retired 4 of the 5 redundant per-example tmdl_validate copies; the quadruple-axis-charts one remains (its unique DAX [bracket]-reference check has no replacement yet) - dotnet is needed for both.' `
     -DoctorId 'dotnet' -DoctorRemedy 'install_dotnet'
 
-# --- AMO/TOM client assembly (the pbip-model-refresh skill's progress trace + ImageSave persist) ---
-# `dotnet` being on PATH proves only that a restore COULD run. It does not prove the restored package is
-# already present on a firewalled machine. Mirror the ADOMD lesson below: console text is not proof;
-# presence of the DLL on disk is. Hence a file check, not a restore attempt.
-#
-# Severity: RECOMMENDED, not critical. AMO/TOM is needed for the Desktop refresh/save phase: without it
-# scripted refresh loses row-count progress and non-fatal liveness warnings, and ImageSave falls back
-# to the UI save path. The estate pipeline's parse/convert steps never open Desktop, so failing the
-# whole run here would recreate #124's false-blocker shape for a Desktop-only dependency. After #283,
-# the refresh still keeps its 3600s absolute backstop when AMO trace setup fails; the missing
-# capability is scripted observability and AMO ImageSave, not the timeout fix. This warning exists so
-# the operator chooses before work starts: restore AMO first, or choose the operator refresh strategy.
-$nugetPackagesRoot = if ($env:NUGET_PACKAGES) { $env:NUGET_PACKAGES } else { Join-Path $HOME '.nuget\packages' }
-$amoDll = Get-ChildItem -Path (Join-Path $nugetPackagesRoot 'microsoft.analysisservices.netcore.retail.amd64*') `
-    -Recurse -Filter 'Microsoft.AnalysisServices.Tabular.dll' -ErrorAction SilentlyContinue | Select-Object -First 1
-Add-Check 'AMO/TOM client (Desktop progress/ImageSave)' 'recommended' ([bool]$amoDll) `
-    $(if ($amoDll) { $amoDll.FullName } else { 'not in the nuget cache - progress reporting and liveness are unavailable, so scripted refresh runs blind; ImageSave falls back to UI; the 3600s absolute refresh backstop remains active' }) `
-    'Before a scripted refresh, restore AMO/TOM into the active NuGet global-packages cache, or prefer the operator refresh strategy and watch Desktop''s own row counter: dotnet new console -o $env:TEMP\amo --framework net8.0; dotnet add $env:TEMP\amo package Microsoft.AnalysisServices.NetCore.retail.amd64 --version 19.84.1  (throwaway project; the restore populates the cache this preflight and refresh_pbip_model.py read).'
-
-# --- ADOMD.NET client assembly (the pbip-model-refresh skill's live-Desktop probe + refresh) --------
-# AMO/TOM (Microsoft.AnalysisServices.NetCore.retail.amd64) and ADOMD.NET
-# (Microsoft.AnalysisServices.AdomdClient.NetCore.retail.amd64) are SEPARATE nuget packages - a machine
-# can have one and still be missing the other. That was the silent field failure this check exists for:
-# on a colleague's box the AdomdClient assembly was absent, so probe_desktop_query.py could not run a
-# live EVALUATE, and nothing flagged it up front. `dotnet add package` had even printed "Restored ... 0
-# Errors" while landing ZERO PackageReference (a net10.0 scratch project silently no-op'd the add) - so
-# console text is not proof; presence of the DLL on disk is. Hence a file check, not a restore attempt.
-#
-# It resolves the EXACT cache precedence the Python entry points use: `$env:NUGET_PACKAGES` when
-# non-empty, otherwise `$HOME/.nuget/packages`. That makes preflight predict probe_desktop_query.py's
-# ADOMD lookup and refresh_pbip_model.py's AMO/TOM lookup instead of checking a different cache. The
-# old Path.home()/os.path.expanduser("~") defaults were equivalent; the fixed gap is that none of the
-# three sites honoured dotnet's NUGET_PACKAGES override.
+# --- ADOMD client bundled with Desktop (the pbip-model-refresh skill's live-Desktop probe + refresh) ---
+# probe_desktop_query.py and refresh_pbip_model.py load Microsoft.PowerBI.AdomdClient.dll from beside
+# the running Desktop, through pythonnet on .NET Framework. So the check is the same load, run by
+# `open_desktop.py --check` in the Python that runs the toolkit, against the Desktop this script found.
 #
 # Severity: CRITICAL, by this file's own rule above — "critical if any persona's Definition of Done
 # depends on it, even when the dependency only fails later at handoff/validation time". It does, and
 # unconditionally: `pbi-semantic-builder`'s DoD step 8 is a HANDOFF GATE that runs
-# refresh_pbip_model.py (which imports `_load_adomd`) to refresh and SAVE `.pbi/cache.abf`, and
-# `pbi-report-builder`'s step 1 refuses to open Desktop without that file. So every migration that
-# ends in a report needs ADOMD — this is not the live-source-only scope it first appears to be.
-# Measured 2026-08-17: with only this lookup suppressed on an otherwise healthy machine, preflight
-# printed "Ready to migrate" and exited 0 while the probe exited 2 — reproducing exactly the silent
+# refresh_pbip_model.py to refresh and SAVE `.pbi/cache.abf`, and `pbi-report-builder`'s step 1
+# refuses to open Desktop without that file. So every migration that ends in a report needs ADOMD.
+# A preflight that prints "Ready to migrate" while the probe cannot load the client is the silent
 # false-green #199 was filed to remove. Do NOT downgrade this to recommended without also removing
 # the refresh/save gate from those two personas.
-$nugetPackagesRoot = if ($env:NUGET_PACKAGES) { $env:NUGET_PACKAGES } else { Join-Path $HOME '.nuget\packages' }
-$adomdDll = Get-ChildItem -Path (Join-Path $nugetPackagesRoot 'microsoft.analysisservices.adomdclient.netcore*') `
-    -Recurse -Filter 'Microsoft.AnalysisServices.AdomdClient.dll' -ErrorAction SilentlyContinue | Select-Object -First 1
-Add-Check 'ADOMD.NET client (Desktop probe/refresh)' 'critical' ([bool]$adomdDll) `
-    $(if ($adomdDll) { $adomdDll.FullName } else { 'not in the nuget cache - probe_desktop_query.py / refresh_pbip_model.py cannot reach an open Desktop model' }) `
-    'Restore the ADOMD.NET client (a DIFFERENT nuget package from the TOM/AMO one the .NET-SDK check covers), forcing a supported TFM so the add cannot silently no-op on a net10 default: dotnet new console -o $env:TEMP\adomd --framework net8.0; dotnet add $env:TEMP\adomd package Microsoft.AnalysisServices.AdomdClient.NetCore.retail.amd64 --version 19.84.1  (throwaway project; the restore populates the active NuGet global-packages cache the probe reads).' `
-    -DoctorId 'adomd_client' -DoctorReason 'assembly_missing' -DoctorRemedy 'restore_adomd'
+$adomdOk = $false
+$adomdReason = 'pythonnet_missing'
+$adomdDetail = 'not verified (Python unavailable)'
+if ($py) {
+    & python -c "import pythonnet" 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        $adomdDetail = 'pythonnet is not installed in this Python'
+    } else {
+        $adomdReason = 'assembly_missing'
+        $adomdLines = @(& python (Join-Path $repoRoot 'scripts\open_desktop.py') --check 2>$null | Where-Object { "$_".Trim() })
+        $adomdLast = if ($adomdLines.Count) { "$($adomdLines[-1])".Trim() } else { 'open_desktop.py --check reported nothing' }
+        $adomdDetail = $adomdLast
+        if ($LASTEXITCODE -eq 0) {
+            try {
+                $adomdVersions = $adomdLast | ConvertFrom-Json
+                $adomdDetail = "Desktop $($adomdVersions.desktop_version) ($($adomdVersions.exe_source)), ADOMD $($adomdVersions.adomd_version)"
+                $adomdOk = $true
+            } catch { $adomdOk = $false }
+        }
+    }
+}
+Add-Check 'ADOMD client (bundled with Desktop)' 'critical' $adomdOk $adomdDetail `
+    'Install pythonnet into the Python that runs the toolkit; otherwise install or repair Power BI Desktop. Then re-run.' `
+    -DoctorId 'adomd_client' -DoctorReason $adomdReason -DoctorRemedy 'restore_adomd'
 
 Add-Cli 'uv' 'optional' 'Install uv for env/dependency management (uv venv && uv sync).'
 Add-Cli 'az' 'optional' 'Azure CLI - only for Fabric REST / token-based operations.'

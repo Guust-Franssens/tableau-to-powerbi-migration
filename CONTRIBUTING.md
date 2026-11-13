@@ -246,8 +246,8 @@ If you edit a bundle that is also published, re-run `python scripts/build_plugin
 push, or `scripts/preflight.ps1` will flag `STALE in plugin` — the plugin copy shadows the repo copy
 for a subagent, so an unpublished edit is served stale and silently.
 
-`scripts/probe_desktop_query.py`, `scripts/refresh_pbip_model.py`, `scripts/set_ai_instructions.py`
-and `scripts/check_ai_readiness.py` are **forwarding shims** that `runpy` the bundled copies, so the
+`scripts/probe_desktop_query.py`, `scripts/refresh_pbip_model.py`, `scripts/open_desktop.py`,
+`scripts/set_ai_instructions.py` and `scripts/check_ai_readiness.py` are **forwarding shims** that `runpy` the bundled copies, so the
 existing `python scripts/…` invocations in the personas keep working.
 
 **Think before deleting them.** The stated goal was "delete once every caller points at the skill

@@ -68,6 +68,7 @@ EXPECTED_EXACT_SKIP_REASONS: frozenset[str] = frozenset(
         "shared-delete handle behavior is Windows-only",
         "native PrintWindow control is Windows-only",
         "Win32 process identity is Windows-only",
+        "the port owner is read through Windows PowerShell",
         "PowerShell (pwsh.exe) not available in PATH",
         "Windows-only (relies on real PID binding against Power BI Desktop)",
         "no wind-energy example model in this repo",

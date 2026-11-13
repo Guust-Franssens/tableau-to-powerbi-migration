@@ -4,7 +4,9 @@
 `.github/skills/pbip-model-refresh/tests/test_desktop_observer.py`. Measurements below predate the
 consolidation; renaming a suite does not remeasure it. **#831 update:** the live WPF/UIA and native
 window tests, and with them the `serial` and `gui` markers, were retired; `timing` is the one
-contended marker left. The measurements below are kept as history.
+contended marker left. **UIA-default update:** the observer's `timing` tests went with the XMLA route;
+the bundle's remaining `timing` controls live in `test_canary_data_gate.py`. The measurements below
+are kept as history.
 
 The full suite is the dominant cost in every agent iteration, and agents run it repeatedly. This page
 is the measured answer to "how do I run it fast without making it lie to me?".

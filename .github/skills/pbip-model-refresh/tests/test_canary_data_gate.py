@@ -103,7 +103,7 @@ class _Conn:
 
 
 def _wire(monkeypatch, module, conn: _Conn) -> None:
-    monkeypatch.setattr(module, "_load_adomd", lambda: lambda _dsn: conn)
+    monkeypatch.setattr(module, "_load_adomd", lambda _port=None: lambda _dsn: conn)
 
 
 # --- probe_desktop_query.probe: the read-only preflight verdict ---------------------------------
@@ -148,6 +148,7 @@ def test_main_maps_the_tables_flag_to_the_canary_list(monkeypatch) -> None:
     """`--tables A B` reaches `probe` as ["A", "B"]; the port is the discovered one."""
     seen: dict[str, object] = {}
     monkeypatch.setattr(probe_desktop_query, "discover_port", lambda pid: 52001)
+    monkeypatch.setattr(probe_desktop_query, "_load_adomd", lambda _port=None: None)
     monkeypatch.setattr(probe_desktop_query, "probe", lambda port, tables: seen.update(port=port, tables=tables) or 0)
     assert probe_desktop_query.main(["--pid", "111", "--tables", "A", "B"]) == 0
     assert seen == {"port": 52001, "tables": ["A", "B"]}
@@ -157,6 +158,7 @@ def test_main_maps_the_legacy_single_table_flag(monkeypatch) -> None:
     """`--table X` (legacy) becomes a one-name canary list, so old callers keep a model verdict."""
     seen: dict[str, object] = {}
     monkeypatch.setattr(probe_desktop_query, "discover_port", lambda pid: 52001)
+    monkeypatch.setattr(probe_desktop_query, "_load_adomd", lambda _port=None: None)
     monkeypatch.setattr(probe_desktop_query, "probe", lambda port, tables: seen.update(tables=tables) or 0)
     assert probe_desktop_query.main(["--pid", "111", "--table", "Orders"]) == 0
     assert seen["tables"] == ["Orders"]
@@ -176,7 +178,7 @@ def test_row_counts_falls_back_to_first_table_and_flags_implicit(monkeypatch) ->
     assert implicit is True
 
 
-# --- the verdict matrix: --tables is SCOPE, --canaries is VERIFICATION (round-4 finding 5) --------
+# --- the verdict matrix ----------------------------------------------------------------------------
 
 
 def _verdict(argv: list[str], results: list[tuple[str, int]], implicit: bool, capsys) -> str:
@@ -185,42 +187,13 @@ def _verdict(argv: list[str], results: list[tuple[str, int]], implicit: bool, ca
     return capsys.readouterr().out
 
 
-def test_canaries_flag_wins_over_the_tables_flag() -> None:
-    """When both are given, the VERIFICATION set is `--canaries`; `--tables` stays the refresh scope."""
-    args = refresh_pbip_model._build_arg_parser().parse_args(
-        ["--pid", "1", "--tables", "Orders", "--canaries", "Live", "Other"]
-    )
-    assert refresh_pbip_model._canary_tables(args) == ["Live", "Other"]
-
-
-def test_tables_still_supplies_canaries_when_it_is_the_only_flag() -> None:
-    """Existing callers keep a probe set - they just no longer get a model-level verdict from it."""
-    args = refresh_pbip_model._build_arg_parser().parse_args(["--pid", "1", "--tables", "Orders"])
-    assert refresh_pbip_model._canary_tables(args) == ["Orders"]
-
-
-def test_canaries_do_not_rescue_a_narrowed_refresh(capsys) -> None:
-    """Naming canaries alongside `--tables` still leaves every OTHER table unrefreshed."""
-    out = _verdict(
-        ["--pid", "1", "--tables", "Orders", "--canaries", "Orders", "--no-save"], [("Orders", 5)], False, capsys
-    )
-    assert "REFRESH: TABLES_OK 'Orders'" in out
-    assert "REFRESH: DATA_OK" not in out
-
-
-def test_verify_only_with_tables_is_still_data_ok(capsys) -> None:
-    """`--verify-only` never refreshes, so `--tables` narrowed nothing and the model verdict stands."""
-    out = _verdict(["--pid", "1", "--tables", "Orders", "--verify-only"], [("Orders", 5)], False, capsys)
-    assert "REFRESH: DATA_OK" in out
-
-
-def test_an_empty_canary_still_beats_every_other_verdict(capsys) -> None:
-    """NO_DATA outranks the scope downgrade: an empty table is the loudest fact in the run."""
-    out = _verdict(
-        ["--pid", "1", "--tables", "Orders", "Live", "--no-save"], [("Orders", 5), ("Live", 0)], False, capsys
-    )
+@pytest.mark.parametrize("mode", ["--no-save", "--save-only"])
+def test_an_empty_canary_still_beats_every_other_verdict(capsys, mode: str) -> None:
+    """NO_DATA outranks DATA_OK and SAVE_OK: an empty table is the loudest fact in the run."""
+    out = _verdict(["--pid", "1", "--canaries", "Orders", "Live", mode], [("Orders", 5), ("Live", 0)], False, capsys)
     assert "REFRESH: NO_DATA" in out
     assert "Live" in out
+    assert "_OK" not in out
 
 
 def _bound_connection(monkeypatch, conn):

@@ -26,88 +26,12 @@ import probe_desktop_query
 import refresh_pbip_model
 from _desktop_observer import (
     Observation,
-    CredentialUnknownError,
     DESKTOP_MAIN_CLASS_PREFIX,
-    DesktopGoneError,
-    DesktopUnreadyError,
     DialogFinding,
     DialogFoundError,
     DesktopWindow,
     inspect_desktop_observer,
 )
-from refresh_pbip_model import refresh
-
-
-class ParkedConnection:
-    """ADOMD stand-in whose command never returns until the test releases it."""
-
-    def __init__(self, released: threading.Event) -> None:
-        self.released = released
-
-    def Open(self) -> None:
-        """Match the ADOMD API surface."""
-
-    def CreateCommand(self):
-        """Return a command that blocks until released."""
-        return ParkedCommand(self.released)
-
-    def Close(self) -> None:
-        """Match the ADOMD API surface."""
-
-
-class ParkedCommand:
-    """Command stand-in that ignores CommandTimeout."""
-
-    CommandText = ""
-    CommandTimeout = 0
-
-    def __init__(self, released: threading.Event) -> None:
-        self.released = released
-
-    def ExecuteNonQuery(self) -> None:
-        """Block long enough that only the outer poll/deadline can end the test."""
-        self.released.wait(timeout=600)
-
-
-@pytest.fixture(name="parked")
-def parked_fixture(monkeypatch):
-    """Wire refresh() to a parked ADOMD connection."""
-    released = threading.Event()
-    conn = ParkedConnection(released)
-    monkeypatch.setattr(refresh_pbip_model, "_load_adomd", lambda: lambda _dsn: conn)
-    monkeypatch.setattr(refresh_pbip_model, "_catalog_id", lambda _conn: "catalog-1")
-    monkeypatch.setattr(refresh_pbip_model, "REFRESH_WALL_CLOCK_GRACE_SECONDS", 0.15)
-    yield released
-    released.set()
-
-
-class _FakeProgressMonitor:
-    """Minimal ``RefreshProgressMonitor`` stand-in so the progress-monitor wait branch is reachable.
-
-    That branch needs an AMO trace, which needs pythonnet and a live server; without this the branch is
-    untestable off Windows and its own copy of the poll loop went unexercised - which is how it kept a
-    t=0 raise helper and discarded its latches (#400 review, finding 1).
-    """
-
-    def mark_refresh_started(self) -> None:
-        """No-op."""
-
-    def print_liveness_warning_if_due(self) -> None:
-        """No-op."""
-
-    def seconds_until_liveness_warning(self) -> float:
-        """Never due, so the poll interval is what drives the loop."""
-        return 999.0
-
-    def print_evidence_heartbeat(self, elapsed: float, total: float) -> None:
-        """No-op."""
-
-    def close(self) -> None:
-        """No-op."""
-
-    def summary(self) -> str:
-        """Match the monitor's reporting surface."""
-        return "fake"
 
 
 MAIN_HWND = 0x10001
@@ -247,6 +171,13 @@ def model_folder(root: Path, name: str) -> Path:
     return root / f"{name}.SemanticModel" / ".pbi" / "cache.abf"
 
 
+def bridge_reports_the_model(monkeypatch, root: Path) -> None:
+    """The bridge reports a clean pid-111 Desktop that has `root/MyMigration.pbip` open."""
+    model_folder(root, "MyMigration")
+    instance = {"pid": 111, "currentFilePath": str(root / "MyMigration.pbip"), "hasUnsavedChanges": False}
+    monkeypatch.setattr(refresh_pbip_model, "_ui_bridge_preflight", lambda *_args: instance)
+
+
 def test_win32_fixture_finds_owned_dialog_and_keeps_instances_separate() -> None:
     """Faithful fixture: owned empty-title dialog on PID A, no dialog on concurrent PID B."""
     windows_by_pid = {
@@ -300,185 +231,14 @@ def test_an_unowned_zero_area_helper_window_does_not_block() -> None:
     assert state.dialog is None
 
 
-@pytest.mark.timing
-def test_direct_refresh_stops_at_t0_for_a_dialog_it_could_not_read(monkeypatch) -> None:
-    """An unreadable dialog present BEFORE we start anything must stop immediately, not wait for XMLA."""
-    monkeypatch.setattr(refresh_pbip_model, "_credential_state", lambda _pid: dialog_state())
-    monkeypatch.setattr(refresh_pbip_model, "_load_adomd", explode("_load_adomd"))
-
-    started = time.monotonic()
-    with pytest.raises(DialogFoundError) as excinfo:
-        refresh(port=1234, tables=["Orders"], timeout_sec=5, desktop_pid=111)
-    elapsed = time.monotonic() - started
-
-    assert excinfo.value.args[0].startswith("DIALOG_NEEDS_HUMAN ")
-    assert elapsed < 0.5
-
-
-@pytest.mark.timing
-def test_direct_refresh_raises_desktop_gone_fast_at_t0(monkeypatch) -> None:
-    """#158: a Desktop already dead at t=0 must bail immediately, never start the XMLA wait."""
-    reason = harvested_desktop_gone_reason()
-    monkeypatch.setattr(refresh_pbip_model, "_credential_state", lambda _pid: Observation(process_gone=reason))
-    monkeypatch.setattr(refresh_pbip_model, "_load_adomd", explode("_load_adomd"))
-
-    started = time.monotonic()
-    with pytest.raises(DesktopGoneError) as excinfo:
-        refresh(port=1234, tables=["Orders"], timeout_sec=5, desktop_pid=111)
-    elapsed = time.monotonic() - started
-
-    assert excinfo.value.reason == reason
-    assert elapsed < 0.5, f"t=0 process-gone path waited {elapsed:.3f}s instead of returning immediately"
-
-
-@pytest.mark.timing
-def test_refresh_poll_catches_late_modal(monkeypatch, parked) -> None:
-    """XMLA route keeps its early stop: any dialog appearing after XMLA starts ends the wait (#831 T8)."""
-    calls = {"count": 0}
-
-    def late_dialog(_pid: int, **_kw) -> Observation:
-        calls["count"] += 1
-        return dialog_state() if calls["count"] >= 2 else Observation()
-
-    monkeypatch.setattr(refresh_pbip_model, "_credential_state", late_dialog)
-    monkeypatch.setattr(refresh_pbip_model, "REFRESH_CREDENTIAL_POLL_SECONDS", 0.05)
-
-    started = time.monotonic()
-    with pytest.raises(DialogFoundError):
-        refresh(port=1234, tables=["Orders"], timeout_sec=10, desktop_pid=111, progress_enabled=False)
-
-    assert time.monotonic() - started < 1.0, "shortened test poll interval should catch the modal quickly"
-    assert calls["count"] >= 2
-    parked.set()
-
-
-def test_refresh_banner_is_flushed_and_heartbeat_reports_elapsed_total(monkeypatch, parked, capsys) -> None:
-    """The warning arrives before the wait, then emits elapsed/total countdowns."""
-    monkeypatch.setattr(refresh_pbip_model, "_credential_state", lambda _pid, **_kw: Observation())
-    monkeypatch.setattr(refresh_pbip_model, "REFRESH_CREDENTIAL_POLL_SECONDS", 0.05)
-    monkeypatch.setattr(refresh_pbip_model, "REFRESH_HEARTBEAT_SECONDS", 0.05)
-    printed: list[dict[str, object]] = []
-    original_print = print
-
-    def recording_print(*args, **kwargs):
-        printed.append({"text": " ".join(str(arg) for arg in args), "flush": kwargs.get("flush")})
-        original_print(*args, **kwargs)
-
-    monkeypatch.setattr("builtins.print", recording_print)
-
-    with pytest.raises(TimeoutError):
-        refresh(port=1234, tables=["Orders"], timeout_sec=0.1, desktop_pid=111, progress_enabled=False)
-
-    out = capsys.readouterr().out
-    assert "No blocking dialog on PID 111. Refreshing, bounded at 0.1s XMLA + 0.15s grace" in out
-    assert "DO NOT kill this process" in out
-    assert "still refreshing," in out and "/ 0s" in out
-    assert printed[0]["flush"] is True
-    parked.set()
-
-
-def test_unknown_refresh_banner_does_not_claim_no_dialog(monkeypatch, parked, capsys) -> None:
-    """A minimized owner emits the UNKNOWN banner and, once latched, ends as CREDENTIAL_UNKNOWN (#154, #153)."""
-    reason = harvested_minimized_reason()
-    monkeypatch.setattr(
-        refresh_pbip_model,
-        "_credential_state",
-        lambda _pid, **_kw: Observation(unknown_reason=reason),
-    )
-    monkeypatch.setattr(refresh_pbip_model, "REFRESH_CREDENTIAL_POLL_SECONDS", 0.05)
-    monkeypatch.setattr(refresh_pbip_model, "REFRESH_HEARTBEAT_SECONDS", 0.05)
-
-    with pytest.raises(CredentialUnknownError) as excinfo:
-        refresh(port=1234, tables=["Orders"], timeout_sec=0.1, desktop_pid=111, progress_enabled=False)
-
-    assert excinfo.value.reason == reason
-    out = capsys.readouterr().out
-    assert "Blocking-dialog check on PID 111 is UNKNOWN" in out
-    assert "No blocking dialog on PID 111" not in out
-    parked.set()
-
-
-def test_refresh_latches_desktop_unready_seen_only_by_initial_precheck(monkeypatch, parked) -> None:
-    """#158's twin of the #154 latch: DESKTOP_UNREADY at t=0 must survive a healthy first poll."""
-    reason = harvested_zero_window_alive_reason()
-    states = iter([Observation(desktop_unready=reason)])
-
-    def initial_unready_then_healthy(_pid: int, **_kw) -> Observation:
-        return next(states, Observation())
-
-    monkeypatch.setattr(refresh_pbip_model, "_credential_state", initial_unready_then_healthy)
-    monkeypatch.setattr(refresh_pbip_model, "REFRESH_CREDENTIAL_POLL_SECONDS", 0.05)
-
-    with pytest.raises(DesktopUnreadyError) as excinfo:
-        refresh(port=1234, tables=["Orders"], timeout_sec=0.1, desktop_pid=111, progress_enabled=False)
-
-    assert excinfo.value.reason == reason
-    parked.set()
-
-
-class _FakeClock:
-    """A monotonic clock the test advances explicitly, so the poll deadline is deterministic."""
-
-    def __init__(self) -> None:
-        self.now = 0.0
-
-    def monotonic(self) -> float:
-        """Return the current frozen time."""
-        return self.now
-
-    def advance(self, step: float) -> None:
-        """Move time forward by ``step`` seconds."""
-        self.now += step
-
-
-def test_refresh_and_save_wires_a_dialog_finding_to_exit_3(monkeypatch, capsys) -> None:
-    """#376 wiring: a DialogFoundError must surface at exit 3, never in the exit-1 hard-stop band."""
-
-    def _raise_dialog(*_args, **_kwargs):
-        raise DialogFoundError(111, dialog_finding())
-
-    monkeypatch.setattr(refresh_pbip_model, "refresh", _raise_dialog)
-    args = refresh_pbip_model._build_arg_parser().parse_args(["--pid", "111", "--tables", "Orders"])
-
-    exit_code = refresh_pbip_model._refresh_and_save(111, 5000, None, args)
-    out = capsys.readouterr().out
-
-    assert exit_code == 3, "a dialog finding must not reuse the credential hard stop's exit 1"
-    assert 'REFRESH: DIALOG_NEEDS_HUMAN pid=111; a Power BI Desktop dialog is open: "Enter your credentials"' in out
-    assert "BLOCKED_BY_DIALOG" not in out
-
-
-def test_refresh_and_save_wires_desktop_gone_to_exit_2(monkeypatch, capsys) -> None:
-    """#158 wiring: a DesktopGoneError must surface as the ERROR-family exit 2, distinct from UNKNOWN."""
-    reason = harvested_desktop_gone_reason()
-
-    def _raise_gone(*_args, **_kwargs):
-        raise DesktopGoneError(111, reason)
-
-    monkeypatch.setattr(refresh_pbip_model, "refresh", _raise_gone)
-    args = refresh_pbip_model._build_arg_parser().parse_args(["--pid", "111", "--tables", "Orders"])
-
-    exit_code = refresh_pbip_model._refresh_and_save(111, 5000, None, args)
-    out = capsys.readouterr().out
-
-    assert exit_code == 2, "DESKTOP_GONE must be the ERROR-family exit 2, distinct from UNKNOWN's exit 3"
-    assert "REFRESH: DESKTOP_GONE pid=111" in out
-    assert reason in out
-
-
 def test_refresh_main_returns_desktop_gone_before_port_discovery(monkeypatch, tmp_path: Path, capsys) -> None:
     """#158: the real mutating CLI entry point must terminate on a dead Desktop."""
-    model_folder(tmp_path, "MyMigration")
+    bridge_reports_the_model(monkeypatch, tmp_path)
     reason = harvested_desktop_gone_reason()
     monkeypatch.setattr(
         refresh_pbip_model,
-        "_bridge_status",
-        lambda: {"instances": [{"pid": 111, "currentFilePath": str(tmp_path / "MyMigration.pbip")}]},
-    )
-    monkeypatch.setattr(
-        refresh_pbip_model,
         "_credential_state",
-        lambda _pid: Observation(process_gone=reason),
+        lambda _pid, **_kw: Observation(process_gone=reason),
     )
     monkeypatch.setattr(refresh_pbip_model, "discover_port", explode("discover_port"))
 
@@ -492,12 +252,7 @@ def test_refresh_main_returns_desktop_gone_before_port_discovery(monkeypatch, tm
 
 def test_refresh_main_returns_desktop_unready_from_the_real_detector(monkeypatch, tmp_path: Path, capsys) -> None:
     """#158: an alive-but-window-less Desktop terminates the mutating CLI, on EVERY platform."""
-    model_folder(tmp_path, "MyMigration")
-    monkeypatch.setattr(
-        refresh_pbip_model,
-        "_bridge_status",
-        lambda: {"instances": [{"pid": 111, "currentFilePath": str(tmp_path / "MyMigration.pbip")}]},
-    )
+    bridge_reports_the_model(monkeypatch, tmp_path)
     monkeypatch.setattr(refresh_pbip_model, "_credential_state", real_detector_for_zero_windows(alive=True))
     monkeypatch.setattr(refresh_pbip_model, "discover_port", explode("discover_port"))
 
@@ -508,39 +263,6 @@ def test_refresh_main_returns_desktop_unready_from_the_real_detector(monkeypatch
     assert out.startswith("REFRESH: DESKTOP_UNREADY")
     assert harvested_zero_window_alive_reason() in out
     assert "minimiz" not in out.lower(), "a window-less Desktop must never be reported as minimized"
-
-
-def test_refresh_main_latches_unknown_from_its_own_precheck(monkeypatch, tmp_path: Path, capsys) -> None:
-    """#154: main's first UNKNOWN survives port and identity work before refresh starts."""
-    model_folder(tmp_path, "MyMigration")
-    reason = harvested_minimized_reason()
-    monkeypatch.setattr(
-        refresh_pbip_model,
-        "_bridge_status",
-        lambda: {"instances": [{"pid": 111, "currentFilePath": str(tmp_path / "MyMigration.pbip")}]},
-    )
-    monkeypatch.setattr(
-        refresh_pbip_model,
-        "_credential_state",
-        lambda _pid: Observation(unknown_reason=reason),
-    )
-    monkeypatch.setattr(refresh_pbip_model, "discover_port", lambda _pid: 52001)
-    monkeypatch.setattr(refresh_pbip_model, "_identity_gate", lambda _port, _cache: True)
-
-    def assert_initial_state(_port, _tables, _timeout, *, desktop_pid, initial_state=None):
-        del desktop_pid
-        assert initial_state is not None
-        assert initial_state.unknown_reason == reason
-        raise CredentialUnknownError(111, initial_state.unknown_reason)
-
-    monkeypatch.setattr(refresh_pbip_model, "refresh", assert_initial_state)
-
-    exit_code = refresh_pbip_model.main(["--pid", "111"])
-    out = capsys.readouterr().out
-
-    assert exit_code == 3
-    assert "REFRESH: CREDENTIAL_UNKNOWN" in out
-    assert reason in out
 
 
 def test_probe_query_main_returns_desktop_gone_before_port_discovery(monkeypatch, capsys) -> None:
@@ -623,6 +345,7 @@ def test_probe_query_worker_cannot_print_after_credential_verdict(monkeypatch, c
     monkeypatch.setattr(probe_desktop_query, "_credential_state", late_dialog)
     monkeypatch.setattr(probe_desktop_query, "PREFLIGHT_CREDENTIAL_POLL_SECONDS", 0.05)
     monkeypatch.setattr(probe_desktop_query, "discover_port", lambda _pid: 52001)
+    monkeypatch.setattr(probe_desktop_query, "_load_adomd", lambda _port=None: None)
     monkeypatch.setattr(probe_desktop_query, "probe", fake_probe)
 
     exit_code = probe_desktop_query.main(["--pid", "111", "--canaries", "Orders"])
@@ -1000,16 +723,11 @@ def test_a_title_stdout_cannot_encode_still_stops_at_exit_3(monkeypatch, tmp_pat
     """A Polish, Chinese, emoji or lone-surrogate title on a cp1252 pipe is escaped, never a crash at exit 1."""
     out = io.TextIOWrapper(io.BytesIO(), encoding="cp1252")
     monkeypatch.setattr(sys, "stdout", out)
-    model_folder(tmp_path, "MyMigration")
-    monkeypatch.setattr(
-        refresh_pbip_model,
-        "_bridge_status",
-        lambda: {"instances": [{"pid": 111, "currentFilePath": str(tmp_path / "MyMigration.pbip")}]},
-    )
+    bridge_reports_the_model(monkeypatch, tmp_path)
     monkeypatch.setattr(
         refresh_pbip_model,
         "_credential_state",
-        lambda _pid: dialog_state(title="\u0179r\xf3d\u0142o \u6570 \U0001f512 \ud800"),
+        lambda _pid, **_kw: dialog_state(title="\u0179r\xf3d\u0142o \u6570 \U0001f512 \ud800"),
     )
     monkeypatch.setattr(refresh_pbip_model, "discover_port", explode("discover_port"))
     assert refresh_pbip_model.main(["--pid", "111"]) == 3

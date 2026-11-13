@@ -6,7 +6,7 @@ purpose: preflight the DATA-SOURCE CREDENTIAL gate for a Tableau -> Power BI mig
               whether Power BI will need a bound CONNECTION + CREDENTIAL (live DB source) or not
               (extract / flat file, which the toolkit materialises to CSV under a DataFolder). It
               writes nothing; a live source is proven by refreshing the shipped working copy through
-              the pbip-model-refresh skill (`--ui-refresh --canaries`).
+              the pbip-model-refresh skill (`--pid <pid> --canaries`).
            2. gate (service): given a published semantic model, read its datasources and trigger a
               bounded refresh. If it fails with `ModelRefreshFailed_CredentialsNotSpecified`, the
               credential has NOT been configured yet -> STOP and prompt the user before proceeding.
@@ -466,9 +466,9 @@ def _print_stop_directive(needs: int) -> None:
         "       in Power BI Desktop and refresh it with named canaries, one per live source:\n"
         "       Follow pbip-model-refresh SKILL.md, 'Automatic callers': derive <expected-sources.json>\n"
         "       from a trusted snapshot of the engine emission, never from the live model.\n"
-        "       Plain --ui-refresh without this scope is operator-only.\n"
+        "       A refresh without this scope is operator-only.\n"
         "         python .github/skills/pbip-model-refresh/scripts/refresh_pbip_model.py\n"
-        "           --pid <pid> --ui-refresh --canaries <table> [<table> ...] "
+        "           --pid <pid> --canaries <table> [<table> ...] "
         "--automatic-source-scope <expected-sources.json>\n"
         "\n"
         "  DO NOT stop and ask the user yet. A verdict of 'only a human can fix this' is the\n"
@@ -510,9 +510,9 @@ def _print_remediation() -> None:
         "  check never opened a connection. Measure on the shipped working copy; it decides:\n"
         "  Follow pbip-model-refresh SKILL.md, 'Automatic callers': derive <expected-sources.json>\n"
         "  from a trusted snapshot of the engine emission, never from the live model.\n"
-        "  Plain --ui-refresh without this scope is operator-only.\n"
+        "  A refresh without this scope is operator-only.\n"
         "      python .github/skills/pbip-model-refresh/scripts/refresh_pbip_model.py\n"
-        "        --pid <pid> --ui-refresh --canaries <table> [<table> ...] "
+        "        --pid <pid> --canaries <table> [<table> ...] "
         "--automatic-source-scope <expected-sources.json>\n"
         "============================================================"
     )

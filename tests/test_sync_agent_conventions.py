@@ -430,7 +430,7 @@ ROOT_CONTRACTS: dict[str, tuple[Path, tuple[str, ...]]] = {
             "fidelity bar including explicit numeric comparison `none|required`",
             "Numeric scope has **no default**",
             "stop-or-degrade policy",
-            "refresh strategy (`scripted`)",
+            "refresh strategy (`uia` default or `operator` human handoff only)",
         ),
     ),
     "credential-stop-outranks-autonomy": (
@@ -786,7 +786,7 @@ def test_semantic_ai_policy_is_skill_owned_with_a_narrow_override() -> None:
     assert "Unmeasured marker survival, service coverage or Copilot consumption cannot be claimed" in text, (
         "survival is not established"
     )
-    assert "**#730 remains unmeasured:**" in text, "do not pre-adopt a reload/runtime result"
+    assert "**Reload only a clean Desktop (`hasUnsavedChanges: false`):**" in text, "keep the measured reload rule"
 
 
 def test_semantic_ai_stamp_is_one_declared_batch() -> None:
@@ -924,9 +924,9 @@ def test_semantic_persona_is_net_negative_without_raising_its_target() -> None:
         ),
         (
             test_semantic_ai_policy_is_skill_owned_with_a_narrow_override,
-            "**#730 remains unmeasured:**",
-            "#730 proves reload preserves cache/markers:",
-            "do not pre-adopt a reload/runtime result",
+            "**Reload only a clean Desktop (`hasUnsavedChanges: false`):**",
+            "**Reload any Desktop:**",
+            "keep the measured reload rule",
         ),
     ],
 )
@@ -1010,7 +1010,7 @@ def test_model_custody_and_refresh_boundaries() -> None:
         "Use returned `connectionName` on every supported operation",
         "independently verify contents/current definitions against the exact working model",
         "Never Save stale Desktop memory over newer files or discard unexported work",
-        "Launch through resolved `PBIDesktop.exe`/`PBI_DESKTOP_PATH`",
+        "Open Desktop with `python scripts/open_desktop.py <pbip>`",
         "Held out of the playbook: missing host path blocks dependent handoff",
         "Require whole-model **`REFRESH: DATA_OK + PERSISTED`**",
         "real-row canaries for **every commissioned import/live table**",
@@ -1030,7 +1030,7 @@ def test_model_custody_and_refresh_boundaries() -> None:
         "dry-run-operator",
     ):
         role = _normalized(REPO_ROOT / ".github" / "agents" / f"{name}.agent.md")
-        assert "#730" in role and "unmeasured" in role.lower(), f"{name}: unmeasured host boundary"
+        assert "clean Desktop (`hasUnsavedChanges: false`)" in role, f"{name}: measured reload rule"
         assert "cold" in role and "persist" in role and "PID" in role, f"{name}: host custody retained"
         assert "upstream" in role, f"{name}: host override retained"
         if name in ("pbi-report-builder", "pbi-migration-validator", "dry-run-operator"):

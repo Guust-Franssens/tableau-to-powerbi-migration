@@ -60,7 +60,7 @@ semantic MCP writes or refresh. Model/cache defects belong to `pbi-semantic-buil
   live-Snowflake connectivity for **129 minutes / 298 tool calls** without ever surfacing the
   problem. Waiting is not progress.
   - **Cap it: ~2 minutes or 3 attempts, whichever comes first** — any unresponsive external system
-    (database/warehouse/gateway, MCP server, XMLA refresh, the Desktop bridge). Cap *relaunches* at 2
+    (database/warehouse/gateway, MCP server, the Desktop bridge). Cap *relaunches* at 2
     as well; "kill it and retry" is otherwise an unbounded loop.
   - **Unless the tool tells you it IS the timer** — some scripts self-bound and announce their own
     deadline. Measured: an agent applied the cap to such a script, killed it at 120 s and recorded
@@ -139,7 +139,8 @@ mtime/`PERSISTED`/an arbitrary row alone is insufficient. Otherwise stop and rou
 no self-refresh or semantic fields/M repair. Empty rendering is not a binding diagnosis.
 
 Host `.github\skills\pbip-model-refresh\SKILL.md` (“Order matters”, “Bind to the right instance”,
-persistence output) owns custody. **#730 UNMEASURED**: retain host capture/reload/PID identity,
+persistence output) owns custody. **Reload only a clean Desktop (`hasUnsavedChanges: false`)**; a dirty
+one is a human stop. Retain host capture/reload/PID identity,
 current-definition/export, refresh/persist/cache/cold-reopen constraints over upstream host/`--pid`
 bans or reload claims. Never Save stale Desktop state over disk edits. Log deviations; absent host owner blocks its step.
 
