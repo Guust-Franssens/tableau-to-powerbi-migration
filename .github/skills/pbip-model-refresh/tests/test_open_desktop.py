@@ -269,6 +269,21 @@ def test_startup_states_are_waited_through_until_ready_on_the_launched_file(
     assert json.loads(lines[-1])["pid"] == PID
 
 
+def test_desktop_exiting_after_a_waited_through_reply_stops_at_once(monkeypatch, capsys, launch) -> None:
+    alive = iter([True, False])
+    clock = _Clock()
+    monkeypatch.setattr(open_desktop, "time", clock)
+    monkeypatch.setattr(open_desktop, "_ui_desktop_alive", lambda pid: next(alive))
+    monkeypatch.setattr(open_desktop, "_ui_bridge_status", lambda command, pid, deadline: CANCELLED)
+    monkeypatch.setattr(open_desktop, "fit_launched_frame", lambda *_a: pytest.fail("frame fitted"))
+
+    assert open_desktop.main([str(launch.pbip)]) == 2
+    assert clock.sleeps == [2.0]
+    assert capsys.readouterr().out.splitlines()[-1] == (
+        f"OPEN_DESKTOP: ERROR PID {PID} not ready after 2 seconds (Desktop process gone); Desktop left open"
+    )
+
+
 def test_ready_on_a_different_file_is_refused(monkeypatch, capsys, launch, tmp_path) -> None:
     payloads = iter([_ready(), _ready(currentFilePath=str(tmp_path / "other.pbip"))])
     monkeypatch.setattr(open_desktop, "_ui_bridge_status", lambda command, pid, deadline: next(payloads))
