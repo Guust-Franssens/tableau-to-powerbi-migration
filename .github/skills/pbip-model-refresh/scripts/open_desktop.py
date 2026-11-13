@@ -22,9 +22,11 @@ refused. A .pbip that another Desktop lists as open by the same resolved absolut
 
 --refresh runs `refresh_pbip_model.py`'s refresh on the PID it just opened. That Desktop holds no
 human work, so its unsaved-changes flag is ignored. Afterwards it closes that PID with its engine
-child, so an idle Desktop never holds RAM, but only while the process holding the PID is still the one
-this run started (its start time is compared just before the kill). A failed run that ends on a dialog
-leaves it open for a human instead. With --no-save the refreshed data is discarded on close.
+child, so an idle Desktop does not stay in RAM, but only while the process holding the PID still has
+the start time read at launch (compared just before the kill). A failed run that ends on a dialog
+leaves it open for a human instead. An unreadable start time, a failed close or Ctrl+C during the
+launch wait also leaves that Desktop running; its PID was already printed. With --no-save the
+refreshed data is discarded on close.
 Exit codes: 0 ready (or check passed, or refresh verdict OK); 2 refused or failed; with --refresh the
 refresh verdict (1 data or persist failure, 3 needs a human, including Desktop left open on a dialog).
 """
@@ -98,8 +100,9 @@ def find_desktop() -> tuple[Path, str] | None:
 def _start(exe: Path, pbip: Path) -> int:
     """Start Desktop detached on `pbip` and return the PID to hold.
 
-    Measured on the Store build 2.160.579.0: the started PID is the Desktop process itself, not a
-    short-lived stub. If a build ever changes that, only this function changes.
+    Observed on the Store build 2.160.579.0: a run reached readiness with the PID this returns, and
+    readiness requires the bridge to report exactly that PID, so it is the Desktop process itself, not
+    a short-lived stub. If a build ever changes that, only this function changes.
     """
     flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     process = subprocess.Popen(  # pylint: disable=consider-using-with

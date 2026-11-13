@@ -71,7 +71,8 @@ verdict's: 0 OK, 1 data or persist failure, 2 refused or error, 3 a human is nee
   Otherwise the run tries to close the Desktop, but only while the process holding that PID still has
   the start time read at launch; a different or unproven process is never killed. If the close fails
   or is skipped, the run prints the PID and keeps the refresh verdict as its exit code, so a Desktop
-  can stay running after a successful refresh: check the last `OPEN_DESKTOP:` line.
+  can stay running after a successful refresh: check the last `OPEN_DESKTOP:` line. Ctrl+C during the
+  launch wait (up to 180 s) also leaves that Desktop open; its PID was printed at once.
 - `--no-save` discards the refreshed data on close.
 - This form passes no `--automatic-source-scope`, so it is operator-run only, like any scopeless
   refresh. An agent's automatic refresh keeps the two-step route below with the scope file.
