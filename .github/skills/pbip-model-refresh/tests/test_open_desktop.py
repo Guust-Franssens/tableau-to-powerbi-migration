@@ -208,7 +208,7 @@ def _ready(**instance) -> dict:
 
 
 def _host_error(**error) -> dict:
-    """The measured startup error payload (Desktop 2.160.579.0), with any error field overridable."""
+    """A measured startup error payload (Desktop 2.160.579.0), with any error field overridable."""
     fields = {
         "message": "Host is not ready to accept operations",
         "code": "BRIDGE_ERROR",
@@ -218,6 +218,9 @@ def _host_error(**error) -> dict:
         "details": {},
     }
     return {"status": "error", "instances": [{"pid": PID, "bridgeStatus": "error", "error": {**fields, **error}}]}
+
+
+CANCELLED = _host_error(message="The task was cancelled.", jsonRpcCode=-32800, retryable=False, retryAfterMs=None)
 
 
 class _Clock:
@@ -237,17 +240,19 @@ class _Clock:
         self.slept_to.append(self.now)
 
 
-def test_startup_states_are_waited_through_until_ready_on_the_launched_file(monkeypatch, capsys, launch) -> None:
-    """The measured sequence: untitled canvas, then "Host is not ready", then ready on the launched .pbip."""
-    payloads = iter(
-        [
-            _ready(),
-            _ready(currentFilePath=None),
-            _ready(currentFilePath=""),
-            _host_error(),
-            _ready(currentFilePath=os.path.normcase(str(launch.pbip.resolve()))),
-        ]
-    )
+@pytest.mark.parametrize(
+    "startup",
+    [
+        [_ready(), _ready(currentFilePath=None), _ready(currentFilePath=""), _host_error()],
+        [{"status": "not_connected", "instances": []}, CANCELLED],
+    ],
+    ids=["cold-untitled-then-host-not-ready", "warm-task-cancelled"],
+)
+def test_startup_states_are_waited_through_until_ready_on_the_launched_file(
+    monkeypatch, capsys, launch, startup
+) -> None:
+    """Both sequences measured on Desktop 2.160.579.0 end ready on the launched .pbip."""
+    payloads = iter([*startup, _ready(currentFilePath=os.path.normcase(str(launch.pbip.resolve())))])
     clock = _Clock()
     monkeypatch.setattr(open_desktop, "time", clock)
     monkeypatch.setattr(open_desktop, "_ui_bridge_status", lambda command, pid, deadline: next(payloads))
@@ -257,7 +262,7 @@ def test_startup_states_are_waited_through_until_ready_on_the_launched_file(monk
 
     assert open_desktop.main([str(launch.pbip)]) == 0
     assert next(payloads, None) is None
-    assert len(clock.sleeps) == 4
+    assert len(clock.sleeps) == len(startup)
     assert all(0 < seconds <= 2.0 for seconds in clock.sleeps)
     lines = capsys.readouterr().out.splitlines()
     assert lines[0] == str(PID)
@@ -276,33 +281,47 @@ def test_ready_on_a_different_file_is_refused(monkeypatch, capsys, launch, tmp_p
 
 
 @pytest.mark.parametrize(
-    ("payload", "reason"),
+    "payload",
     [
-        (_host_error(retryable=False), "bridge not ready or terminal error"),
-        (_host_error(message="Model failed to load"), "bridge not ready or terminal error"),
-        (_host_error(code="INTERNAL_ERROR"), "bridge not ready or terminal error"),
-        (_ready(pid=PID + 1), "bridge PID mismatch"),
-        ({"status": "ready", "instances": _ready()["instances"] * 2}, "ambiguous bridge instance"),
-        (_ready(error={"message": "load failed"}), "bridge application error"),
-        ({**_ready(), "error": "load failed"}, "bridge application error"),
+        _host_error(retryable=False),
+        _host_error(message="Model failed to load"),
+        _host_error(code="INTERNAL_ERROR"),
+        _ready(pid=PID + 1),
+        {"status": "ready", "instances": _ready()["instances"] * 2},
+        _ready(error={"message": "load failed"}),
+        {**_ready(), "error": "load failed"},
+        {"status": "starting"},
     ],
-    ids=["not-retryable", "other-message", "other-code", "other-pid", "two-instances", "instance-error", "error"],
+    ids=[
+        "not-retryable",
+        "other-message",
+        "other-code",
+        "other-pid",
+        "two-instances",
+        "instance-error",
+        "error",
+        "new",
+    ],
 )
-def test_other_bridge_states_still_abort_at_once(monkeypatch, capsys, launch, payload, reason) -> None:
-    polls = iter([payload])
-    monkeypatch.setattr(open_desktop, "_ui_bridge_status", lambda *_a: next(polls, None) or pytest.fail("polled again"))
-    monkeypatch.setattr(open_desktop, "fit_launched_frame", lambda *_a: pytest.fail("frame fitted"))
-
-    assert open_desktop.main([str(launch.pbip)]) == 2
-    assert capsys.readouterr().out.splitlines()[-1] == (
-        f"OPEN_DESKTOP: ERROR PID {PID} not ready after 0 seconds ({reason}); Desktop left open"
+def test_any_other_bridge_reply_is_waited_through_not_fatal(monkeypatch, capsys, launch, payload) -> None:
+    """Startup replies vary by Desktop version; only ready on the launched file ends the wait."""
+    payloads = iter([payload, _ready(currentFilePath=str(launch.pbip))])
+    clock = _Clock()
+    monkeypatch.setattr(open_desktop, "time", clock)
+    monkeypatch.setattr(open_desktop, "_ui_bridge_status", lambda *_a: next(payloads))
+    monkeypatch.setattr(
+        open_desktop, "fit_launched_frame", lambda *_a: types.SimpleNamespace(describe=lambda: "frame: fitted")
     )
+
+    assert open_desktop.main([str(launch.pbip)]) == 0
+    assert clock.sleeps == [open_desktop.STARTUP_POLL_SECONDS]
+    assert json.loads(capsys.readouterr().out.splitlines()[-1])["pid"] == PID
 
 
 def test_the_deadline_still_bounds_a_startup_that_never_settles(monkeypatch, capsys, launch) -> None:
     clock = _Clock()
     deadline = clock.now + open_desktop.READY_TIMEOUT_SECONDS
-    states = itertools.cycle([_ready(), _host_error()])
+    states = itertools.cycle([_ready(), _host_error(), CANCELLED])
     polls: list[float] = []
 
     def status(_command, _pid, held_deadline):

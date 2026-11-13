@@ -38,9 +38,10 @@ python scripts/open_desktop.py <pbip>
 ```
 
 It looks Desktop up live at every launch (a valid `PBI_DESKTOP_PATH` override, else Store, else
-classic), prints the PID at once, waits up to 180 s for bridge readiness and fits the frame. The last
-line is JSON `{"pid", "exe_source": "pin|appx|classic", "ready_seconds"}`, exit 0. On a dialog or a
-timeout it exits 2 with the PID in the error line. It never clicks or closes Desktop: close it
+classic), prints the PID at once, waits up to 180 s for the bridge to report that PID ready on that
+`.pbip` (startup replies in between are waited through) and fits the frame. The last
+line is JSON `{"pid", "exe_source": "pin|appx|classic", "ready_seconds"}`, exit 0. On a dialog, a
+timeout or ready on a different file it exits 2 with the PID in the error line. It never clicks or closes Desktop: close it
 yourself by that literal PID. `--check` starts nothing and prints the exe source and the Desktop and
 client file versions. A small frame collapses the Home ribbon. Measured: a 900x600 frame was refused
 before Invoke, and a maximized frame worked.
@@ -131,7 +132,7 @@ REFRESH_SUMMARY total=<n>s refresh=<n>s canaries=<n>s save=<n>s|skipped
 
 `REFRESH_STATUS` prints on every change and at least every 30 s. `process_jobs` counts the engine's
 `DISCOVER_JOBS` rows whose `JOB_DESCRIPTION` is `Process` (measured: 4 to 0 during a long refresh
-while Desktop's progress popup was up); `?` means unreadable, and `dialog=?` means the dialog check
+while Desktop's untitled progress popup showed as `dialog=""`); `?` means unreadable, and `dialog=?` means the dialog check
 did not complete. There is no percentage and no ETA, and
 progress never decides success. `REFRESH_SUMMARY` prints before the verdict, and after the refusal
 line when a run stops early (refusal, dialog, `NO_DATA`, timeout).
