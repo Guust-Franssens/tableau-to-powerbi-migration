@@ -553,6 +553,11 @@ def test_doctor_child_cannot_create_pycache(monkeypatch, tmp_path, capsys):
         ["doctor", "--show-values"],
         ["status"],
         ["status", "--run", "x", "--repair"],
+        ["desktop", "observe"],
+        ["desktop", "observe", "--pid", "abc"],
+        ["desktop", "observe", "--pid", "0"],
+        ["desktop", "observe", "--pid", "7", "--process-start", "007"],
+        ["desktop", "observe", "--pid", "7", "--hwnd", "1"],
     ],
 )
 def test_closed_surface_and_safe_syntax(argv, capsys):
@@ -808,7 +813,7 @@ def test_status_rejects_relative_without_scan(capsys):
     assert result["run_location"] is None
 
 
-@pytest.mark.parametrize("command", ["doctor", "start", "assess", "status", "refresh"])
+@pytest.mark.parametrize("command", ["doctor", "start", "assess", "status", "refresh", "desktop"])
 def test_explicit_branch_reaches_owner(monkeypatch, capsys, command):
     calls = []
 
@@ -824,6 +829,7 @@ def test_explicit_branch_reaches_owner(monkeypatch, capsys, command):
         "assess": [],
         "status": ["--run", "relative"],
         "refresh": ["model.pbip"],
+        "desktop": ["observe", "--pid", "7"],
     }
     t2p.main([command, *arguments[command], "--json"])
     _json(capsys)
@@ -866,6 +872,76 @@ def test_refresh_human_mode_streams_the_child_and_adds_nothing(monkeypatch, tmp_
     captured = capfd.readouterr()
     assert captured.out.splitlines() == [f"CHILD {json.dumps([str((tmp_path / 'model.pbip').resolve()), '--refresh'])}"]
     assert captured.err == ""
+
+
+def _observation_line(state: str, pid: str = "123") -> str:
+    return json.dumps({"schema": "desktop.observation.v2", "pid": pid, "state": state})
+
+
+def _fake_observe_owner(root: Path, stdout: str, code: int) -> Path:
+    """A stand-in --observe CLI: records its argv, writes CHILD_STDERR, prints `stdout`, exits `code`."""
+    script = root / t2p.REFRESH_OWNER
+    script.parent.mkdir(parents=True)
+    argv_file = root / "argv.json"
+    script.write_text(
+        "import json, sys\n"
+        f"open({str(argv_file)!r}, 'w').write(json.dumps(sys.argv[1:]))\n"
+        "print('CHILD_STDERR', file=sys.stderr)\n"
+        f"sys.stdout.write({stdout!r})\n"
+        f"sys.exit({code})\n",
+        encoding="utf-8",
+    )
+    return argv_file
+
+
+@pytest.mark.parametrize(
+    ("stdout", "code", "status", "exit_code", "evidence"),
+    [
+        (_observation_line("READY") + "\n", 0, "ok", 0, True),
+        (_observation_line("HUMAN_ACTION_REQUIRED") + "\n", 3, "cannot_establish", 3, True),
+        (_observation_line("READY") + "\n", 3, "error", 1, False),
+        (_observation_line("HUMAN_ACTION_REQUIRED") + "\n", 0, "error", 1, False),
+        (_observation_line("READY") + "\n" + _observation_line("READY") + "\n", 0, "error", 1, False),
+        (_observation_line("READY", pid="999") + "\n", 0, "error", 1, False),
+        (_observation_line("READY") + "\n", 2, "error", 2, False),
+    ],
+    ids=["ready", "dialog", "ready_exit3", "dialog_exit0", "two_lines", "other_pid", "bad_argument"],
+)
+def test_desktop_observe_envelope_follows_the_child_observation(
+    monkeypatch, tmp_path, capfd, stdout, code, status, exit_code, evidence
+):
+    argv_file = _fake_observe_owner(tmp_path, stdout, code)
+    monkeypatch.setattr(t2p, "ROOT", tmp_path)
+
+    assert t2p.main(["desktop", "observe", "--pid", "123", "--process-start", "456", "--json"]) == exit_code
+    captured = capfd.readouterr()
+    result = json.loads(captured.out)
+    jsonschema.validate(result, t2p.ENVELOPE_SCHEMA)
+    assert len(captured.out.splitlines()) == 1
+    assert "CHILD_STDERR" in captured.err, "the owner's stderr must reach the caller, not be captured"
+    assert json.loads(argv_file.read_text()) == ["--observe", "123", "--process-start", "456", "--json"]
+    assert (result["command"], result["status"], result["authority"]) == (
+        "desktop",
+        status,
+        "open_desktop.py --observe",
+    )
+    assert result["run_location_reason"] == "not_applicable_no_run" and result["path_report"] is None
+    assert result["proof_boundary"]["established"] == []
+    assert "model_validity" in result["proof_boundary"]["not_established"]
+    assert [item["observation"]["state"] for item in result["evidence"]] == (
+        [json.loads(stdout.splitlines()[0])["state"]] if evidence else []
+    )
+    assert ("owner_result_unavailable" in result["limitations"]) == (code in {0, 3} and not evidence)
+
+
+def test_desktop_observe_human_mode_streams_the_child_and_adds_nothing(monkeypatch, tmp_path, capfd):
+    argv_file = _fake_observe_owner(tmp_path, "HUMAN LINE\n", 3)
+    monkeypatch.setattr(t2p, "ROOT", tmp_path)
+
+    assert t2p.main(["desktop", "observe", "--pid", "123"]) == 3
+    captured = capfd.readouterr()
+    assert captured.out.splitlines() == ["HUMAN LINE"]
+    assert json.loads(argv_file.read_text()) == ["--observe", "123"]
 
 
 def test_refresh_without_a_path_is_a_syntax_error_that_starts_nothing(monkeypatch, capsys):
@@ -1846,7 +1922,7 @@ def test_offline_help_output_journey(monkeypatch, tmp_path, capsys):
         t2p.main(["--help"])
     assert help_result.value.code == 0
     help_text = capsys.readouterr().out
-    assert "{doctor,start,assess,status,units,refresh}" in help_text
+    assert "{doctor,start,assess,status,units,refresh,desktop}" in help_text
     assert t2p.main(["doctor", "--json"]) == 0
     doctor_result, _ = _json(capsys)
     assert doctor_result["status"] == "READY_TO_ATTEMPT"
