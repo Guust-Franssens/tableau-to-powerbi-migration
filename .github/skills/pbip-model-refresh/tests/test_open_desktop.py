@@ -6,6 +6,7 @@ pythonnet/clr modules are all fakes. The one subprocess test runs `--check` agai
 
 from __future__ import annotations
 
+import itertools
 import json
 import os
 import subprocess
@@ -125,7 +126,7 @@ def test_success_prints_the_pid_first_fits_the_frame_and_ends_with_json(monkeypa
     monkeypatch.setattr(
         open_desktop,
         "_bridge_readiness_result",
-        lambda payload, pid: ({"pid": pid} if payload.get("ready") else None, 0.0),
+        lambda payload, pid: ({"pid": pid, "currentFilePath": str(launch.pbip)} if payload.get("ready") else None, 0.0),
     )
 
     def fit(pid, record):
@@ -145,7 +146,11 @@ def test_success_prints_the_pid_first_fits_the_frame_and_ends_with_json(monkeypa
 
 def test_a_frame_fit_failure_is_never_fatal(monkeypatch, capsys, launch) -> None:
     monkeypatch.setattr(open_desktop, "_ui_bridge_status", lambda *_a: {})
-    monkeypatch.setattr(open_desktop, "_bridge_readiness_result", lambda payload, pid: ({"pid": pid}, 0.0))
+    monkeypatch.setattr(
+        open_desktop,
+        "_bridge_readiness_result",
+        lambda payload, pid: ({"pid": pid, "currentFilePath": str(launch.pbip)}, 0.0),
+    )
     monkeypatch.setattr(open_desktop, "fit_launched_frame", lambda *_a: (_ for _ in ()).throw(OSError("no frame")))
 
     assert open_desktop.main([str(launch.pbip)]) == 0
@@ -192,6 +197,133 @@ def test_a_dialog_is_reported_for_a_human_and_left_alone(monkeypatch, capsys, la
     out = capsys.readouterr().out
     assert "OPEN_DESKTOP: diagnostic: A dialog is open. A human must act." in out
     assert out.splitlines()[0] == str(PID)
+
+
+def _ready(**instance) -> dict:
+    """A "ready"/"connected" payload for PID; without `currentFilePath` it is the untitled startup canvas."""
+    return {
+        "status": "ready",
+        "instances": [{"pid": PID, "bridgeStatus": "connected", "hasUnsavedChanges": False, **instance}],
+    }
+
+
+def _host_error(**error) -> dict:
+    """The measured startup error payload (Desktop 2.160.579.0), with any error field overridable."""
+    fields = {
+        "message": "Host is not ready to accept operations",
+        "code": "BRIDGE_ERROR",
+        "jsonRpcCode": -32502,
+        "retryable": True,
+        "retryAfterMs": 2000,
+        "details": {},
+    }
+    return {"status": "error", "instances": [{"pid": PID, "bridgeStatus": "error", "error": {**fields, **error}}]}
+
+
+class _Clock:
+    """A monotonic clock that moves only when the code under test sleeps (or a fake call advances it)."""
+
+    def __init__(self) -> None:
+        self.now = 100.0
+        self.sleeps: list[float] = []
+        self.slept_to: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+        self.slept_to.append(self.now)
+
+
+def test_startup_states_are_waited_through_until_ready_on_the_launched_file(monkeypatch, capsys, launch) -> None:
+    """The measured sequence: untitled canvas, then "Host is not ready", then ready on the launched .pbip."""
+    payloads = iter(
+        [
+            _ready(),
+            _ready(currentFilePath=None),
+            _ready(currentFilePath=""),
+            _host_error(),
+            _ready(currentFilePath=os.path.normcase(str(launch.pbip.resolve()))),
+        ]
+    )
+    clock = _Clock()
+    monkeypatch.setattr(open_desktop, "time", clock)
+    monkeypatch.setattr(open_desktop, "_ui_bridge_status", lambda command, pid, deadline: next(payloads))
+    monkeypatch.setattr(
+        open_desktop, "fit_launched_frame", lambda *_a: types.SimpleNamespace(describe=lambda: "frame: fitted")
+    )
+
+    assert open_desktop.main([str(launch.pbip)]) == 0
+    assert next(payloads, None) is None
+    assert len(clock.sleeps) == 4
+    assert all(0 < seconds <= 2.0 for seconds in clock.sleeps)
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0] == str(PID)
+    assert json.loads(lines[-1])["pid"] == PID
+
+
+def test_ready_on_a_different_file_is_refused(monkeypatch, capsys, launch, tmp_path) -> None:
+    payloads = iter([_ready(), _ready(currentFilePath=str(tmp_path / "other.pbip"))])
+    monkeypatch.setattr(open_desktop, "_ui_bridge_status", lambda command, pid, deadline: next(payloads))
+    monkeypatch.setattr(open_desktop, "fit_launched_frame", lambda *_a: pytest.fail("frame fitted"))
+
+    assert open_desktop.main([str(launch.pbip)]) == 2
+    assert capsys.readouterr().out.splitlines()[-1] == (
+        f"OPEN_DESKTOP: ERROR PID {PID} not ready after 0 seconds (bridge bound to a different file); Desktop left open"
+    )
+
+
+@pytest.mark.parametrize(
+    ("payload", "reason"),
+    [
+        (_host_error(retryable=False), "bridge not ready or terminal error"),
+        (_host_error(message="Model failed to load"), "bridge not ready or terminal error"),
+        (_host_error(code="INTERNAL_ERROR"), "bridge not ready or terminal error"),
+        (_ready(pid=PID + 1), "bridge PID mismatch"),
+        ({"status": "ready", "instances": _ready()["instances"] * 2}, "ambiguous bridge instance"),
+        (_ready(error={"message": "load failed"}), "bridge application error"),
+        ({**_ready(), "error": "load failed"}, "bridge application error"),
+    ],
+    ids=["not-retryable", "other-message", "other-code", "other-pid", "two-instances", "instance-error", "error"],
+)
+def test_other_bridge_states_still_abort_at_once(monkeypatch, capsys, launch, payload, reason) -> None:
+    polls = iter([payload])
+    monkeypatch.setattr(open_desktop, "_ui_bridge_status", lambda *_a: next(polls, None) or pytest.fail("polled again"))
+    monkeypatch.setattr(open_desktop, "fit_launched_frame", lambda *_a: pytest.fail("frame fitted"))
+
+    assert open_desktop.main([str(launch.pbip)]) == 2
+    assert capsys.readouterr().out.splitlines()[-1] == (
+        f"OPEN_DESKTOP: ERROR PID {PID} not ready after 0 seconds ({reason}); Desktop left open"
+    )
+
+
+def test_the_deadline_still_bounds_a_startup_that_never_settles(monkeypatch, capsys, launch) -> None:
+    clock = _Clock()
+    deadline = clock.now + open_desktop.READY_TIMEOUT_SECONDS
+    states = itertools.cycle([_ready(), _host_error()])
+    polls: list[float] = []
+
+    def status(_command, _pid, held_deadline):
+        assert held_deadline == deadline
+        if clock.now >= deadline:
+            pytest.fail("polled at or after the deadline")
+        polls.append(clock.now)
+        clock.now += 0.75  # one status call takes time
+        return next(states)
+
+    monkeypatch.setattr(open_desktop, "time", clock)
+    monkeypatch.setattr(open_desktop, "_ui_bridge_status", status)
+    monkeypatch.setattr(open_desktop, "fit_launched_frame", lambda *_a: pytest.fail("frame fitted"))
+
+    assert open_desktop.main([str(launch.pbip)]) == 2
+    assert len(polls) > 2
+    assert max(clock.slept_to) <= deadline
+    assert capsys.readouterr().out.splitlines()[-1] == (
+        f"OPEN_DESKTOP: ERROR PID {PID} not ready after {open_desktop.READY_TIMEOUT_SECONDS} seconds (timed out);"
+        " Desktop left open"
+    )
 
 
 @pytest.fixture(name="fake_netfx")

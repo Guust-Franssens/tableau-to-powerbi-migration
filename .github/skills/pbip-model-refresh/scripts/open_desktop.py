@@ -1,7 +1,7 @@
 """
 purpose: open a .pbip in the installed Power BI Desktop, print its PID, and wait until the Desktop
-         bridge reports exactly that PID ready. --check starts nothing: it finds Desktop and loads
-         the ADOMD client that ships beside it.
+         bridge reports exactly that PID ready on that .pbip. --check starts nothing: it finds
+         Desktop and loads the ADOMD client that ships beside it.
 usage:   python .github/skills/pbip-model-refresh/scripts/open_desktop.py <path-to.pbip>
          python .github/skills/pbip-model-refresh/scripts/open_desktop.py --check
          (ships inside the `pbip-model-refresh` skill; `scripts/open_desktop.py` in this repo is a
@@ -12,8 +12,9 @@ PBI_DESKTOP_PATH when that file exists (set but missing: ignored with a notice),
 install (Get-AppxPackage), else the classic install under %ProgramFiles%.
 
 The PID is printed on its own line as soon as Desktop starts, so a caller can always close exactly
-that process, even when a later step fails. Readiness is bounded at 180 seconds. A dialog is a human
-stop: this script never clicks or closes Desktop.
+that process, even when a later step fails. Readiness is bounded at 180 seconds; the untitled startup
+canvas and a retryable "Host is not ready" reply are startup states and are waited through. Ready on a
+different file is refused. A dialog is a human stop: this script never clicks or closes Desktop.
 Exit codes: 0 ready (or check passed); 2 refused or failed.
 """
 
@@ -40,6 +41,8 @@ from refresh_pbip_model import (
 )
 
 READY_TIMEOUT_SECONDS = 180
+STARTUP_POLL_SECONDS = 2.0
+HOST_NOT_READY = "Host is not ready to accept operations"
 NOT_FOUND = "OPEN_DESKTOP: ERROR Power BI Desktop not found (PBI_DESKTOP_PATH, Store install, classic install)"
 
 
@@ -116,15 +119,49 @@ def _launch_record(pid: int) -> str:
         return ""
 
 
-def _wait_ready(pid: int, deadline: float) -> None:
-    """Return once the bridge reports exactly `pid` ready; raise TimeoutError, DesktopActionError or OSError."""
+def _startup_pending(payload: dict, pid: int) -> bool:
+    """True only for the two measured startup states of exactly `pid`; the shared check judges the rest.
+
+    Measured on Desktop 2.160.579.0: first "ready"/"connected" with no file (the untitled canvas), then
+    a retryable "Host is not ready to accept operations" error, then ready on the launched file.
+    """
+    instances = payload.get("instances")
+    if payload.get("error") or not isinstance(instances, list) or len(instances) != 1:
+        return False
+    instance = instances[0]
+    # pylint: disable-next=unidiomatic-typecheck
+    if not isinstance(instance, dict) or type(instance.get("pid")) is not int or instance["pid"] != pid:
+        return False
+    error = instance.get("error")
+    if payload.get("status") == "ready" and instance.get("bridgeStatus") == "connected":
+        path = instance.get("currentFilePath")
+        return not error and (path is None or (isinstance(path, str) and not path.strip()))
+    return (
+        payload.get("status") == "error"
+        and instance.get("bridgeStatus") == "error"
+        and isinstance(error, dict)
+        and error.get("code") == "BRIDGE_ERROR"
+        and error.get("retryable") is True
+        and error.get("message") == HOST_NOT_READY
+    )
+
+
+def _wait_ready(pid: int, pbip: Path, deadline: float) -> None:
+    """Return once the bridge reports exactly `pid` ready on `pbip`; raise TimeoutError, DesktopActionError, OSError."""
     command = _ui_bridge_command()
     while time.monotonic() < deadline:
         if not _ui_desktop_alive(pid):
             raise DesktopActionError("Desktop process gone")
-        instance, delay = _bridge_readiness_result(_ui_bridge_status(command, pid, deadline), pid)
-        if instance is not None:
-            return
+        payload = _ui_bridge_status(command, pid, deadline)
+        if _startup_pending(payload, pid):
+            delay = STARTUP_POLL_SECONDS
+        else:
+            instance, delay = _bridge_readiness_result(payload, pid)
+            if instance is not None:
+                bound = Path(instance["currentFilePath"]).resolve()
+                if os.path.normcase(bound) != os.path.normcase(pbip.resolve()):
+                    raise DesktopActionError("bridge bound to a different file")
+                return
         time.sleep(min(delay, max(0.0, deadline - time.monotonic())))
     raise TimeoutError
 
@@ -151,8 +188,9 @@ def launch(pbip: Path) -> int:
         print(NOT_FOUND)
         return 2
     exe, source = found
+    model = pbip.resolve()
     try:
-        pid = _start(exe, pbip.resolve())
+        pid = _start(exe, model)
     except OSError as exc:
         print(f"OPEN_DESKTOP: ERROR Power BI Desktop could not be started ({type(exc).__name__})")
         return 2
@@ -163,7 +201,7 @@ def launch(pbip: Path) -> int:
     )
     started = time.monotonic()
     try:
-        _wait_ready(pid, started + READY_TIMEOUT_SECONDS)
+        _wait_ready(pid, model, started + READY_TIMEOUT_SECONDS)
     except TimeoutError:
         failure = "timed out"
     except DesktopActionError as exc:
