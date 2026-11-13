@@ -45,8 +45,10 @@ line is JSON `{"pid", "exe_source": "pin|appx|classic", "ready_seconds"}`, exit 
 timeout or ready on a different file it exits 2 with the PID in the error line. Without `--refresh` it
 never clicks or closes Desktop: close it yourself by that literal PID. `--check` starts nothing and
 prints the exe source and the Desktop and client file versions. A small frame collapses the Home
-ribbon. Measured: a 900x600 frame was refused before Invoke, and a maximized frame worked. A `.pbip`
-that another Desktop already has open is refused before anything starts.
+ribbon. Measured: a 900x600 frame was refused before Invoke, and a maximized frame worked. Best
+effort: a `.pbip` that another Desktop lists as open by the same resolved absolute path is refused
+before anything starts. One bridge listing is read, so an instance whose listing has no file path, or
+that spells the path differently, is not caught.
 
 ### One step: open, refresh, Save, close (#863)
 
@@ -65,8 +67,11 @@ verdict's: 0 OK, 1 data or persist failure, 2 refused or error, 3 a human is nee
   ago, so a dirty flag or Desktop's "files have changed" banner cannot be a human's work. Every
   other refresh, including `refresh_pbip_model.py --pid`, still refuses a dirty Desktop.
 - A dialog (credentials, native-query approval) is still a human stop: the run exits 3 and leaves
-  that Desktop open, naming its PID. Close it afterwards with `Stop-Process -Id <pid> -Force`. Every
-  other outcome closes the Desktop.
+  that Desktop open, naming its PID. Close it afterwards with `Stop-Process -Id <pid> -Force`.
+  Otherwise the run tries to close the Desktop, but only while the process holding that PID still has
+  the start time read at launch; a different or unproven process is never killed. If the close fails
+  or is skipped, the run prints the PID and keeps the refresh verdict as its exit code, so a Desktop
+  can stay running after a successful refresh: check the last `OPEN_DESKTOP:` line.
 - `--no-save` discards the refreshed data on close.
 - This form passes no `--automatic-source-scope`, so it is operator-run only, like any scopeless
   refresh. An agent's automatic refresh keeps the two-step route below with the scope file.

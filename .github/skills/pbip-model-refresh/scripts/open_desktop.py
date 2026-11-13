@@ -17,13 +17,14 @@ install (Get-AppxPackage), else the classic install under %ProgramFiles%.
 The PID is printed on its own line as soon as Desktop starts, so a caller can always close exactly
 that process, even when a later step fails. Readiness is bounded at 180 seconds; until then any bridge
 reply other than "ready on this .pbip" means Desktop is still starting. Ready on a different file is
-refused, and so is a .pbip that another Desktop already has open (nothing is started). A dialog is a
-human stop: this script never clicks Desktop.
+refused. A .pbip that another Desktop lists as open by the same resolved absolute path is refused too
+(best effort, one listing; nothing is started). A dialog is a human stop: this script never clicks Desktop.
 
 --refresh runs `refresh_pbip_model.py`'s refresh on the PID it just opened. That Desktop holds no
 human work, so its unsaved-changes flag is ignored. Afterwards it closes that PID with its engine
-child, so an idle Desktop never holds RAM; a failed run that ends on a dialog leaves it open for a
-human instead. With --no-save the refreshed data is discarded on close.
+child, so an idle Desktop never holds RAM, but only while the process holding the PID is still the one
+this run started (its start time is compared just before the kill). A failed run that ends on a dialog
+leaves it open for a human instead. With --no-save the refreshed data is discarded on close.
 Exit codes: 0 ready (or check passed, or refresh verdict OK); 2 refused or failed; with --refresh the
 refresh verdict (1 data or persist failure, 3 needs a human, including Desktop left open on a dialog).
 """
@@ -40,7 +41,7 @@ from pathlib import Path
 
 from _desktop_actions import DesktopActionError
 from _desktop_frame import fit_launched_frame
-from _desktop_observer import dialog_stop_detail
+from _desktop_observer import dialog_stop_detail, process_start
 from probe_desktop_query import ADOMD_CLIENT_DLL, AdomdUnavailable, _load_adomd_from
 from refresh_pbip_model import (
     _bridge_readiness_result,
@@ -181,19 +182,28 @@ def _open_elsewhere(model: Path) -> dict | None:
     return None
 
 
-def open_pbip(pbip: Path) -> tuple[int | None, dict | None]:  # pylint: disable=too-many-return-statements
+def _start_token(pid: int) -> str | None:
+    """The process-start token of `pid` while it is certainly ours; None when unreadable."""
+    try:
+        return process_start(pid)
+    except OSError:
+        return None
+
+
+def open_pbip(pbip: Path) -> tuple[int | None, dict | None, str | None]:  # pylint: disable=too-many-return-statements
     """Open `pbip`, print the PID at once, wait for readiness, fit the frame.
 
-    Returns (pid, ready record); pid is None when nothing was started, the record is None when not ready.
-    A .pbip another Desktop already has open is refused, so a human's session is never raced.
+    Returns (pid, ready record, start token); pid is None when nothing was started, the record is None
+    when not ready, the token is what `_release` compares before it closes that PID.
+    A .pbip another Desktop lists as open by the same resolved absolute path is refused (best effort).
     """
     if pbip.suffix.lower() != ".pbip" or not pbip.is_file():
         print("OPEN_DESKTOP: ERROR the argument is not an existing .pbip file; nothing started")
-        return None, None
+        return None, None, None
     found = find_desktop()
     if found is None:
         print(NOT_FOUND)
-        return None, None
+        return None, None, None
     exe, source = found
     model = pbip.resolve()
     try:
@@ -201,15 +211,16 @@ def open_pbip(pbip: Path) -> tuple[int | None, dict | None]:  # pylint: disable=
     except (TimeoutError, DesktopActionError, OSError) as exc:
         detail = str(exc) if isinstance(exc, DesktopActionError) else type(exc).__name__
         print(f"OPEN_DESKTOP: ERROR cannot list the open Desktops ({detail}); nothing started")
-        return None, None
+        return None, None, None
     if holder is not None:
         print(f"OPEN_DESKTOP: ERROR this .pbip is already open in Desktop PID {holder.get('pid')}; nothing started")
-        return None, None
+        return None, None, None
     try:
         pid = _start(exe, model)
     except OSError as exc:
         print(f"OPEN_DESKTOP: ERROR Power BI Desktop could not be started ({type(exc).__name__})")
-        return None, None
+        return None, None, None
+    token = _start_token(pid)
     print(pid, flush=True)
     record = _launch_record(pid)
     print(
@@ -231,16 +242,16 @@ def open_pbip(pbip: Path) -> tuple[int | None, dict | None]:  # pylint: disable=
             print(fit_launched_frame(pid, record).describe(), flush=True)
         except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
             print(f"frame: not fitted ({type(exc).__name__})", flush=True)
-        return pid, {"pid": pid, "exe_source": source, "ready_seconds": seconds}
+        return pid, {"pid": pid, "exe_source": source, "ready_seconds": seconds}, token
     seconds = round(time.monotonic() - started)
     _diagnose(pid)
     print(f"OPEN_DESKTOP: ERROR PID {pid} not ready after {seconds} seconds ({failure})", flush=True)
-    return pid, None
+    return pid, None, token
 
 
 def launch(pbip: Path) -> int:
     """The CLI: open `pbip` and leave Desktop open for the caller; 0 ready, 2 otherwise."""
-    pid, ready = open_pbip(pbip)
+    pid, ready, _token = open_pbip(pbip)
     if ready is not None:
         print(json.dumps(ready))
         return 0
@@ -257,8 +268,11 @@ def _resolve_pbip(path: Path) -> Path | None:
     return path if path.suffix.lower() == ".pbip" and path.is_file() else None
 
 
-def _release(pid: int, result: int) -> bool:
-    """Close the Desktop this run opened, by PID with its engine child; True when left open for a dialog."""
+def _release(pid: int, token: str | None, result: int) -> bool:
+    """Close the Desktop this run opened, by PID with its engine child; True when left open for a dialog.
+
+    Only while the PID still has the start `token` read at launch: a reused PID is never killed.
+    """
     try:
         if not _ui_desktop_alive(pid):
             print(f"OPEN_DESKTOP: PID {pid} already exited", flush=True)
@@ -274,6 +288,13 @@ def _release(pid: int, result: int) -> bool:
             print(f"OPEN_DESKTOP: PID {pid} left open for a human: {dialog_stop_detail(dialog)}", flush=True)
             print(f"OPEN_DESKTOP: close it afterwards with Stop-Process -Id {pid} -Force", flush=True)
             return True
+    live = _start_token(pid)
+    if token is None or live is None:
+        print(f"OPEN_DESKTOP: PID {pid} not closed: its identity is unproven; check it before stopping it", flush=True)
+        return False
+    if live != token:
+        print(f"OPEN_DESKTOP: PID {pid} is now a different process; nothing closed", flush=True)
+        return False
     try:
         command = ["taskkill", "/PID", str(pid), "/T", "/F"]
         closed = subprocess.run(command, capture_output=True, check=False, timeout=60).returncode == 0
@@ -292,7 +313,7 @@ def refresh_and_close(path: Path, canaries: list[str] | None, no_save: bool) -> 
     if pbip is None:
         print("OPEN_DESKTOP: ERROR the path is not a .pbip file or a folder holding exactly one; nothing started")
         return 2
-    pid, ready = open_pbip(pbip)
+    pid, ready, token = open_pbip(pbip)
     if pid is None:
         return 2
     result = 2
@@ -307,7 +328,7 @@ def refresh_and_close(path: Path, canaries: list[str] | None, no_save: bool) -> 
             # "files have changed" banner) cannot be a human's work: refresh and Save regardless.
             result = _run(_build_arg_parser().parse_args(argv), pid, require_clean=False)
     finally:
-        left_for_human = _release(pid, result)
+        left_for_human = _release(pid, token, result)
     return 3 if left_for_human else result
 
 

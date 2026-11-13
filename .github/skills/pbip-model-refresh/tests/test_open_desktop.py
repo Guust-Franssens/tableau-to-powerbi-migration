@@ -110,6 +110,7 @@ def _launch(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     monkeypatch.setattr(open_desktop, "find_desktop", lambda: (tmp_path / "bin" / "PBIDesktop.exe", "appx"))
     monkeypatch.setattr(open_desktop, "_start", lambda exe, model: log["start"].append((exe, model)) or PID)
     monkeypatch.setattr(open_desktop, "_launch_record", lambda pid: "/Date(1767225600000)/")
+    monkeypatch.setattr(open_desktop, "process_start", lambda pid: f"start-{pid}")
     monkeypatch.setattr(open_desktop, "_ui_bridge_command", lambda: ["powerbi-desktop"])
     monkeypatch.setattr(open_desktop, "_ui_desktop_alive", lambda pid: True)
     monkeypatch.setattr(open_desktop, "_open_elsewhere", lambda model: None)
@@ -144,6 +145,31 @@ def test_success_prints_the_pid_first_fits_the_frame_and_ends_with_json(monkeypa
     assert json.loads(lines[-1]) == {"pid": PID, "exe_source": "appx", "ready_seconds": 0}
     assert launch.log["start"] == [(launch.pbip.parent / "bin" / "PBIDesktop.exe", launch.pbip.resolve())]
     assert launch.log["frame"] == [(PID, "/Date(1767225600000)/")]
+
+
+@pytest.mark.parametrize("ready", [True, False], ids=["ready", "not-ready"])
+def test_open_pbip_returns_the_start_token_of_the_pid_it_started(monkeypatch, launch, ready) -> None:
+    reused = []
+
+    def status(*_args):
+        reused.append(True)
+        if not ready:
+            raise TimeoutError
+        return {}
+
+    # Once the readiness wait has polled, the PID is held by a stranger; the token must predate that.
+    monkeypatch.setattr(open_desktop, "process_start", lambda pid: "stranger" if reused else f"start-{pid}")
+    monkeypatch.setattr(open_desktop, "_ui_bridge_status", status)
+    monkeypatch.setattr(
+        open_desktop,
+        "_bridge_readiness_result",
+        lambda payload, pid: ({"pid": pid, "currentFilePath": str(launch.pbip)}, 0.0),
+    )
+    monkeypatch.setattr(open_desktop, "fit_launched_frame", lambda *_a: types.SimpleNamespace(describe=lambda: ""))
+
+    pid, record, token = open_desktop.open_pbip(launch.pbip)
+
+    assert (pid, record is not None, token) == (PID, ready, f"start-{PID}")
 
 
 def test_a_frame_fit_failure_is_never_fatal(monkeypatch, capsys, launch) -> None:
@@ -225,6 +251,32 @@ def test_a_pbip_already_open_in_another_desktop_is_refused_before_any_start(monk
         "OPEN_DESKTOP: ERROR this .pbip is already open in Desktop PID 99; nothing started"
     ]
     assert calls == [None]
+
+
+@pytest.mark.parametrize(
+    "noise",
+    [
+        {"pid": 1},
+        {"pid": 2, "currentFilePath": None},
+        {"pid": 3, "currentFilePath": ""},
+        {"pid": 4, "currentFilePath": 7},
+        "not a dict",
+    ],
+    ids=["missing", "none", "empty", "non-string", "non-dict"],
+)
+def test_the_already_open_check_skips_unusable_entries_and_ignores_the_same_name_elsewhere(
+    monkeypatch, tmp_path, noise
+) -> None:
+    model = tmp_path / "here" / "model.pbip"
+    namesake = {"pid": 5, "currentFilePath": str(tmp_path / "there" / "model.pbip")}
+    holder = {"pid": 6, "currentFilePath": str(model)}
+    listing = {"instances": [noise, namesake]}
+    monkeypatch.setattr(open_desktop, "_ui_bridge_command", lambda: ["powerbi-desktop"])
+    monkeypatch.setattr(open_desktop, "_ui_bridge_status", lambda *_args: listing)
+
+    assert REAL_OPEN_ELSEWHERE(model) is None
+    listing["instances"].append(holder)
+    assert REAL_OPEN_ELSEWHERE(model) is holder
 
 
 def test_a_failed_instance_listing_starts_nothing(monkeypatch, capsys, launch) -> None:
