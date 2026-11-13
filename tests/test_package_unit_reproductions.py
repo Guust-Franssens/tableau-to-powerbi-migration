@@ -947,8 +947,18 @@ def _package_command(bundle: Path, oracle: Path, out: Path, unit: str, brief: Pa
         ("duplicate-candidate", 5, "source_asset_candidate_ambiguous"),
         ("changed-digest", 5, "input_manifest_digest_mismatch"),
         ("foreign-path", 6, "unassessable_input"),
+        ("hard-linked-candidate", 0, None),
+        ("hard-linked-changed-digest", 5, "input_manifest_digest_mismatch"),
     ],
-    ids=["wrong-basename", "duplicate-row", "duplicate-candidate", "changed-digest", "foreign-path"],
+    ids=[
+        "wrong-basename",
+        "duplicate-row",
+        "duplicate-candidate",
+        "changed-digest",
+        "foreign-path",
+        "hard-linked-candidate",
+        "hard-linked-changed-digest",
+    ],
 )
 def test_canonical_datasource_model_only_package_publishes_from_staged_input(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], fault: str | None, expected_exit: int, reason: str | None
@@ -969,6 +979,11 @@ def test_canonical_datasource_model_only_package_publishes_from_staged_input(
         shutil.copyfile(asset, second)
     elif fault == "changed-digest":
         asset.write_text("<datasource/>", encoding="utf-8")
+    elif fault in {"hard-linked-candidate", "hard-linked-changed-digest"}:
+        (bundle / "assets").mkdir()
+        os.link(asset, bundle / "assets" / asset.name)
+        if fault == "hard-linked-changed-digest":
+            asset.write_text("<datasource/>", encoding="utf-8")
     elif fault == "foreign-path":
         row["staged_input_path"] = (
             f"/foreign/assets/{asset.name}" if os.name == "nt" else f"C:\\foreign\\assets\\{asset.name}"
@@ -981,7 +996,7 @@ def test_canonical_datasource_model_only_package_publishes_from_staged_input(
 
     assert pkg.main(_package_command(bundle, oracle, out, DS_UNIT, brief)) == expected_exit
     package = out / DS_UNIT
-    if fault is not None:
+    if reason is not None:
         assert reason in capsys.readouterr().err
         assert not package.exists(), "a refused source cannot publish a diagnostic package"
         assert not pkg.staging_dir(out, DS_UNIT).exists()
@@ -994,6 +1009,134 @@ def test_canonical_datasource_model_only_package_publishes_from_staged_input(
     assert pkg.data_access.read_data_access(package / "data-access.json").effective_scope == "model_only"
     assert pkg.pri.verify_s1(package).integrity.is_clean
     assert pkg.pri.verify_phase1_role_identity([package])[0].is_start_ready
+
+
+def _mirror_layout(root: Path) -> tuple[Path, Path, Path, dict[str, Any]]:
+    """The retained original under assets/ and its engine-input hard-link mirror, as one physical file."""
+    bundle = root / "bundle"
+    bundle.mkdir(parents=True)
+    name = f"{DS_LUID}_{DS_UNIT}.tds"
+    retained = root / "assets" / name
+    staged = root / "engine-input" / name
+    retained.parent.mkdir()
+    staged.parent.mkdir()
+    retained.write_text("<datasource/>", encoding="utf-8")
+    os.link(retained, staged)
+    row = {
+        "name": DS_UNIT,
+        "staged_input_path": str(staged),
+        "sha256": hashlib.sha256(retained.read_bytes()).hexdigest(),
+    }
+    return bundle, retained, staged, row
+
+
+def _assert_mirror_collapses(bundle: Path, staged: Path, assets_dir: Path | None) -> None:
+    selected = pkg.resolve_asset(bundle, DS_UNIT, None, assets_dir)
+    assert os.path.normcase(os.path.abspath(selected.path)) == os.path.normcase(os.path.abspath(staged))
+    pkg.assert_declared_digest(DS_UNIT, selected)
+
+
+def test_real_engine_input_mirror_resolves_to_its_staged_path(tmp_path: Path) -> None:
+    import engine_input_staging  # pylint: disable=import-outside-toplevel
+
+    run = tmp_path / "run"
+    assets = run / "assets"
+    assets.mkdir(parents=True)
+    (run / "run.json").write_text("{}", encoding="utf-8")
+    workbook = assets / f"{DS_LUID}_book.twbx"
+    workbook.write_bytes(b"PK\x03\x04")
+    datasource = assets / f"{DS_LUID}_{DS_UNIT}.tds"
+    datasource.write_text("<datasource/>", encoding="utf-8")
+    records = [
+        {"kind": "workbook", "name": "book", "luid": DS_LUID, "asset_path": str(workbook), "legacy_folder": "book"},
+        {
+            "kind": "datasource",
+            "name": DS_UNIT,
+            "luid": DS_LUID,
+            "asset_path": str(datasource),
+            "legacy_folder": DS_UNIT,
+        },
+    ]
+    stage_root = engine_input_staging.stage_unit_ids(assets, run, records)[0]
+    mirror = stage_root / datasource.name
+    assert os.path.samefile(datasource, mirror), "the producer links, it does not copy"
+    bundle = run / "bundle"
+    bundle.mkdir()
+    write_rows(bundle, [{"name": DS_UNIT, "staged_input_path": str(mirror), "sha256": _sha(datasource)}])
+    for assets_dir in (None, assets):
+        _assert_mirror_collapses(bundle, mirror, assets_dir)
+
+
+def _sha(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "none",
+        "spelling",
+        "third-copy",
+        "broken-link-other-bytes",
+        "broken-link-same-bytes",
+        "legacy-row",
+        "no-row",
+        "named-candidate-absent",
+        "alias-directory",
+        "identity-probe-fails",
+    ],
+)
+def test_same_file_mirror_is_one_source_and_every_other_pair_refuses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str
+) -> None:
+    bundle, retained, staged, row = _mirror_layout(tmp_path)
+    assets_dir: Path | None = None
+    handover = None
+    expected = "source_asset_candidate_ambiguous"
+    if fault == "spelling":
+        row["staged_input_path"] = os.path.join(staged.parent, "..", staged.parent.name, staged.name)
+        if os.name == "nt":
+            row["staged_input_path"] = row["staged_input_path"].upper().replace(staged.name.upper(), staged.name)
+    elif fault == "third-copy":
+        assets_dir = tmp_path / "extra"
+        assets_dir.mkdir()
+        shutil.copyfile(retained, assets_dir / retained.name)
+    elif fault in {"broken-link-other-bytes", "broken-link-same-bytes"}:
+        staged.unlink()
+        shutil.copyfile(retained, staged)
+        if fault == "broken-link-other-bytes":
+            staged.write_text("<other/>", encoding="utf-8")
+    elif fault == "legacy-row":
+        del row["staged_input_path"]
+        row["name"] = retained.name
+        assets_dir = staged.parent
+    elif fault == "no-row":
+        handover = {"workbook": {"source_id": retained.name}}
+        assets_dir = staged.parent
+    elif fault == "named-candidate-absent":
+        row["staged_input_path"] = str(tmp_path / "elsewhere" / staged.name)
+        assets_dir = staged.parent
+    elif fault == "alias-directory":
+        alias = tmp_path / "alias"
+        try:
+            alias.symlink_to(staged.parent, target_is_directory=True)
+        except (OSError, NotImplementedError):  # pragma: no cover - privilege-dependent
+            pytest.skip("this platform/account cannot create symlinks without elevation")
+        assets_dir = alias
+        expected = "source_asset_walk_unsafe"
+    elif fault == "identity-probe-fails":
+
+        def unreadable(*_paths: Any) -> bool:
+            raise PermissionError(errno.EACCES, "identity probe refused")
+
+        monkeypatch.setattr(pkg.os.path, "samefile", unreadable)
+    if fault != "no-row":
+        write_rows(bundle, [row])
+    if fault in {"none", "spelling"}:
+        _assert_mirror_collapses(bundle, staged, assets_dir)
+        return
+    with pytest.raises(pkg.PackagingError, match=expected):
+        pkg.resolve_asset(bundle, DS_UNIT, handover, assets_dir)
 
 
 @pytest.mark.parametrize("locator", ["basename"])

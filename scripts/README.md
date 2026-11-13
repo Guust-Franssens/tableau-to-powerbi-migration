@@ -580,7 +580,9 @@ then derives its physical basename from the native `staged_input_path` (a filena
 the legacy fallback only when that path is absent). The raw handover's portable source leaf must
 agree before the separate shipped handover is redacted. The selecting row stays attached to the
 walked path through digest validation; wrong/foreign paths, unresolved declared assets and ambiguous
-rows or candidates refuse.
+rows or candidates refuse. The engine-input hard-link mirror and the retained original are one
+physical file: when the row's staged path names one of them and every candidate is that same file,
+it is the source; a distinct file with the same name, even with identical bytes, still refuses.
 
 ### Construction status (#614)
 

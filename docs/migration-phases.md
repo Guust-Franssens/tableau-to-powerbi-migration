@@ -193,7 +193,8 @@ row carrying the **datasource** LUID (a different namespace from a workbook LUID
 local `.tds` with no LUID prefix keeps its row and earns `not_applicable` for the server LUID.
 Resolution retains the unique selecting `input_manifest.json` row with its no-follow walked source
 path. That exact row's basename, staged path and declared digest are checked; duplicate matching rows
-or distinct existing candidates refuse rather than choosing the first.
+or distinct existing candidates (distinct physical files; a hard-link mirror of the row's staged
+file is one file) refuse rather than choosing the first.
 
 ⚠️ **The brief is COPIED, never referenced.** The dispatcher's `migration-brief.md` lives outside the
 package and is git-ignored, so a stateless agent handed only the package could not read the one

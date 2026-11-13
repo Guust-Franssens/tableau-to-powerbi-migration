@@ -1082,6 +1082,20 @@ def _walk_asset_candidates(bases: list[Path | None], name: str) -> list[Path]:
     return list(found.values())
 
 
+def _same_file_mirror(candidates: list[Path], row: dict[str, Any] | None) -> Path | None:
+    """The row's staged path when every candidate is that one physical file (the hard-link input mirror)."""
+    if row is None or "staged_input_path" not in row:
+        return None
+    anchor = os.path.normcase(os.path.abspath(row["staged_input_path"]))
+    named = next((path for path in candidates if os.path.normcase(os.path.abspath(path)) == anchor), None)
+    if named is None:
+        return None
+    try:
+        return named if all(os.path.samefile(path, named) for path in candidates) else None
+    except OSError:
+        return None
+
+
 def resolve_asset(  # pylint: disable=too-many-branches
     bundle: Path, unit: str, handover: Any, assets_dir: Path | None
 ) -> AssetResolution:
@@ -1136,7 +1150,10 @@ def resolve_asset(  # pylint: disable=too-many-branches
         raise PackagingError("input_manifest_name_mismatch")
     candidates = _walk_asset_candidates(bases, name)
     if len(candidates) > 1:
-        raise PackagingError("source_asset_candidate_ambiguous")
+        named = _same_file_mirror(candidates, row)
+        if named is None:
+            raise PackagingError("source_asset_candidate_ambiguous")
+        candidates = [named]
     return AssetResolution(candidates[0], route, row) if candidates else AssetResolution(None, "unresolved", row)
 
 
