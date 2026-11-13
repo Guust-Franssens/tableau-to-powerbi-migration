@@ -3347,6 +3347,7 @@ def test_a_folder_without_exactly_one_pbip_starts_nothing(
 
 def test_a_launch_that_started_nothing_is_not_released(monkeypatch: pytest.MonkeyPatch, self_open) -> None:
     monkeypatch.setattr(open_desktop, "open_pbip", lambda _path: (None, None, None))
+    monkeypatch.setattr(open_desktop, "_release", lambda *_args: pytest.fail("_release called without a PID"))
 
     assert open_desktop.main([str(self_open.pbip), "--refresh"]) == 2
     assert self_open.log["run"] == [] and self_open.log["killed"] == []
