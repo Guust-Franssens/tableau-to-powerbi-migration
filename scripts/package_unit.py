@@ -1082,6 +1082,22 @@ def _walk_asset_candidates(bases: list[Path | None], name: str) -> list[Path]:
     return list(found.values())
 
 
+def _same_source_copies(candidates: list[Path], row: dict[str, Any] | None) -> Path | None:
+    """The row's staged path when it is a candidate, the row carries a digest and every candidate has the same bytes.
+
+    The digest format is not judged here: ``assert_declared_digest`` later proves the named file against it.
+    An unreadable candidate never counts as a match, not even for another unreadable one.
+    """
+    if row is None or "staged_input_path" not in row or row.get("sha256") is None:
+        return None
+    anchor = os.path.normcase(os.path.abspath(row["staged_input_path"]))
+    named = next((path for path in candidates if os.path.normcase(os.path.abspath(path)) == anchor), None)
+    if named is None:
+        return None
+    digests = {sha256_of(path) for path in candidates}
+    return named if None not in digests and len(digests) == 1 else None
+
+
 def resolve_asset(  # pylint: disable=too-many-branches
     bundle: Path, unit: str, handover: Any, assets_dir: Path | None
 ) -> AssetResolution:
@@ -1136,7 +1152,10 @@ def resolve_asset(  # pylint: disable=too-many-branches
         raise PackagingError("input_manifest_name_mismatch")
     candidates = _walk_asset_candidates(bases, name)
     if len(candidates) > 1:
-        raise PackagingError("source_asset_candidate_ambiguous")
+        named = _same_source_copies(candidates, row)
+        if named is None:
+            raise PackagingError("source_asset_candidate_ambiguous")
+        candidates = [named]
     return AssetResolution(candidates[0], route, row) if candidates else AssetResolution(None, "unresolved", row)
 
 
