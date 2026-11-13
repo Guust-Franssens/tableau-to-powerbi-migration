@@ -3167,7 +3167,7 @@ def _taskkill_recorder(monkeypatch: pytest.MonkeyPatch, returncode: int = 0) -> 
 
     monkeypatch.setattr(open_desktop.subprocess, "run", run)
     monkeypatch.setattr(open_desktop, "_ui_desktop_alive", lambda _pid: True)
-    monkeypatch.setattr(open_desktop, "process_start", lambda _pid: "tok")
+    monkeypatch.setattr(open_desktop, "process_start", lambda pid: "tok" if pid == 123 else None)
     return killed
 
 
