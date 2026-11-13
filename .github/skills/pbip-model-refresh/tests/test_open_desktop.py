@@ -207,7 +207,9 @@ def test_a_dialog_is_reported_for_a_human_and_left_alone(monkeypatch, capsys, la
 def test_a_pbip_already_open_in_another_desktop_is_refused_before_any_start(monkeypatch, capsys, launch) -> None:
     calls = []
     other = {"pid": 77, "currentFilePath": str(launch.pbip.parent / "elsewhere.pbip")}
-    holder = {"pid": 99, "currentFilePath": str(launch.pbip).upper()}
+    # The same file spelled with a detour through its own folder: it resolves identically on every host.
+    detour = launch.pbip.parent / ".." / launch.pbip.parent.name / launch.pbip.name
+    holder = {"pid": 99, "currentFilePath": str(detour)}
 
     def status(command, pid, deadline):
         calls.append(pid)
