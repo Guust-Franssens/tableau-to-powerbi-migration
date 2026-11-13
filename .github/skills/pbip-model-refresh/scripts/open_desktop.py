@@ -98,8 +98,8 @@ def find_desktop() -> tuple[Path, str] | None:
 def _start(exe: Path, pbip: Path) -> int:
     """Start Desktop detached on `pbip` and return the PID to hold.
 
-    Assumed to be the started process itself (not yet measured on a real Desktop); if that proves to
-    be a short-lived stub, only this function changes.
+    Measured on the Store build 2.160.579.0: the started PID is the Desktop process itself, not a
+    short-lived stub. If a build ever changes that, only this function changes.
     """
     flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     process = subprocess.Popen(  # pylint: disable=consider-using-with

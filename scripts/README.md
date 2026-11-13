@@ -1408,9 +1408,9 @@ Desktop or path-gate call.
 
 `refresh` (Refs #863) is the operator's one-step refresh of ONE `.pbip`, or a folder holding exactly one.
 It runs `open_desktop.py --refresh`: open the model in a NEW Desktop, refresh that PID, Save, then close
-it by PID tree. Progress streams live (the PID at once, `OPEN_DESKTOP:` and `REFRESH_STATUS` lines, then
+it by PID tree, but only while that PID still has its launch start time. Progress streams live (the PID at once, `OPEN_DESKTOP:` and `REFRESH_STATUS` lines, then
 the one `REFRESH:` verdict) and the child's exit code is the result: 0 OK, 1 data or persist failure,
-2 refused or error, 3 a human is needed (a Desktop dialog; that Desktop is left open and named by PID).
+2 refused or error, 3 a human is needed (a Desktop dialog leaves that Desktop open, named by PID). A close that is skipped or fails prints the PID, can leave that Desktop running and keeps the refresh verdict as the exit code.
 This run just opened that Desktop, so its unsaved-changes flag is ignored; every other refresh still
 refuses a dirty one. `--no-save` discards the data on close. No `--automatic-source-scope` is passed, so
 it is operator-run only, never an agent's automatic refresh. JSON adds `authority`

@@ -646,7 +646,7 @@ The verified contract comes from `refresh_pbip_model.py`; re-read it before quot
 | `operator` | Agent prepares, stops and asks the operator to hit Refresh and Save in Desktop; never an automated fallback; no script-imposed ceiling | UI per-table row counts; then the same canary and cold-reopen evidence. |
 
 An operator can run the whole sequence in one command: `t2p refresh <pbip-or-folder>` opens a new
-Desktop, refreshes it, Saves and closes it, and streams the same progress. It passes no
+Desktop, refreshes it, Saves and closes it (a skipped or failed close prints the PID and can leave that Desktop running), and streams the same progress. It passes no
 `--automatic-source-scope`, so agents keep the two-step route
 ([refresh skill](../.github/skills/pbip-model-refresh/SKILL.md#one-step-open-refresh-save-close-863)).
 

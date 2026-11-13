@@ -59,7 +59,7 @@ t2p refresh <pbip-or-folder> [--canaries <table> ...] [--no-save] [--json]
 
 For an operator who wants the whole sequence in one command. It opens the model in a NEW Desktop,
 runs the default refresh on that PID, Saves, then closes that PID with its engine child
-(`taskkill /T`), so an idle Desktop never holds RAM. The PID is printed at once, and the run streams
+(`taskkill /T`), so an idle Desktop does not stay in RAM, apart from the cases below. The PID is printed at once, and the run streams
 `OPEN_DESKTOP:` and `REFRESH_STATUS` lines before the one `REFRESH:` verdict. The exit code is that
 verdict's: 0 OK, 1 data or persist failure, 2 refused or error, 3 a human is needed.
 
