@@ -1182,7 +1182,7 @@ personas already use. Deleting them would make every persona *longer* — see
 |---|---|
 | `refresh_pbip_model.py` | `.github/skills/pbip-model-refresh/`: Desktop UI refresh plus guarded Save to `.pbi/cache.abf` |
 | `probe_desktop_query.py` | `.github/skills/pbip-model-refresh/` — one-row DAX probe against Desktop's local AS |
-| `open_desktop.py` | `.github/skills/pbip-model-refresh/`: open a `.pbip` in the installed Desktop and print its PID |
+| `open_desktop.py` | `.github/skills/pbip-model-refresh/`: open a `.pbip` in the installed Desktop and print its PID; `--refresh` also refreshes, Saves and closes it (`t2p refresh`) |
 | `set_ai_instructions.py` | `.github/skills/powerbi-ai-readiness/` — stamp `CustomInstructions`, force `qnaEnabled` |
 | `check_ai_readiness.py` | `.github/skills/powerbi-ai-readiness/` — audit description coverage + enumerated domains |
 
@@ -1288,6 +1288,7 @@ t2p doctor [--env <path>] [--json]
 t2p start --project <exact-name|LUID> [--env <path>] [--runs-parent <path>] [--storage-decision <path>] [--session-id <UUID>] [--json]
 t2p status --run <absolute-local-run> [--json]
 t2p units {list | show <id> | find [--name <text>] [--luid <luid>]} [--runs-parent <path>] [--json]
+t2p refresh <pbip-or-folder> [--canaries <table> ...] [--no-save] [--json]
 ```
 
 `uv sync --all-extras --no-editable` is the operator setup in the selected checkout. No-sync alone
@@ -1316,13 +1317,14 @@ UNC/reparse/symlink roots are outside this contract. Regular invocation suppress
 bytecode, not first-import site-packages or external host caches. Editable imports can cache source
 before the function starts; do not present those as supported read-only commands.
 
-The unchanged direct `-B` expert forms remain:
+The direct `-B` expert forms remain:
 
 ```text
 python -B scripts/t2p.py doctor [--env <path>] [--json]
 python -B scripts/t2p.py start --project <exact-name|LUID> [--env <path>] [--runs-parent <path>] [--storage-decision <path>] [--session-id <UUID>] [--json]
 python -B scripts/t2p.py status --run <absolute-local-run> [--json]
 python -B scripts/t2p.py units {list | show <id> | find [--name <text>] [--luid <luid>]} [--runs-parent <path>] [--json]
+python -B scripts/t2p.py refresh <pbip-or-folder> [--canaries <table> ...] [--no-save] [--json]
 ```
 
 Ordinary `doctor` prints a short human verdict, every configuration/failed-critical blocker, safe
@@ -1407,6 +1409,19 @@ ambiguous/legacy, 3 unassessable, 2 syntax (including `find` without `--name`/`-
 publication-safe. An ID is a lookup key, not identity proof. No allocation, rename, refresh, credential,
 Desktop or path-gate call.
 
+`refresh` (Refs #863) is the operator's one-step refresh of ONE `.pbip`, or a folder holding exactly one.
+It runs `open_desktop.py --refresh`: open the model in a NEW Desktop, refresh that PID, Save, then close
+it by PID tree, but only while that PID still has its launch start time. Progress streams live (the PID at once, `OPEN_DESKTOP:` and `REFRESH_STATUS` lines, then
+the one `REFRESH:` verdict) and the child's exit code is the result: 0 OK, 1 data or persist failure,
+2 refused or error, 3 a human is needed (a Desktop dialog leaves that Desktop open, named by PID). A close that is skipped or fails prints the PID, can leave that Desktop running and keeps the refresh verdict as the exit code.
+This run just opened that Desktop, so its unsaved-changes flag is ignored; every other refresh still
+refuses a dirty one. `--no-save` discards the data on close. No `--automatic-source-scope` is passed, so
+it is operator-run only, never an agent's automatic refresh. JSON adds `authority`
+`open_desktop.py --refresh`, `delegated_exit_code` and status `ok` (0), `cannot_establish` (3) or `error`,
+with the child's output on stderr. No run is allocated and no path gate applies. The
+[refresh skill](../.github/skills/pbip-model-refresh/SKILL.md#one-step-open-refresh-save-close-863) owns
+the procedure.
+
 JSON stdout is one `t2p/v1` envelope, also for syntax/launch/interrupt failures. Common fields:
 `command`, `status`, `exit_code`, `authority`, `delegated_exit_code`, `stages`, `checks`, `evidence`,
 `artifacts`, `run_location`, `runs_root`, `path_report`, `limitations`, `proof_boundary`.
@@ -1426,8 +1441,8 @@ Schema shape is pinned inline in `scripts/t2p.py`; additive fields are compatibl
 require a new version. General statuses are `ok|findings|cannot_establish|error|interrupted`;
 doctor uses `READY_TO_ATTEMPT|BLOCKED_CONFIG|CANNOT_ESTABLISH`.
 
-Only these explicit verbs exist (`doctor`, `start`, `assess`, `status`, read-only `units`): no
-file/folder/datasource/site/server selectors, `next`,
-router, state DB, credential, build, package, validation, promotion, deployment or dispatch command.
+Only these explicit verbs exist (`doctor`, `start`, `assess`, `status`, read-only `units`, operator
+`refresh`): no datasource/site/server selectors (`refresh` alone takes a local `.pbip` file or folder),
+`next`, router, state DB, credential, build, package, validation, promotion, deployment or dispatch command.
 Synthetic tests validate mechanics, not blind-run benefit. Installation adds the bounded onboarding
 form only; live blind run 2 remains deferred as an independent same-project/same-oracle acceptance step.

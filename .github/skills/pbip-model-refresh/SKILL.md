@@ -1,6 +1,6 @@
 ---
 name: pbip-model-refresh
-description: Refresh a local PBIP/TMDL semantic model open in Power BI Desktop through Desktop's own Refresh (UI Automation), prove it with named row canaries, and persist it to .pbi/cache.abf through Desktop's own guarded Save. Saving is the default; `--no-save` skips Save but not source execution. The run streams `REFRESH_STATUS` progress lines, stops for a human on any Desktop dialog, and refuses a Desktop with unsaved changes (hasUnsavedChanges). For DAX-only edits, recalculate (MCP Calculate, or a reload of a clean Desktop) and then run `--save-only`; never a full source refresh just to recalculate. Use after finishing TMDL edits, before handing a model to report authoring, or whenever Desktop reopens a migrated model empty. Windows only. The model is already Power BI, so this works for any source tool.
+description: Refresh a local PBIP/TMDL semantic model open in Power BI Desktop through Desktop's own Refresh (UI Automation), prove it with named row canaries, and persist it to .pbi/cache.abf through Desktop's own guarded Save. Saving is the default; `--no-save` skips Save but not source execution. The run streams `REFRESH_STATUS` progress lines, stops for a human on any Desktop dialog, and refuses a Desktop with unsaved changes (hasUnsavedChanges), except a Desktop it opened itself via `open_desktop.py <pbip> --refresh` (also `t2p refresh`), which opens, refreshes, Saves and closes in one step for an operator. For DAX-only edits, recalculate (MCP Calculate, or a reload of a clean Desktop) and then run `--save-only`; never a full source refresh just to recalculate. Use after finishing TMDL edits, before handing a model to report authoring, or whenever Desktop reopens a migrated model empty. Windows only. The model is already Power BI, so this works for any source tool.
 ---
 
 # Refresh a local PBIP model, and make the data survive a close
@@ -25,7 +25,8 @@ Install `pythonnet`; otherwise install or repair Desktop, then rerun.
 - [**`scripts/refresh_pbip_model.py`**](scripts/refresh_pbip_model.py): refresh, canaries, guarded Save.
 - [**`scripts/probe_desktop_query.py`**](scripts/probe_desktop_query.py): read-only port discovery,
   table listing and one-row DAX probe.
-- `scripts/open_desktop.py`: open a `.pbip` in the installed Desktop and print its PID.
+- `scripts/open_desktop.py`: open a `.pbip` in the installed Desktop and print its PID; with `--refresh`,
+  also refresh, Save and close it ([one step](#one-step-open-refresh-save-close-863)).
 - [**`scripts/_desktop_observer.py`**](scripts/_desktop_observer.py): the sole read-only observer.
 - `scripts/_desktop_actions.py` and [`scripts/_desktop_actions.ps1`](scripts/_desktop_actions.ps1):
   one named UIA action (Refresh or Save); neither decides completion or classifies prompts.
@@ -41,10 +42,41 @@ It looks Desktop up live at every launch (a valid `PBI_DESKTOP_PATH` override, e
 classic), prints the PID at once, waits up to 180 s for the bridge to report that PID ready on that
 `.pbip` (startup replies in between are waited through) and fits the frame. The last
 line is JSON `{"pid", "exe_source": "pin|appx|classic", "ready_seconds"}`, exit 0. On a dialog, a
-timeout or ready on a different file it exits 2 with the PID in the error line. It never clicks or closes Desktop: close it
-yourself by that literal PID. `--check` starts nothing and prints the exe source and the Desktop and
-client file versions. A small frame collapses the Home ribbon. Measured: a 900x600 frame was refused
-before Invoke, and a maximized frame worked.
+timeout or ready on a different file it exits 2 with the PID in the error line. Without `--refresh` it
+never clicks or closes Desktop: close it yourself by that literal PID. `--check` starts nothing and
+prints the exe source and the Desktop and client file versions. A small frame collapses the Home
+ribbon. Measured: a 900x600 frame was refused before Invoke, and a maximized frame worked. Best
+effort: a `.pbip` that another Desktop lists as open by the same resolved absolute path is refused
+before anything starts. One bridge listing is read, so an instance whose listing has no file path, or
+that spells the path differently, is not caught.
+
+### One step: open, refresh, Save, close (#863)
+
+```
+python scripts/open_desktop.py <pbip-or-folder> --refresh [--canaries <table> ...] [--no-save]
+t2p refresh <pbip-or-folder> [--canaries <table> ...] [--no-save] [--json]
+```
+
+For an operator who wants the whole sequence in one command. It opens the model in a NEW Desktop,
+runs the default refresh on that PID, Saves, then closes that PID with its engine child
+(`taskkill /T`), so an idle Desktop does not stay in RAM, apart from the cases below. The PID is printed at once, and the run streams
+`OPEN_DESKTOP:` and `REFRESH_STATUS` lines before the one `REFRESH:` verdict. The exit code is that
+verdict's: 0 OK, 1 data or persist failure, 2 refused or error, 3 a human is needed.
+
+- **The unsaved-changes flag is ignored here, and only here.** This run started that Desktop moments
+  ago, so a dirty flag or Desktop's "files have changed" banner cannot be a human's work. Every
+  other refresh, including `refresh_pbip_model.py --pid`, still refuses a dirty Desktop.
+- A dialog (credentials, native-query approval) is still a human stop: the run exits 3 and leaves
+  that Desktop open, naming its PID. Close it afterwards with `Stop-Process -Id <pid> -Force`.
+  Otherwise the run tries to close the Desktop, but only while the process holding that PID still has
+  the start time read at launch; a different or unproven process is never killed. If the close fails
+  or is skipped, the run prints the PID and keeps the refresh verdict as its exit code, so a Desktop
+  can stay running after a successful refresh: check the last `OPEN_DESKTOP:` line. Ctrl+C during the
+  launch wait (up to 180 s) also leaves that Desktop open; its PID was printed at once.
+- `--no-save` discards the refreshed data on close.
+- This form passes no `--automatic-source-scope`, so it is operator-run only, like any scopeless
+  refresh. An agent's automatic refresh keeps the two-step route below with the scope file.
+- Give the path before `--canaries`, which takes several names. A folder must hold exactly one `.pbip`.
 
 ## Run it
 
@@ -72,7 +104,9 @@ linked [#692](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/is
   `hasUnsavedChanges: false` as an actual Boolean; dirty, missing or non-Boolean values refuse, so
   the tool never discards existing edits. Then one complete READY observer snapshot (no dialog), the
   identity check ([Bind to the right instance](#bind-to-the-right-instance-or-you-will-corrupt-a-sibling))
-  and a supported model: whole-model Import M source partitions. A refusal invokes nothing.
+  and a supported model: whole-model Import M source partitions. A refusal invokes nothing. The one
+  exception is the Desktop that [`open_desktop.py --refresh`](#one-step-open-refresh-save-close-863)
+  just opened: it skips only the dirty check.
 - **Typed completion.** Engine metadata, not the Invoke return, a quiet UI or positive rows, proves
   that every Import M partition became `READY` with a refreshed time newer than its baseline. Refresh
   is never retried. A dialog still open after completion refuses with `DIALOG_NEEDS_HUMAN` (exit 3)
@@ -278,6 +312,9 @@ Desktop **discards `cache.abf` when the model definition is newer than the cache
 
 > make **all** TMDL edits, **load them into Desktop** (reload a clean Desktop, or close it by PID and
 > reopen), then refresh, then save.
+
+For an operator, [one step](#one-step-open-refresh-save-close-863) does the reopen, refresh and save
+in one command. It opens a fresh Desktop on the current disk definition, so finish all edits first.
 
 `powerbi-desktop reload` does **not** reread edited TMDL: measured, it returned `{"success": true}`
 while `INFO.MEASURES()` still showed the old expressions. **Verify a model edit landed** with

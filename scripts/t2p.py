@@ -1,6 +1,6 @@
 """
-purpose: narrow doctor/start/status/units pilot delegating to existing configuration and run owners.
-usage:   python -B scripts/t2p.py {doctor,start,assess,status,units} [args]
+purpose: narrow doctor/start/status/units/refresh pilot delegating to existing configuration and run owners.
+usage:   python -B scripts/t2p.py {doctor,start,assess,status,units,refresh} [args]
 
 No readiness, liveness, fidelity, credential validity or completion certification.
 """
@@ -37,6 +37,7 @@ ASSESS_ONLY_OWNERS = {
     "report": "assessment_report.py",
 }
 ALL_STAGE_OWNERS = STAGE_OWNERS | ASSESS_ONLY_OWNERS
+REFRESH_OWNER = Path(".github", "skills", "pbip-model-refresh", "scripts", "open_desktop.py")
 ENVELOPE_SCHEMA = {
     "type": "object",
     "required": [
@@ -58,7 +59,7 @@ ENVELOPE_SCHEMA = {
     ],
     "properties": {
         "schema_version": {"const": SCHEMA_VERSION},
-        "command": {"enum": ["doctor", "start", "assess", "status", "units", None]},
+        "command": {"enum": ["doctor", "start", "assess", "status", "units", "refresh", None]},
         "status": {
             "enum": [
                 "ok",
@@ -153,7 +154,7 @@ def build_parser(prog: str = "python -B scripts/t2p.py") -> argparse.ArgumentPar
         allow_abbrev=False,
         description=(
             "Narrow pilot: diagnostic doctor, assessment-only survey, live project start, read-only status, "
-            "read-only unit lookup."
+            "read-only unit lookup, local .pbip refresh."
         ),
     )
     commands = parser.add_subparsers(dest="command", required=True, parser_class=Parser)
@@ -163,12 +164,17 @@ def build_parser(prog: str = "python -B scripts/t2p.py") -> argparse.ArgumentPar
         ("assess", "Assess one Tableau site and write offline HTML; no harvest, capture, or conversion."),
         ("status", "Read-only inventory for one absolute run: units, path budget and the owner's next command."),
         ("units", "Read-only unit-ID lookup across one runs root; no allocation, rename or refresh."),
+        ("refresh", "Open one .pbip in a new Power BI Desktop, refresh it, Save, close; progress streams live."),
     ):
         child = commands.add_parser(command, help=help_text, description=help_text, allow_abbrev=False)
         if command == "units":
             _add_units_actions(child)
             continue
         child.add_argument("--json", action="store_true", help="one t2p/v1 JSON envelope on stdout")
+        if command == "refresh":
+            child.add_argument("path", type=Path, help="a .pbip file, or the folder holding exactly one")
+            child.add_argument("--canaries", nargs="*", help="tables that must return rows, one per live source")
+            child.add_argument("--no-save", action="store_true", help="refresh in memory only; nothing is saved")
         if command in {"doctor", "start", "assess"}:
             child.add_argument("--env", type=Path, help="selected environment file (default: toolkit .env)")
         if command == "start":
@@ -355,9 +361,9 @@ def envelope(command: str | None) -> dict[str, Any]:
         "run_location": None,
         "runs_root": None,
         "run_location_reason": (
-            "not_applicable_no_run" if command in {"doctor", "units"} else "not_allocated_path_withheld"
+            "not_applicable_no_run" if command in {"doctor", "units", "refresh"} else "not_allocated_path_withheld"
         ),
-        "path_report": None if command in {"doctor", "assess", "units"} else path_report(command),
+        "path_report": None if command in {"doctor", "assess", "units", "refresh"} else path_report(command),
         "limitations": [],
         "proof_boundary": {
             "established": [],
@@ -1255,17 +1261,32 @@ def _print_safe(text: str) -> None:
     print(text.encode("ascii", errors="backslashreplace").decode("ascii"), flush=True)
 
 
+def refresh(args: argparse.Namespace, result: dict) -> int:
+    """Delegate to the refresh skill's one-step CLI; its live output is the progress, its exit code the verdict."""
+    result["authority"] = "open_desktop.py --refresh"
+    command = [sys.executable, "-B", str(ROOT / REFRESH_OWNER), str(args.path.expanduser().resolve()), "--refresh"]
+    if args.canaries:
+        command += ["--canaries", *args.canaries]
+    if args.no_save:
+        command.append("--no-save")
+    code = subprocess.run(command, check=False).returncode
+    result["delegated_exit_code"] = code
+    result["status"] = "ok" if code == 0 else "cannot_establish" if code == 3 else "error"
+    return code
+
+
 def _delegate(args: argparse.Namespace, result: dict, *, json_mode: bool) -> int:
     """Keep the same three owners and live descriptor transport, without a command registry."""
     if args.command == "doctor":
         code = doctor(args, result)
-    elif args.command in {"start", "assess"}:
-        # The path marker is local progress, not part of the stdout JSON stream.
+    elif args.command in {"start", "assess", "refresh"}:
+        # Live progress is local, not part of the stdout JSON stream.
+        owner = refresh if args.command == "refresh" else start
         if json_mode:
             with _native_to_stderr():
-                code = start(args, result)
+                code = owner(args, result)
         else:
-            code = start(args, result)
+            code = owner(args, result)
     elif args.command == "units":
         code = units(args, result)
     else:
@@ -1273,12 +1294,12 @@ def _delegate(args: argparse.Namespace, result: dict, *, json_mode: bool) -> int
     return code
 
 
-# pylint: disable=too-many-branches
+# pylint: disable=too-many-branches,too-many-statements
 def main(argv: list[str] | None = None, *, installed: bool = False) -> int:
     """Render one versioned result without reflecting exception text or invalid argv."""
     argv = list(sys.argv[1:] if argv is None else argv)
     json_mode = "--json" in argv
-    command = argv[0] if argv and argv[0] in {"doctor", "start", "assess", "status", "units"} else None
+    command = argv[0] if argv and argv[0] in {"doctor", "start", "assess", "status", "units", "refresh"} else None
     result = envelope(command)
     args = None
     install_failure = False
@@ -1310,6 +1331,8 @@ def main(argv: list[str] | None = None, *, installed: bool = False) -> int:
         _status_human(result)
     elif command == "units":
         _units_human(result)
+    elif command == "refresh" and result["delegated_exit_code"] is not None:
+        pass  # the refresh CLI already printed its progress and verdict
     elif command == "doctor":
         if installed:
             _doctor_human(result, args, installed=True)

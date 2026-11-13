@@ -88,7 +88,7 @@ appear only where the tier is not obvious. `scripts/README.md` remains the advan
 | `scripts/make_seed_workbook.py` | `advanced` | |
 | `scripts/make_showcase.py` | `advanced` | |
 | `scripts/migration_cost_report.py` | `advanced` | |
-| `scripts/open_desktop.py` | `advanced` | Skill shim. |
+| `scripts/open_desktop.py` | `advanced` | Skill shim; `--refresh` is reached through `t2p refresh`. |
 | `scripts/parse_tableau.py` | `advanced` | |
 | `scripts/preflight_source_credentials.py` | `advanced` | |
 | `scripts/probe_desktop_query.py` | `advanced` | Skill shim. |

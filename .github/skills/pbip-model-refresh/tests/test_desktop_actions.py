@@ -24,6 +24,7 @@ import pytest
 
 import _desktop_actions as actions
 import _source_scope as scope
+import open_desktop
 import probe_desktop_query as query_probe
 import refresh_pbip_model
 from _desktop_observer import (
@@ -550,6 +551,13 @@ def test_installed_launcher_refusal_does_not_retry_or_fall_back(
     calls = [json.loads(line) for line in calls_path.read_text(encoding="utf-8").splitlines()]
     assert len(calls) == 1 and calls[0][:3] == ["status", "--pid", "123"], "refusal retried"
     assert not fallback.exists(), "refusal selected a different launcher"
+
+
+def test_a_listing_without_a_pid_asks_the_bridge_not_to_wait_for_an_instance(installed_bridge) -> None:
+    _launcher, calls_path, _fallback = installed_bridge
+    refresh_pbip_model._ui_bridge_status(refresh_pbip_model._ui_bridge_command(), None, time.monotonic() + 15)
+    calls = [json.loads(line) for line in calls_path.read_text(encoding="utf-8").splitlines()]
+    assert calls == [["status", "--wait-seconds", "0"]]
 
 
 def test_absent_installed_launcher_refuses_without_spawning_npm(
@@ -3138,3 +3146,228 @@ def test_ui_refusal_prints_the_observed_frame_and_hints_only_a_missing_control(
         assert "resize" not in hint and "--" not in hint
     else:
         assert "hint" not in out
+
+
+def _pbip(folder: Path, name: str = "model.pbip") -> Path:
+    folder.mkdir(parents=True, exist_ok=True)
+    pbip = folder / name
+    pbip.write_text("{}", encoding="utf-8")
+    return pbip
+
+
+def _taskkill_recorder(monkeypatch: pytest.MonkeyPatch, returncode: int = 0) -> list[list[str]]:
+    """Record taskkill calls instead of running them; any other subprocess call fails the test."""
+    killed: list[list[str]] = []
+
+    def run(command, **_kwargs):
+        if command[0] != "taskkill":
+            pytest.fail(f"unexpected subprocess: {command}")
+        killed.append(command)
+        return SimpleNamespace(returncode=returncode)
+
+    monkeypatch.setattr(open_desktop.subprocess, "run", run)
+    monkeypatch.setattr(open_desktop, "_ui_desktop_alive", lambda _pid: True)
+    monkeypatch.setattr(open_desktop, "process_start", lambda pid: "tok" if pid == 123 else None)
+    return killed
+
+
+KILL_123 = [["taskkill", "/PID", "123", "/T", "/F"]]
+UNPROVEN = "PID 123 not closed: its identity is unproven; check it before stopping it"
+
+
+@pytest.mark.parametrize("dirty", [True, None], ids=["unsaved", "unknown"])
+def test_refresh_ignores_the_unsaved_flag_of_the_desktop_it_opened_then_closes_it(
+    ui_refresh_route, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str], dirty
+) -> None:
+    """#863: a Desktop this run just opened holds no human work, so its dirty flag never blocks Refresh.
+
+    `--pid` on an already-open Desktop still refuses a dirty one
+    (`test_ui_refresh_requires_strict_false_initially`).
+    """
+    controls, _events, actions_seen, _bridge_operations = ui_refresh_route
+    controls["initial"]["hasUnsavedChanges"] = dirty
+    pbip = _pbip(tmp_path / "package")
+    opened = []
+    monkeypatch.setattr(open_desktop, "open_pbip", lambda path: opened.append(path) or (123, {"pid": 123}, "tok"))
+    invoke = refresh_pbip_model.invoke_desktop_action
+
+    def save_clears_the_flag(action, **kwargs):
+        if action == "Save":
+            controls["initial"]["hasUnsavedChanges"] = False
+        return invoke(action, **kwargs)
+
+    monkeypatch.setattr(refresh_pbip_model, "invoke_desktop_action", save_clears_the_flag)
+    monkeypatch.setattr(refresh_pbip_model, "bound_call", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        refresh_pbip_model, "_ui_observer_state", lambda *_args, **_kwargs: SimpleNamespace(state="READY")
+    )
+    killed = _taskkill_recorder(monkeypatch)
+
+    assert open_desktop.main([str(pbip.parent), "--refresh"]) == 0
+    out = capsys.readouterr().out
+    assert opened == [pbip]
+    assert actions_seen == ["Refresh", "canaries", "Save"]
+    assert killed == KILL_123
+    assert out.rstrip().endswith("OPEN_DESKTOP: closed PID 123")
+
+
+@pytest.fixture(name="self_open")
+def _self_open(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """`open_desktop --refresh` with `open_pbip` and `_run` controlled; returns the .pbip and a log."""
+    log: dict = {"opened": [], "run": [], "ready": {"pid": 123}, "result": 0}
+
+    def open_pbip(path):
+        log["opened"].append(path)
+        return 123, log["ready"], "tok"
+
+    def run(args, pid, *, require_clean):
+        log["run"].append((pid, require_clean, args.pid, args.canaries, args.no_save))
+        if isinstance(log["result"], Exception):
+            raise log["result"]
+        return log["result"]
+
+    monkeypatch.setattr(open_desktop, "open_pbip", open_pbip)
+    monkeypatch.setattr(open_desktop, "_run", run)
+    monkeypatch.setattr(open_desktop, "_credential_state", lambda _pid: Observation())
+    log["killed"] = _taskkill_recorder(monkeypatch)
+    return SimpleNamespace(pbip=_pbip(tmp_path / "package"), log=log)
+
+
+@pytest.mark.parametrize("result", [0, 1, 2, 3])
+def test_the_desktop_refresh_opened_is_closed_whatever_the_verdict_without_a_dialog(
+    capsys: pytest.CaptureFixture[str], self_open, result: int
+) -> None:
+    self_open.log["result"] = result
+
+    argv = [str(self_open.pbip), "--refresh", "--canaries", "Orders", "Sales", "--no-save"]
+    assert open_desktop.main(argv) == result
+    assert self_open.log["run"] == [(123, False, 123, ["Orders", "Sales"], True)]
+    assert self_open.log["killed"] == KILL_123
+    assert capsys.readouterr().out.rstrip().endswith("OPEN_DESKTOP: closed PID 123")
+
+
+def test_refresh_without_options_runs_the_skill_defaults(self_open) -> None:
+    assert open_desktop.main([str(self_open.pbip), "--refresh"]) == 0
+    assert self_open.log["run"] == [(123, False, 123, None, False)]
+
+
+def test_a_dialog_after_a_failed_refresh_leaves_the_desktop_open_for_a_human(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], self_open
+) -> None:
+    self_open.log["result"] = 1
+    monkeypatch.setattr(open_desktop, "_credential_state", lambda _pid: SimpleNamespace(dialog=object()))
+    monkeypatch.setattr(open_desktop, "dialog_stop_detail", lambda _dialog: "Sign in. A human must act.")
+
+    assert open_desktop.main([str(self_open.pbip), "--refresh"]) == 3
+    out = capsys.readouterr().out
+    assert self_open.log["killed"] == []
+    assert "OPEN_DESKTOP: PID 123 left open for a human: Sign in. A human must act." in out
+    assert "OPEN_DESKTOP: close it afterwards with Stop-Process -Id 123 -Force" in out
+
+
+def test_a_desktop_that_never_got_ready_is_closed_without_a_refresh(
+    capsys: pytest.CaptureFixture[str], self_open
+) -> None:
+    self_open.log["ready"] = None
+
+    assert open_desktop.main([str(self_open.pbip), "--refresh"]) == 2
+    assert self_open.log["run"] == []
+    assert self_open.log["killed"] == KILL_123
+    assert "OPEN_DESKTOP: closed PID 123" in capsys.readouterr().out
+
+
+def test_the_desktop_is_closed_even_when_the_refresh_raises(self_open) -> None:
+    self_open.log["result"] = RuntimeError("controlled")
+
+    with pytest.raises(RuntimeError, match="controlled"):
+        open_desktop.main([str(self_open.pbip), "--refresh"])
+    assert self_open.log["killed"] == KILL_123
+
+
+def test_a_desktop_that_already_exited_is_not_killed(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], self_open
+) -> None:
+    monkeypatch.setattr(open_desktop, "_ui_desktop_alive", lambda _pid: False)
+
+    assert open_desktop.main([str(self_open.pbip), "--refresh"]) == 0
+    assert self_open.log["killed"] == []
+    assert "OPEN_DESKTOP: PID 123 already exited" in capsys.readouterr().out
+
+
+def test_a_failed_close_names_the_pid_to_stop(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], self_open
+) -> None:
+    _taskkill_recorder(monkeypatch, returncode=128)
+
+    assert open_desktop.main([str(self_open.pbip), "--refresh"]) == 0
+    expected = "OPEN_DESKTOP: could not close PID 123; close it with Stop-Process -Id 123 -Force"
+    assert expected in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("live", "launched", "said"),
+    [
+        ("other", "tok", "PID 123 is now a different process; nothing closed"),
+        ("tok", None, UNPROVEN),
+        (OSError("unreadable"), "tok", UNPROVEN),
+    ],
+    ids=["reused", "launch-unread", "live-unreadable"],
+)
+def test_a_pid_that_is_not_proven_to_be_our_desktop_is_never_killed(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], self_open, live, launched, said
+) -> None:
+    def process_start(_pid):
+        if isinstance(live, OSError):
+            raise live
+        return live
+
+    monkeypatch.setattr(open_desktop, "process_start", process_start)
+    monkeypatch.setattr(open_desktop, "open_pbip", lambda _path: (123, {"pid": 123}, launched))
+
+    assert open_desktop.main([str(self_open.pbip), "--refresh"]) == 0
+    out = capsys.readouterr().out
+    assert self_open.log["killed"] == []
+    assert f"OPEN_DESKTOP: {said}" in out
+    assert "Stop-Process" not in out
+
+
+@pytest.mark.parametrize("pbips", [[], ["a.pbip", "b.pbip"]], ids=["none", "two"])
+def test_a_folder_without_exactly_one_pbip_starts_nothing(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path, self_open, pbips: list[str]
+) -> None:
+    folder = tmp_path / "folder"
+    folder.mkdir()
+    for name in pbips:
+        _pbip(folder, name)
+
+    assert open_desktop.main([str(folder), "--refresh"]) == 2
+    assert self_open.log["opened"] == []
+    assert "nothing started" in capsys.readouterr().out
+
+
+def test_a_launch_that_started_nothing_is_not_released(monkeypatch: pytest.MonkeyPatch, self_open) -> None:
+    monkeypatch.setattr(open_desktop, "open_pbip", lambda _path: (None, None, None))
+    monkeypatch.setattr(open_desktop, "_release", lambda *_args: pytest.fail("_release called without a PID"))
+
+    assert open_desktop.main([str(self_open.pbip), "--refresh"]) == 2
+    assert self_open.log["run"] == [] and self_open.log["killed"] == []
+
+
+@pytest.mark.parametrize(
+    ("argv", "message"),
+    [
+        (["{pbip}", "--canaries", "Orders"], "--canaries and --no-save need --refresh"),
+        (["{pbip}", "--no-save"], "--canaries and --no-save need --refresh"),
+        (["--check", "--refresh"], "--canaries and --no-save need --refresh"),
+        (["--refresh"], "give either a .pbip path or --check"),
+    ],
+    ids=["canaries", "no-save", "check", "no-path"],
+)
+def test_refresh_options_without_a_refresh_or_a_path_start_nothing(
+    capsys: pytest.CaptureFixture[str], self_open, argv: list[str], message: str
+) -> None:
+    with pytest.raises(SystemExit) as stopped:
+        open_desktop.main([arg.format(pbip=self_open.pbip) for arg in argv])
+    assert stopped.value.code == 2
+    assert self_open.log["opened"] == []
+    assert message in capsys.readouterr().err

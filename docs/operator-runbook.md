@@ -645,6 +645,11 @@ The verified contract comes from `refresh_pbip_model.py`; re-read it before quot
 | **`uia`** (default) | `refresh_pbip_model.py --pid <pid>`: Desktop's own Refresh and guarded Save through UI Automation; **3600 s** absolute backstop, configurable with `--refresh-absolute-timeout-seconds` | Always-on `REFRESH_STATUS` lines (phase, Process job count, dialog title) and a `REFRESH_SUMMARY`; only the `REFRESH:` verdict decides. |
 | `operator` | Agent prepares, stops and asks the operator to hit Refresh and Save in Desktop; never an automated fallback; no script-imposed ceiling | UI per-table row counts; then the same canary and cold-reopen evidence. |
 
+An operator can run the whole sequence in one command: `t2p refresh <pbip-or-folder>` opens a new
+Desktop, refreshes it, Saves and closes it (a skipped or failed close prints the PID and can leave that Desktop running), and streams the same progress. It passes no
+`--automatic-source-scope`, so agents keep the two-step route
+([refresh skill](../.github/skills/pbip-model-refresh/SKILL.md#one-step-open-refresh-save-close-863)).
+
 The old recalculation, table-narrowing and progress-tuning flags were removed and fail at argument
 parsing with exit 2. DAX-only edits need no source refresh: MCP Calculate (MCP-made DAX) or a reload
 of a clean Desktop (file-made DAX), then `--save-only`. MCP never runs a source refresh.

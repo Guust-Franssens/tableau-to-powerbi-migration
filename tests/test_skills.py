@@ -1088,7 +1088,7 @@ def test_host_refresh_contract_is_uia_default_with_operator_handoff() -> None:
         ),
         (
             CAPABILITY_WIRING,
-            "| `scripts/open_desktop.py` | `advanced` | Skill shim. |",
+            "| `scripts/open_desktop.py` | `advanced` | Skill shim; `--refresh` is reached through `t2p refresh`. |",
             "",
             test_host_refresh_contract_is_uia_default_with_operator_handoff,
             "wiring lost open_desktop row",

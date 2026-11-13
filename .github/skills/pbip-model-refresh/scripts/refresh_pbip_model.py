@@ -6,7 +6,8 @@ usage:   python .github/skills/pbip-model-refresh/scripts/refresh_pbip_model.py 
              [--canaries "A" "B"] [--no-save] [--automatic-source-scope EXPECTED_SOURCES_JSON]
              [--verify-only | --save-only]
          (ships inside the `pbip-model-refresh` skill; run it by its path from wherever the folder
-          was copied. `scripts/refresh_pbip_model.py` in this repo is a forwarding shim.)
+          was copied. `scripts/refresh_pbip_model.py` in this repo is a forwarding shim. To open,
+          refresh, Save and close in one step use `open_desktop.py <pbip> --refresh` or `t2p refresh`.)
 
 WARNING: the default refresh executes ALL current M of the model, including native/custom SQL, with
 possible source-side cost. `--no-save` prevents Save, NOT source execution. Automatic callers add
@@ -14,6 +15,9 @@ possible source-side cost. `--no-save` prevents Save, NOT source execution. Auto
 
 How it works
 ------------
+- `--pid` is a Desktop that is already open: it must have no unsaved changes (they may be a human's
+  work), and it stays open afterwards. `open_desktop.py <pbip> --refresh` runs this same refresh on a
+  Desktop it has just opened, where that flag is ignored, then closes it.
 - Default: check the bridge, the observer and the model identity, invoke Desktop's own Refresh through
   UI Automation, wait for typed engine completion (every source partition refreshed after the Invoke),
   run the canaries, then Desktop's own guarded Save, then print one `REFRESH:` verdict. `--no-save`
@@ -417,13 +421,15 @@ def _ui_bridge_command() -> list[str]:
 
 
 def _ui_bridge_status(  # pylint: disable=too-many-statements,too-many-locals,too-many-branches
-    command: list[str], pid: int, deadline: float
+    command: list[str], pid: int | None, deadline: float
 ) -> dict:
-    """One contained exact-PID status RPC under the caller's original deadline."""
+    """One contained status RPC under the caller's deadline: exact PID, or (pid None) every instance at once."""
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         raise TimeoutError
-    arguments = [*command, "status", "--pid", str(pid), "--wait-seconds", str(remaining)]
+    # Without --pid the bridge waits the whole --wait-seconds when nothing is open, so a listing never waits.
+    target = ["--wait-seconds", "0"] if pid is None else ["--pid", str(pid), "--wait-seconds", str(remaining)]
+    arguments = [*command, "status", *target]
     environment = None
     if os.name == "nt" and Path(command[0]).suffix.lower() in {".cmd", ".bat"}:
         if any(any(character in argument for character in '"\r\n\x00') for argument in arguments):
@@ -1788,12 +1794,18 @@ def _validate_args(args: argparse.Namespace) -> bool:
     return True
 
 
-def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-return-statements,too-many-locals,too-many-branches
+def main(argv: list[str] | None = None) -> int:
     """CLI entry point: Desktop's own Refresh and guarded Save by default, and proof the data is there."""
     args = _build_arg_parser().parse_args(argv)
     if not _validate_args(args):
         return 2
-    pid = args.pid
+    return _run(args, args.pid, require_clean=not args.save_only)
+
+
+def _run(  # pylint: disable=too-many-return-statements,too-many-locals,too-many-branches
+    args: argparse.Namespace, pid: int, *, require_clean: bool
+) -> int:
+    """Refresh (or `--save-only`/`--verify-only`) the Desktop `pid`; `require_clean` refuses unsaved changes."""
     entry = time.monotonic()
     deadline = entry + args.refresh_absolute_timeout_seconds
     startup_deadline = min(entry + 60.0, deadline)
@@ -1804,7 +1816,7 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-retu
     if args.verify_only:
         state = _credential_state(pid)
     else:
-        preflight = _ui_refresh_preflight(pid, instance, startup_deadline, require_clean=not args.save_only)
+        preflight = _ui_refresh_preflight(pid, instance, startup_deadline, require_clean=require_clean)
         if isinstance(preflight, int):
             return preflight
         instance, state = preflight
