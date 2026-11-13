@@ -151,7 +151,6 @@ CODE_ENGINE_MEMBERSHIP = "engine_classification_membership"
 CODE_SOURCE_SHA_MISSING = "source_sha_missing"
 CODE_PROVENANCE_ROWS = "provenance_row_cardinality"
 CODE_PROVENANCE_SHA = "provenance_sha_disagrees_with_source"
-CODE_PROVENANCE_FILE = "provenance_file_disagrees_with_source"
 CODE_SPEC_FILE = "spec_file_disagrees_with_source"
 CODE_LUID_NAMESPACE = "luid_namespace_mismatch"
 CODE_LUID_CONTRADICTION = "server_luid_contradiction"
@@ -911,13 +910,11 @@ def _provenance_role(  # pylint: disable=too-many-return-statements
 
 
 def _source_identity_role(facts: _RoleContext, row: dict[str, Any] | None) -> RoleResult:
-    """The same-byte cross-checks: provenance filename and spec filename name the source role."""
+    """The spec names the source role. Provenance identity is sha256 (`_provenance_role`) plus LUID
+    (`_server_identity_role`); its `input.file` is a display label, which compact-ID staging renames (#865)."""
     if facts.source_key is None or row is None:
         return _role(ROLE_SOURCE_IDENTITY, STATE_MISSING, "1 sha256", [], CODE_SOURCE_SHA_MISSING)
     basename = PurePosixPath(facts.source_key).name
-    supplied = row.get("input") if isinstance(row.get("input"), dict) else {}
-    if supplied.get("file") != basename:
-        return _role(ROLE_SOURCE_IDENTITY, STATE_MISMATCH, "1 sha256", [facts.source_key], CODE_PROVENANCE_FILE)
     spec = facts.json(_declared_string(facts.artifacts, "migration_spec"))
     source = spec.get("source", {}) if isinstance(spec, dict) else {}
     if not isinstance(source, dict):

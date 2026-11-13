@@ -123,19 +123,21 @@ def _brief(
     return path
 
 
-def _bundle(tmp_path: Path, *, covered: set[str] | None, datasource_only: bool = False) -> tuple[Path, Path, list]:
+def _bundle(
+    tmp_path: Path, *, covered: set[str] | None, datasource_only: bool = False, unit: str = UNIT
+) -> tuple[Path, Path, list]:
     """`(bundle, oracle, source objects)` for one real workbook, covered by the named objects only."""
     bundle = tmp_path / "bundle"
     assets = tmp_path / "assets"
     assets.mkdir(parents=True, exist_ok=True)
-    asset = assets / f"{WB_LUID}_{UNIT}.twb"
+    asset = assets / f"{WB_LUID}_{unit}.twb"
     shutil.copy2(FIXTURE, asset)
     objects = crr.source_objects(asset) or []
     assert objects, "the fixture workbook must declare dashboards/worksheets or nothing is measured"
 
-    write_engine_report(bundle, workbooks=[UNIT], datasources=[DS_UNIT] if datasource_only else [])
-    write_handover(bundle, UNIT, source_id=str(Path("_runs") / "999-x" / "assets" / asset.name))
-    _write_pbir(bundle, UNIT, objects)
+    write_engine_report(bundle, workbooks=[unit], datasources=[DS_UNIT] if datasource_only else [])
+    write_handover(bundle, unit, source_id=str(Path("_runs") / "999-x" / "assets" / asset.name))
+    _write_pbir(bundle, unit, objects)
     staged = [asset]
     if datasource_only:
         _write_model(bundle, DS_UNIT)
@@ -144,7 +146,7 @@ def _bundle(tmp_path: Path, *, covered: set[str] | None, datasource_only: bool =
         datasource = assets / f"{DS_LUID}_{DS_UNIT}.tds"
         shutil.copy2(DS_FIXTURE, datasource)
         staged.append(datasource)
-    _write_receipt(bundle, [UNIT, DS_UNIT] if datasource_only else [UNIT])
+    _write_receipt(bundle, [unit, DS_UNIT] if datasource_only else [unit])
     _write_input_manifest(bundle, staged)
 
     (bundle / "source-provenance.json").write_text(
@@ -1159,8 +1161,51 @@ def test_the_packager_budgets_against_those_same_two_literals() -> None:
 
 
 # --------------------------------------------------------------------------------------------
-# the scoped report, against BOTH gates - the positive control for round-1 finding 1
-
-
+# compact-ID runs (#865): the engine ships `<luid>_<unit>`, provenance stamped the original name
 # --------------------------------------------------------------------------------------------
-# The ceilings themselves. Pinned HERE, in a suite the package-unit mutation harness scored (retired in #830), because
+
+COMPACT_UNIT = "u0001"
+ORIGINAL_ASSET = f"{WB_LUID}_{UNIT}.twb"
+
+
+def _compact_package(tmp_path: Path) -> Path:
+    """A compact-ID package whose provenance `input.file` is the original, pre-staging filename."""
+    bundle, oracle, _ = _bundle(tmp_path, covered=None, unit=COMPACT_UNIT)
+    path = bundle / "source-provenance.json"
+    provenance = json.loads(path.read_text(encoding="utf-8"))
+    provenance["inputs"][0]["input"]["file"] = ORIGINAL_ASSET
+    path.write_text(json.dumps(provenance), encoding="utf-8")
+    return _package(tmp_path, bundle, oracle, COMPACT_UNIT)
+
+
+def test_a_compact_id_package_is_identified_by_sha_and_luid_not_its_filename_label(tmp_path: Path) -> None:
+    package = _compact_package(tmp_path)
+    result = pri.verify_phase1_role_identity([package])[0]
+
+    assert result.verdict == pri.VERDICT_START_READY, result.blockers
+    (row,) = json.loads((package / "source-provenance.json").read_text(encoding="utf-8"))["inputs"]
+    assert row["input"]["file"] == ORIGINAL_ASSET
+    assert [path.name for path in (package / "assets").iterdir()] == [f"{WB_LUID}_{COMPACT_UNIT}.twb"]
+
+
+@pytest.mark.parametrize(
+    ("part", "field", "value", "code"),
+    [
+        ("input", "sha256", "0" * 64, pri.CODE_PROVENANCE_SHA),
+        ("origin", "workbook_luid", DS_LUID, pri.CODE_LUID_CONTRADICTION),
+    ],
+    ids=["sha-mismatch", "luid-contradiction"],
+)
+def test_a_compact_id_package_still_refuses_foreign_bytes_or_luid(
+    tmp_path: Path, part: str, field: str, value: str, code: str
+) -> None:
+    package = _compact_package(tmp_path)
+    path = package / "source-provenance.json"
+    provenance = json.loads(path.read_text(encoding="utf-8"))
+    provenance["inputs"][0][part][field] = value
+    path.write_text(json.dumps(provenance), encoding="utf-8")
+    seal(package, **json.loads((package / "package-manifest.json").read_bytes()))
+    result = pri.verify_phase1_role_identity([package])[0]
+
+    assert result.verdict != pri.VERDICT_START_READY
+    assert code in {row.code for row in result.roles if row.state in pri.BLOCKING_STATES}, result.roles

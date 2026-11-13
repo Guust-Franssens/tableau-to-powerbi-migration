@@ -502,14 +502,16 @@ fail-open this slice closes: measured on the audited master, exactly that packag
 4/4`, exit 0.
 
 ⚠️ **Identity is typed; diagnostic names never become provider authority.** The
-source SHA-256 (S1-verified) joins asset → provenance row → spec filename. The Tableau LUID, when one
-exists, must agree across provenance, the harvester's `<luid>_<name>` filename prefix and every
-oracle view. The two LUID namespaces are **typed**: a datasource LUID in a workbook's provenance is a
-category error, not a spelling difference.
+source identity is the SHA-256 (S1-verified) plus the Tableau LUID. The SHA joins asset → provenance
+row; the spec `file_name` must name the held asset. The LUID, when one exists, must agree across
+provenance, the held asset's `<luid>_<name>` filename prefix and every oracle view. The provenance
+`input.file` is a display label, not identity: compact-ID staging renames the asset (#865). The two
+LUID namespaces are **typed**: a datasource LUID in a workbook's provenance is a category error, not
+a spelling difference.
 
 **Current acquired P, not a spec LUID, selects a published provider.** P is the exact optional
 `origin.published_dependencies` block (`tableau-published-dependencies/v1`) on the single provenance
-row matched to the held workbook filename and SHA. Its source SHA and enclosing workbook-origin
+row matched to the held workbook SHA. Its source SHA and enclosing workbook-origin
 LUID must agree; `source_match` is exactly `sha256`, `revision_same` or `unestablished`. Rows are
 nonempty and strictly increasing by physical `source_ordinal`. `resolved` carries count 1 and one
 canonical datasource LUID; `ambiguous` carries count >1 and no LUID; `cannot_establish` carries a
@@ -550,8 +552,8 @@ overrides. Ordinary bundle handling is unchanged.
 
 **Earned limitations** do not convert a role state; they record why one is `not_applicable`:
 
-- `local_source_no_server_luid` — a genuinely local `.twb`/`.tds`: SHA, filename and spec agree and
-  there is no server LUID to agree with;
+- `local_source_no_server_luid` — a genuinely local `.twb`/`.tds`: provenance SHA matches the held
+  bytes, the spec `file_name` names the held asset, and there is no server LUID to agree with;
 - `brief_policy_not_parsed` — the brief is absent, plain Markdown or legacy identity-only
   frontmatter. No policy is inferred (not even `stop`); a missing brief also retains its blocking
   role. The producer emits `cannot_establish/projection-invalid`.
