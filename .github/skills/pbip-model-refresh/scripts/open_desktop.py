@@ -1,11 +1,14 @@
 """
 purpose: open a .pbip in the installed Power BI Desktop, print its PID, and wait until the Desktop
-         bridge reports exactly that PID ready on that .pbip. --check starts nothing: it finds
-         Desktop and loads the ADOMD client that ships beside it.
+         bridge reports exactly that PID ready on that .pbip. --refresh then refreshes it, Saves and
+         closes it in one step. --check starts nothing: it finds Desktop and loads the ADOMD client
+         that ships beside it.
 usage:   python .github/skills/pbip-model-refresh/scripts/open_desktop.py <path-to.pbip>
+         python .github/skills/pbip-model-refresh/scripts/open_desktop.py <path-to.pbip-or-its-folder>
+             --refresh [--canaries "A" "B"] [--no-save]
          python .github/skills/pbip-model-refresh/scripts/open_desktop.py --check
          (ships inside the `pbip-model-refresh` skill; `scripts/open_desktop.py` in this repo is a
-          forwarding shim.)
+          forwarding shim. `t2p refresh` runs the --refresh form.)
 
 Desktop is looked up at every run, so an update needs no re-pin and no config change:
 PBI_DESKTOP_PATH when that file exists (set but missing: ignored with a notice), else the Store
@@ -14,8 +17,15 @@ install (Get-AppxPackage), else the classic install under %ProgramFiles%.
 The PID is printed on its own line as soon as Desktop starts, so a caller can always close exactly
 that process, even when a later step fails. Readiness is bounded at 180 seconds; until then any bridge
 reply other than "ready on this .pbip" means Desktop is still starting. Ready on a different file is
-refused. A dialog is a human stop: this script never clicks or closes Desktop.
-Exit codes: 0 ready (or check passed); 2 refused or failed.
+refused, and so is a .pbip that another Desktop already has open (nothing is started). A dialog is a
+human stop: this script never clicks Desktop.
+
+--refresh runs `refresh_pbip_model.py`'s refresh on the PID it just opened. That Desktop holds no
+human work, so its unsaved-changes flag is ignored. Afterwards it closes that PID with its engine
+child, so an idle Desktop never holds RAM; a failed run that ends on a dialog leaves it open for a
+human instead. With --no-save the refreshed data is discarded on close.
+Exit codes: 0 ready (or check passed, or refresh verdict OK); 2 refused or failed; with --refresh the
+refresh verdict (1 data or persist failure, 3 needs a human, including Desktop left open on a dialog).
 """
 
 from __future__ import annotations
@@ -34,7 +44,9 @@ from _desktop_observer import dialog_stop_detail
 from probe_desktop_query import ADOMD_CLIENT_DLL, AdomdUnavailable, _load_adomd_from
 from refresh_pbip_model import (
     _bridge_readiness_result,
+    _build_arg_parser,
     _credential_state,
+    _run,
     _ui_bridge_command,
     _ui_bridge_status,
     _ui_desktop_alive,
@@ -156,22 +168,48 @@ def _diagnose(pid: int) -> None:
         print("OPEN_DESKTOP: diagnostic: CANNOT_READ; inspect that Desktop locally", flush=True)
 
 
-def launch(pbip: Path) -> int:
-    """Open `pbip`, print the PID at once, wait for readiness, fit the frame; 0 ready, 2 otherwise."""
+def _open_elsewhere(model: Path) -> dict | None:
+    """The bridge listing entry of a running Desktop that already has `model` open (one listing), else None."""
+    payload = _ui_bridge_status(_ui_bridge_command(), None, time.monotonic() + 30)
+    instances = payload.get("instances")
+    if not isinstance(instances, list):
+        raise DesktopActionError("malformed bridge instances")
+    for instance in instances:
+        path = instance.get("currentFilePath") if isinstance(instance, dict) else None
+        if isinstance(path, str) and path and os.path.normcase(Path(path).resolve()) == os.path.normcase(model):
+            return instance
+    return None
+
+
+def open_pbip(pbip: Path) -> tuple[int | None, dict | None]:  # pylint: disable=too-many-return-statements
+    """Open `pbip`, print the PID at once, wait for readiness, fit the frame.
+
+    Returns (pid, ready record); pid is None when nothing was started, the record is None when not ready.
+    A .pbip another Desktop already has open is refused, so a human's session is never raced.
+    """
     if pbip.suffix.lower() != ".pbip" or not pbip.is_file():
         print("OPEN_DESKTOP: ERROR the argument is not an existing .pbip file; nothing started")
-        return 2
+        return None, None
     found = find_desktop()
     if found is None:
         print(NOT_FOUND)
-        return 2
+        return None, None
     exe, source = found
     model = pbip.resolve()
+    try:
+        holder = _open_elsewhere(model)
+    except (TimeoutError, DesktopActionError, OSError) as exc:
+        detail = str(exc) if isinstance(exc, DesktopActionError) else type(exc).__name__
+        print(f"OPEN_DESKTOP: ERROR cannot list the open Desktops ({detail}); nothing started")
+        return None, None
+    if holder is not None:
+        print(f"OPEN_DESKTOP: ERROR this .pbip is already open in Desktop PID {holder.get('pid')}; nothing started")
+        return None, None
     try:
         pid = _start(exe, model)
     except OSError as exc:
         print(f"OPEN_DESKTOP: ERROR Power BI Desktop could not be started ({type(exc).__name__})")
-        return 2
+        return None, None
     print(pid, flush=True)
     record = _launch_record(pid)
     print(
@@ -193,12 +231,84 @@ def launch(pbip: Path) -> int:
             print(fit_launched_frame(pid, record).describe(), flush=True)
         except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
             print(f"frame: not fitted ({type(exc).__name__})", flush=True)
-        print(json.dumps({"pid": pid, "exe_source": source, "ready_seconds": seconds}))
-        return 0
+        return pid, {"pid": pid, "exe_source": source, "ready_seconds": seconds}
     seconds = round(time.monotonic() - started)
     _diagnose(pid)
-    print(f"OPEN_DESKTOP: ERROR PID {pid} not ready after {seconds} seconds ({failure}); Desktop left open")
+    print(f"OPEN_DESKTOP: ERROR PID {pid} not ready after {seconds} seconds ({failure})", flush=True)
+    return pid, None
+
+
+def launch(pbip: Path) -> int:
+    """The CLI: open `pbip` and leave Desktop open for the caller; 0 ready, 2 otherwise."""
+    pid, ready = open_pbip(pbip)
+    if ready is not None:
+        print(json.dumps(ready))
+        return 0
+    if pid is not None:
+        print(f"OPEN_DESKTOP: Desktop PID {pid} left open")
     return 2
+
+
+def _resolve_pbip(path: Path) -> Path | None:
+    """`path` when it is a .pbip file, or the only .pbip directly inside the folder `path`; else None."""
+    if path.is_dir():
+        found = sorted(path.glob("*.pbip"))
+        return found[0] if len(found) == 1 else None
+    return path if path.suffix.lower() == ".pbip" and path.is_file() else None
+
+
+def _release(pid: int, result: int) -> bool:
+    """Close the Desktop this run opened, by PID with its engine child; True when left open for a dialog."""
+    try:
+        if not _ui_desktop_alive(pid):
+            print(f"OPEN_DESKTOP: PID {pid} already exited", flush=True)
+            return False
+    except DesktopActionError:
+        pass
+    if result != 0:
+        try:
+            dialog = _credential_state(pid).dialog
+        except Exception:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+            dialog = None
+        if dialog is not None:
+            print(f"OPEN_DESKTOP: PID {pid} left open for a human: {dialog_stop_detail(dialog)}", flush=True)
+            print(f"OPEN_DESKTOP: close it afterwards with Stop-Process -Id {pid} -Force", flush=True)
+            return True
+    try:
+        command = ["taskkill", "/PID", str(pid), "/T", "/F"]
+        closed = subprocess.run(command, capture_output=True, check=False, timeout=60).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        closed = False
+    if closed:
+        print(f"OPEN_DESKTOP: closed PID {pid}", flush=True)
+    else:
+        print(f"OPEN_DESKTOP: could not close PID {pid}; close it with Stop-Process -Id {pid} -Force", flush=True)
+    return False
+
+
+def refresh_and_close(path: Path, canaries: list[str] | None, no_save: bool) -> int:
+    """Open the .pbip in a new Desktop, refresh and Save that PID, then close it (see `_release`)."""
+    pbip = _resolve_pbip(path)
+    if pbip is None:
+        print("OPEN_DESKTOP: ERROR the path is not a .pbip file or a folder holding exactly one; nothing started")
+        return 2
+    pid, ready = open_pbip(pbip)
+    if pid is None:
+        return 2
+    result = 2
+    try:
+        if ready is not None:
+            argv = ["--pid", str(pid)]
+            if canaries is not None:
+                argv += ["--canaries", *canaries]
+            if no_save:
+                argv.append("--no-save")
+            # This run started this Desktop moments ago, so an unsaved-changes flag (or Desktop's
+            # "files have changed" banner) cannot be a human's work: refresh and Save regardless.
+            result = _run(_build_arg_parser().parse_args(argv), pid, require_clean=False)
+    finally:
+        left_for_human = _release(pid, result)
+    return 3 if left_for_human else result
 
 
 def check() -> int:
@@ -228,12 +338,22 @@ def check() -> int:
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("pbip", nargs="?", help="the .pbip file to open")
+    parser.add_argument("pbip", nargs="?", help="the .pbip file to open (with --refresh: or its folder)")
     parser.add_argument("--check", action="store_true", help="load the bundled ADOMD client and print versions")
+    parser.add_argument("--refresh", action="store_true", help="then refresh it, Save and close it")
+    parser.add_argument("--canaries", nargs="*", help="with --refresh: tables to verify (see refresh_pbip_model.py)")
+    parser.add_argument("--no-save", action="store_true", help="with --refresh: no Save; data discarded on close")
     args = parser.parse_args(argv)
     if args.check == bool(args.pbip):
         parser.error("give either a .pbip path or --check")
-    return check() if args.check else launch(Path(args.pbip))
+    refresh_options = args.canaries is not None or args.no_save
+    if (refresh_options and not args.refresh) or (args.check and args.refresh):
+        parser.error("--canaries and --no-save need --refresh, which needs a .pbip path")
+    if args.check:
+        return check()
+    if args.refresh:
+        return refresh_and_close(Path(args.pbip), args.canaries, args.no_save)
+    return launch(Path(args.pbip))
 
 
 if __name__ == "__main__":

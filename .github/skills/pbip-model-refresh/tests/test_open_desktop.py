@@ -23,6 +23,7 @@ import probe_desktop_query as pdq  # noqa: E402  # pylint: disable=wrong-import-
 
 PID = 4242
 NOTICE = "OPEN_DESKTOP: PBI_DESKTOP_PATH is set but its file does not exist; ignored"
+REAL_OPEN_ELSEWHERE = open_desktop._open_elsewhere  # pylint: disable=protected-access
 
 
 def _exe(folder: Path) -> Path:
@@ -111,6 +112,7 @@ def _launch(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     monkeypatch.setattr(open_desktop, "_launch_record", lambda pid: "/Date(1767225600000)/")
     monkeypatch.setattr(open_desktop, "_ui_bridge_command", lambda: ["powerbi-desktop"])
     monkeypatch.setattr(open_desktop, "_ui_desktop_alive", lambda pid: True)
+    monkeypatch.setattr(open_desktop, "_open_elsewhere", lambda model: None)
     monkeypatch.setattr(open_desktop, "time", types.SimpleNamespace(monotonic=lambda: 100.0, sleep=lambda _s: None))
     monkeypatch.setattr(
         open_desktop,
@@ -183,7 +185,10 @@ def test_the_pid_is_printed_when_readiness_fails(monkeypatch, capsys, launch, pa
     lines = capsys.readouterr().out.splitlines()
     assert lines[0] == str(PID)
     assert "OPEN_DESKTOP: diagnostic: READY; inspect that Desktop locally" in lines
-    assert lines[-1] == f"OPEN_DESKTOP: ERROR PID {PID} not ready after 0 seconds ({reason}); Desktop left open"
+    assert lines[-2:] == [
+        f"OPEN_DESKTOP: ERROR PID {PID} not ready after 0 seconds ({reason})",
+        f"OPEN_DESKTOP: Desktop PID {PID} left open",
+    ]
 
 
 def test_a_dialog_is_reported_for_a_human_and_left_alone(monkeypatch, capsys, launch) -> None:
@@ -197,6 +202,38 @@ def test_a_dialog_is_reported_for_a_human_and_left_alone(monkeypatch, capsys, la
     out = capsys.readouterr().out
     assert "OPEN_DESKTOP: diagnostic: A dialog is open. A human must act." in out
     assert out.splitlines()[0] == str(PID)
+
+
+def test_a_pbip_already_open_in_another_desktop_is_refused_before_any_start(monkeypatch, capsys, launch) -> None:
+    calls = []
+    other = {"pid": 77, "currentFilePath": str(launch.pbip.parent / "elsewhere.pbip")}
+    holder = {"pid": 99, "currentFilePath": str(launch.pbip).upper()}
+
+    def status(command, pid, deadline):
+        calls.append(pid)
+        return {"status": "ready", "instances": [other, holder]}
+
+    monkeypatch.setattr(open_desktop, "_open_elsewhere", REAL_OPEN_ELSEWHERE)
+    monkeypatch.setattr(open_desktop, "_ui_bridge_status", status)
+    # The fixture clock is frozen, so a regression that started Desktop would wait forever instead of failing.
+    monkeypatch.setattr(open_desktop, "_start", lambda *_args: pytest.fail("Desktop started"))
+
+    assert open_desktop.main([str(launch.pbip)]) == 2
+    assert capsys.readouterr().out.splitlines() == [
+        "OPEN_DESKTOP: ERROR this .pbip is already open in Desktop PID 99; nothing started"
+    ]
+    assert calls == [None]
+
+
+def test_a_failed_instance_listing_starts_nothing(monkeypatch, capsys, launch) -> None:
+    monkeypatch.setattr(open_desktop, "_open_elsewhere", REAL_OPEN_ELSEWHERE)
+    monkeypatch.setattr(open_desktop, "_ui_bridge_status", _raise(TimeoutError()))
+
+    assert open_desktop.main([str(launch.pbip)]) == 2
+    assert capsys.readouterr().out.splitlines() == [
+        "OPEN_DESKTOP: ERROR cannot list the open Desktops (TimeoutError); nothing started"
+    ]
+    assert launch.log["start"] == []
 
 
 def _ready(**instance) -> dict:
@@ -279,8 +316,8 @@ def test_desktop_exiting_after_a_waited_through_reply_stops_at_once(monkeypatch,
 
     assert open_desktop.main([str(launch.pbip)]) == 2
     assert clock.sleeps == [2.0]
-    assert capsys.readouterr().out.splitlines()[-1] == (
-        f"OPEN_DESKTOP: ERROR PID {PID} not ready after 2 seconds (Desktop process gone); Desktop left open"
+    assert capsys.readouterr().out.splitlines()[-2] == (
+        f"OPEN_DESKTOP: ERROR PID {PID} not ready after 2 seconds (Desktop process gone)"
     )
 
 
@@ -290,8 +327,8 @@ def test_ready_on_a_different_file_is_refused(monkeypatch, capsys, launch, tmp_p
     monkeypatch.setattr(open_desktop, "fit_launched_frame", lambda *_a: pytest.fail("frame fitted"))
 
     assert open_desktop.main([str(launch.pbip)]) == 2
-    assert capsys.readouterr().out.splitlines()[-1] == (
-        f"OPEN_DESKTOP: ERROR PID {PID} not ready after 0 seconds (bridge bound to a different file); Desktop left open"
+    assert capsys.readouterr().out.splitlines()[-2] == (
+        f"OPEN_DESKTOP: ERROR PID {PID} not ready after 0 seconds (bridge bound to a different file)"
     )
 
 
@@ -354,9 +391,8 @@ def test_the_deadline_still_bounds_a_startup_that_never_settles(monkeypatch, cap
     assert open_desktop.main([str(launch.pbip)]) == 2
     assert len(polls) > 2
     assert max(clock.slept_to) <= deadline
-    assert capsys.readouterr().out.splitlines()[-1] == (
-        f"OPEN_DESKTOP: ERROR PID {PID} not ready after {open_desktop.READY_TIMEOUT_SECONDS} seconds (timed out);"
-        " Desktop left open"
+    assert capsys.readouterr().out.splitlines()[-2] == (
+        f"OPEN_DESKTOP: ERROR PID {PID} not ready after {open_desktop.READY_TIMEOUT_SECONDS} seconds (timed out)"
     )
 
 

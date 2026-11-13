@@ -808,7 +808,7 @@ def test_status_rejects_relative_without_scan(capsys):
     assert result["run_location"] is None
 
 
-@pytest.mark.parametrize("command", ["doctor", "start", "assess", "status"])
+@pytest.mark.parametrize("command", ["doctor", "start", "assess", "status", "refresh"])
 def test_explicit_branch_reaches_owner(monkeypatch, capsys, command):
     calls = []
 
@@ -823,10 +823,57 @@ def test_explicit_branch_reaches_owner(monkeypatch, capsys, command):
         "start": ["--project", "Fixture"],
         "assess": [],
         "status": ["--run", "relative"],
+        "refresh": ["model.pbip"],
     }
     t2p.main([command, *arguments[command], "--json"])
     _json(capsys)
     assert calls == [command], "explicit command branch must reach its owning operation"
+
+
+def _fake_refresh_owner(root: Path, code: int) -> None:
+    """A stand-in refresh CLI under `root` that echoes its argv and exits `code`."""
+    script = root / t2p.REFRESH_OWNER
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        f"import json, sys\nprint('CHILD ' + json.dumps(sys.argv[1:]), flush=True)\nsys.exit({code})\n",
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.parametrize(("code", "status"), [(0, "ok"), (1, "error"), (2, "error"), (3, "cannot_establish")])
+def test_refresh_delegates_the_path_and_flags_and_returns_the_child_verdict(monkeypatch, tmp_path, capfd, code, status):
+    _fake_refresh_owner(tmp_path, code)
+    monkeypatch.setattr(t2p, "ROOT", tmp_path)
+    pbip = tmp_path / "pkg"
+
+    assert t2p.main(["refresh", str(pbip), "--canaries", "Orders", "Sales", "--no-save", "--json"]) == code
+    captured = capfd.readouterr()
+    result = json.loads(captured.out)
+    jsonschema.validate(result, t2p.ENVELOPE_SCHEMA)
+    assert len(captured.out.splitlines()) == 1, "child output must not reach the JSON stdout"
+    forwarded = [str(pbip.resolve()), "--refresh", "--canaries", "Orders", "Sales", "--no-save"]
+    assert f"CHILD {json.dumps(forwarded)}" in captured.err
+    assert (result["command"], result["status"], result["exit_code"]) == ("refresh", status, code)
+    assert (result["authority"], result["delegated_exit_code"]) == ("open_desktop.py --refresh", code)
+    assert result["run_location"] is None and result["path_report"] is None
+
+
+def test_refresh_human_mode_streams_the_child_and_adds_nothing(monkeypatch, tmp_path, capfd):
+    _fake_refresh_owner(tmp_path, 0)
+    monkeypatch.setattr(t2p, "ROOT", tmp_path)
+
+    assert t2p.main(["refresh", str(tmp_path / "model.pbip")]) == 0
+    captured = capfd.readouterr()
+    assert captured.out.splitlines() == [f"CHILD {json.dumps([str((tmp_path / 'model.pbip').resolve()), '--refresh'])}"]
+    assert captured.err == ""
+
+
+def test_refresh_without_a_path_is_a_syntax_error_that_starts_nothing(monkeypatch, capsys):
+    monkeypatch.setattr(t2p.subprocess, "run", lambda *_a, **_k: pytest.fail("refresh child started"))
+
+    assert t2p.main(["refresh", "--json"]) == 2
+    result, _ = _json(capsys)
+    assert result["limitations"] == ["invalid_arguments_use_help"]
 
 
 @pytest.mark.parametrize("root_kind", ["repo", "external"])
@@ -1393,9 +1440,16 @@ def test_status_presentation_has_no_extra_io(monkeypatch, tmp_path, capsys, json
         ),
         (
             "t2p.py",
-            "code = start(args, result)",
+            "code = owner(args, result)",
             "code = 0",
             "test_explicit_branch_reaches_owner[start]",
+            "explicit command branch must reach",
+        ),
+        (
+            "t2p.py",
+            'owner = refresh if args.command == "refresh" else start',
+            'owner = (lambda _args, _result: 0) if args.command == "refresh" else start',
+            "test_explicit_branch_reaches_owner[refresh]",
             "explicit command branch must reach",
         ),
         (
@@ -1792,7 +1846,7 @@ def test_offline_help_output_journey(monkeypatch, tmp_path, capsys):
         t2p.main(["--help"])
     assert help_result.value.code == 0
     help_text = capsys.readouterr().out
-    assert "{doctor,start,assess,status,units}" in help_text
+    assert "{doctor,start,assess,status,units,refresh}" in help_text
     assert t2p.main(["doctor", "--json"]) == 0
     doctor_result, _ = _json(capsys)
     assert doctor_result["status"] == "READY_TO_ATTEMPT"
