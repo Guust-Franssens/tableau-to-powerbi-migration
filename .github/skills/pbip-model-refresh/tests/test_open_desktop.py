@@ -157,11 +157,14 @@ def test_observe_mode_maps_each_observer_state(monkeypatch, capsys, as_json, fie
     assert not any(word in human for word in ("clean", "healthy")) or state == "READY"
 
 
+@pytest.mark.parametrize("as_json", [False, True], ids=["human", "json"])
 @pytest.mark.parametrize(("pid", "token"), [("abc", None), ("0", None), ("7", "007")])
-def test_observe_mode_refuses_a_bad_identity_with_exit_2(capsys, pid, token) -> None:
-    argv = ["--observe", pid, *(["--process-start", token] if token else [])]
+def test_observe_mode_refuses_a_bad_identity_with_exit_2(capsys, pid, token, as_json) -> None:
+    argv = ["--observe", pid, *(["--process-start", token] if token else []), *(["--json"] if as_json else [])]
     assert open_desktop.main(argv) == 2
-    assert "nothing observed" in capsys.readouterr().out
+    out, err = capsys.readouterr()
+    assert "nothing observed" in (err if as_json else out)
+    assert not as_json or out == "", "--json keeps stdout for the observation line only"
 
 
 @pytest.fixture(name="launch")

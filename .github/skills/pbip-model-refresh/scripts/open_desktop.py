@@ -346,7 +346,10 @@ def observe_command(pid: str, process_start_token: str | None, as_json: bool) ->
     try:
         observation = observe(pid, expected_process_start=process_start_token)
     except ValueError:
-        print("OPEN_DESKTOP: ERROR invalid --observe or --process-start identity; nothing observed")
+        print(
+            "OPEN_DESKTOP: ERROR invalid --observe or --process-start identity; nothing observed",
+            file=sys.stderr if as_json else sys.stdout,
+        )
         return 2
     state = observation.state
     head = (

@@ -1428,7 +1428,8 @@ the procedure.
 --pid <pid> [--process-start <token>] [--json]` runs `open_desktop.py --observe`, which calls the existing
 observer and adds no detector or state. It starts, clicks and closes nothing, so it can run while a launch
 wait of another process is still going. The exit code is 0 only for `READY`, 3 for every other state
-(`HUMAN_ACTION_REQUIRED`, `NO_WINDOW`, `UNKNOWN`, `PROCESS_GONE`) and 2 for a bad argument. `READY` means
+(`HUMAN_ACTION_REQUIRED`, `NO_WINDOW`, `UNKNOWN`, `PROCESS_GONE`), 2 for a bad argument, and with `--json`
+1 when the owner's result is missing or incoherent (`owner_result_unavailable`). `READY` means
 no blocking window was observed for that PID; the PID is not verified as Power BI Desktop, and nothing is
 shown about sign-in, source reachability, model validity or that the model opened. `--json` is the `t2p/v1`
 envelope with one evidence item holding the `desktop.observation.v2` object (no window title); an

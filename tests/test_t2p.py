@@ -556,6 +556,7 @@ def test_doctor_child_cannot_create_pycache(monkeypatch, tmp_path, capsys):
         ["desktop", "observe"],
         ["desktop", "observe", "--pid", "abc"],
         ["desktop", "observe", "--pid", "0"],
+        ["desktop", "observe", "--pid", "4294967296"],
         ["desktop", "observe", "--pid", "7", "--process-start", "007"],
         ["desktop", "observe", "--pid", "7", "--hwnd", "1"],
     ],
@@ -903,9 +904,10 @@ def _fake_observe_owner(root: Path, stdout: str, code: int) -> Path:
         (_observation_line("HUMAN_ACTION_REQUIRED") + "\n", 0, "error", 1, False),
         (_observation_line("READY") + "\n" + _observation_line("READY") + "\n", 0, "error", 1, False),
         (_observation_line("READY", pid="999") + "\n", 0, "error", 1, False),
+        (_observation_line("READY").replace("observation.v2", "observation.v1") + "\n", 0, "error", 1, False),
         (_observation_line("READY") + "\n", 2, "error", 2, False),
     ],
-    ids=["ready", "dialog", "ready_exit3", "dialog_exit0", "two_lines", "other_pid", "bad_argument"],
+    ids=["ready", "dialog", "ready_exit3", "dialog_exit0", "two_lines", "other_pid", "other_schema", "bad_argument"],
 )
 def test_desktop_observe_envelope_follows_the_child_observation(
     monkeypatch, tmp_path, capfd, stdout, code, status, exit_code, evidence
@@ -927,21 +929,26 @@ def test_desktop_observe_envelope_follows_the_child_observation(
     )
     assert result["run_location_reason"] == "not_applicable_no_run" and result["path_report"] is None
     assert result["proof_boundary"]["established"] == []
-    assert "model_validity" in result["proof_boundary"]["not_established"]
+    assert {"model_validity", "successful_open"} <= set(result["proof_boundary"]["not_established"])
     assert [item["observation"]["state"] for item in result["evidence"]] == (
         [json.loads(stdout.splitlines()[0])["state"]] if evidence else []
+    )
+    assert all(
+        (item["owner"], item["locator"]) == ("_desktop_observer.py", "desktop.observation.v2")
+        for item in result["evidence"]
     )
     assert ("owner_result_unavailable" in result["limitations"]) == (code in {0, 3} and not evidence)
 
 
-def test_desktop_observe_human_mode_streams_the_child_and_adds_nothing(monkeypatch, tmp_path, capfd):
+@pytest.mark.parametrize("token", [[], ["--process-start", "456"]], ids=["no_token", "token"])
+def test_desktop_observe_human_mode_streams_the_child_and_adds_nothing(monkeypatch, tmp_path, capfd, token):
     argv_file = _fake_observe_owner(tmp_path, "HUMAN LINE\n", 3)
     monkeypatch.setattr(t2p, "ROOT", tmp_path)
 
-    assert t2p.main(["desktop", "observe", "--pid", "123"]) == 3
+    assert t2p.main(["desktop", "observe", "--pid", "123", *token]) == 3
     captured = capfd.readouterr()
     assert captured.out.splitlines() == ["HUMAN LINE"]
-    assert json.loads(argv_file.read_text()) == ["--observe", "123"]
+    assert json.loads(argv_file.read_text()) == ["--observe", "123", *token]
 
 
 def test_refresh_without_a_path_is_a_syntax_error_that_starts_nothing(monkeypatch, capsys):
