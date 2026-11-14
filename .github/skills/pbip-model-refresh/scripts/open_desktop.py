@@ -7,8 +7,10 @@ usage:   python .github/skills/pbip-model-refresh/scripts/open_desktop.py <path-
          python .github/skills/pbip-model-refresh/scripts/open_desktop.py <path-to.pbip-or-its-folder>
              --refresh [--canaries "A" "B"] [--no-save]
          python .github/skills/pbip-model-refresh/scripts/open_desktop.py --check
+         python .github/skills/pbip-model-refresh/scripts/open_desktop.py --observe PID
+             [--process-start TOKEN] [--json]
          (ships inside the `pbip-model-refresh` skill; `scripts/open_desktop.py` in this repo is a
-          forwarding shim. `t2p refresh` runs the --refresh form.)
+          forwarding shim. `t2p refresh` runs the --refresh form, `t2p desktop observe` the --observe one.)
 
 Desktop is looked up at every run, so an update needs no re-pin and no config change:
 PBI_DESKTOP_PATH when that file exists (set but missing: ignored with a notice), else the Store
@@ -27,8 +29,12 @@ the start time read at launch (compared just before the kill). A failed run that
 leaves it open for a human instead. An unreadable start time, a failed close or Ctrl+C during the
 launch wait also leaves that Desktop running; its PID was already printed. With --no-save the
 refreshed data is discarded on close.
+--observe PID takes one read-only look at a running Desktop through the existing observer and starts,
+clicks and closes nothing. With --process-start the observation is bound to that exact process.
+--json prints the observation (`desktop.observation.v2`) as the only stdout line.
 Exit codes: 0 ready (or check passed, or refresh verdict OK); 2 refused or failed; with --refresh the
-refresh verdict (1 data or persist failure, 3 needs a human, including Desktop left open on a dialog).
+refresh verdict (1 data or persist failure, 3 needs a human, including Desktop left open on a dialog);
+with --observe 0 only for READY, 3 for every other observed state.
 """
 
 from __future__ import annotations
@@ -43,7 +49,7 @@ from pathlib import Path
 
 from _desktop_actions import DesktopActionError
 from _desktop_frame import fit_launched_frame
-from _desktop_observer import dialog_stop_detail, process_start
+from _desktop_observer import dialog_stop_detail, observe, process_start
 from probe_desktop_query import ADOMD_CLIENT_DLL, AdomdUnavailable, _load_adomd_from
 from refresh_pbip_model import (
     _bridge_readiness_result,
@@ -335,6 +341,42 @@ def refresh_and_close(path: Path, canaries: list[str] | None, no_save: bool) -> 
     return 3 if left_for_human else result
 
 
+def observe_command(pid: str, process_start_token: str | None, as_json: bool) -> int:
+    """One read-only observation of `pid`; 0 only for READY, 3 for any other state, 2 for a bad identity."""
+    try:
+        observation = observe(pid, expected_process_start=process_start_token)
+    except ValueError:
+        print(
+            "OPEN_DESKTOP: ERROR invalid --observe or --process-start identity; nothing observed",
+            file=sys.stderr if as_json else sys.stdout,
+        )
+        return 2
+    state = observation.state
+    head = (
+        f"OPEN_DESKTOP: observe pid={pid} state={state} reason={observation.reason}"
+        f" process_started_at={observation.process_started_at or 'unknown'}"
+    )
+    if state == "PROCESS_GONE":
+        # The shared JSON carries no process_gone field, so only this line tells an exit from a changed identity.
+        head += f" gone={observation.process_gone}"
+        detail = "the process exited or its identity changed; nothing was observed"
+    elif state == "HUMAN_ACTION_REQUIRED":
+        detail = dialog_stop_detail(observation.dialog)
+    elif state == "READY":
+        detail = (
+            "no blocking window observed for this PID (not verified as Power BI Desktop); this does not show"
+            " sign-in, source reachability, model validity or that the model opened"
+        )
+    elif state == "NO_WINDOW":
+        detail = "no Desktop window found for this PID yet; it may still be starting, or the PID is not Desktop"
+    else:
+        detail = "the windows could not be read completely; inspect that Desktop locally"
+    if as_json:
+        print(observation.to_json())
+    print(f"{head}\n{detail}", file=sys.stderr if as_json else sys.stdout, flush=True)
+    return 0 if state == "READY" else 3
+
+
 def check() -> int:
     """Find Desktop and load its bundled ADOMD client; print versions; start nothing."""
     found = find_desktop()
@@ -367,12 +409,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--refresh", action="store_true", help="then refresh it, Save and close it")
     parser.add_argument("--canaries", nargs="*", help="with --refresh: tables to verify (see refresh_pbip_model.py)")
     parser.add_argument("--no-save", action="store_true", help="with --refresh: no Save; data discarded on close")
+    parser.add_argument("--observe", metavar="PID", help="one read-only observation of that running Desktop PID")
+    parser.add_argument("--process-start", help="with --observe: the exact process-start token to bind to")
+    parser.add_argument("--json", action="store_true", help="with --observe: print the observation JSON on stdout")
     args = parser.parse_args(argv)
-    if args.check == bool(args.pbip):
-        parser.error("give either a .pbip path or --check")
+    if [bool(args.pbip), args.check, args.observe is not None].count(True) != 1:
+        parser.error("give either a .pbip path or --check, or --observe PID")
     refresh_options = args.canaries is not None or args.no_save
-    if (refresh_options and not args.refresh) or (args.check and args.refresh):
+    if (refresh_options and not args.refresh) or (args.refresh and not args.pbip):
         parser.error("--canaries and --no-save need --refresh, which needs a .pbip path")
+    if (args.process_start is not None or args.json) and args.observe is None:
+        parser.error("--process-start and --json need --observe")
+    if args.observe is not None:
+        return observe_command(args.observe, args.process_start, args.json)
     if args.check:
         return check()
     if args.refresh:

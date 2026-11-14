@@ -19,6 +19,7 @@ import pytest
 SKILL_SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SKILL_SCRIPTS))
 import open_desktop  # noqa: E402  # pylint: disable=wrong-import-position,import-error
+import _desktop_observer as observer  # noqa: E402  # pylint: disable=wrong-import-position,import-error
 import probe_desktop_query as pdq  # noqa: E402  # pylint: disable=wrong-import-position,import-error
 
 PID = 4242
@@ -99,6 +100,71 @@ def test_exactly_one_of_a_pbip_or_check(argv) -> None:
     with pytest.raises(SystemExit) as caught:
         open_desktop.main(argv)
     assert caught.value.code == 2
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--observe", "1", "model.pbip"],
+        ["--observe", "1", "--check"],
+        ["--observe", "1", "--refresh"],
+        ["--process-start", "5", "model.pbip"],
+        ["--json", "--check"],
+    ],
+)
+def test_observe_is_its_own_mode(monkeypatch, argv) -> None:
+    monkeypatch.setattr(open_desktop, "observe", lambda *_a, **_k: pytest.fail("observed"))
+    with pytest.raises(SystemExit) as caught:
+        open_desktop.main(argv)
+    assert caught.value.code == 2
+
+
+GONE = {"process_gone": "process_gone", "complete": False, "reason": "process_gone"}
+CHANGED = {"process_gone": "identity_changed", "complete": False, "reason": "process_gone"}
+DIALOG = {"dialog": observer.DialogFinding(observer.DesktopWindow("Sign in", "#32770", 400, 300, hwnd=7), "Sign in")}
+
+
+@pytest.mark.parametrize("as_json", [False, True], ids=["human", "json"])
+@pytest.mark.parametrize(
+    ("fields", "state", "code", "sentence"),
+    [
+        ({}, "READY", 0, "not verified as Power BI Desktop"),
+        (DIALOG, "HUMAN_ACTION_REQUIRED", 3, 'dialog is open: "Sign in"'),
+        ({"desktop_unready": "no_window", "reason": "no_window"}, "NO_WINDOW", 3, "no Desktop window found"),
+        ({"unknown_reason": "timeout", "complete": False, "reason": "timeout"}, "UNKNOWN", 3, "could not be read"),
+        (GONE, "PROCESS_GONE", 3, "nothing was observed"),
+        (CHANGED, "PROCESS_GONE", 3, "gone=identity_changed"),
+    ],
+    ids=["ready", "dialog", "no_window", "unknown", "gone", "changed"],
+)
+def test_observe_mode_maps_each_observer_state(monkeypatch, capsys, as_json, fields, state, code, sentence) -> None:
+    seen = {}
+
+    def fake(pid, **kwargs):
+        seen.update(pid=pid, **kwargs)
+        return observer.Observation(pid=pid, process_started_at="456", **fields)
+
+    monkeypatch.setattr(open_desktop, "observe", fake)
+
+    assert open_desktop.main(["--observe", "123", "--process-start", "456", *(["--json"] if as_json else [])]) == code
+    out, err = capsys.readouterr()
+    assert seen == {"pid": "123", "expected_process_start": "456"}
+    human = err if as_json else out
+    assert f"state={state}" in human and sentence in human
+    if as_json:
+        assert [json.loads(line)["state"] for line in out.splitlines()] == [state]
+        assert "Sign in" not in out, "no title may reach the structured output"
+    assert not any(word in human for word in ("clean", "healthy")) or state == "READY"
+
+
+@pytest.mark.parametrize("as_json", [False, True], ids=["human", "json"])
+@pytest.mark.parametrize(("pid", "token"), [("abc", None), ("0", None), ("7", "007")])
+def test_observe_mode_refuses_a_bad_identity_with_exit_2(capsys, pid, token, as_json) -> None:
+    argv = ["--observe", pid, *(["--process-start", token] if token else []), *(["--json"] if as_json else [])]
+    assert open_desktop.main(argv) == 2
+    out, err = capsys.readouterr()
+    assert "nothing observed" in (err if as_json else out)
+    assert not as_json or out == "", "--json keeps stdout for the observation line only"
 
 
 @pytest.fixture(name="launch")

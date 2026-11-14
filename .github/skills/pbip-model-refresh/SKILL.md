@@ -26,7 +26,8 @@ Install `pythonnet`; otherwise install or repair Desktop, then rerun.
 - [**`scripts/probe_desktop_query.py`**](scripts/probe_desktop_query.py): read-only port discovery,
   table listing and one-row DAX probe.
 - `scripts/open_desktop.py`: open a `.pbip` in the installed Desktop and print its PID; with `--refresh`,
-  also refresh, Save and close it ([one step](#one-step-open-refresh-save-close-863)).
+  also refresh, Save and close it ([one step](#one-step-open-refresh-save-close-863)); with `--observe PID`,
+  one read-only observer look (exit 0 only for READY, which proves nothing else; `t2p desktop observe`).
 - [**`scripts/_desktop_observer.py`**](scripts/_desktop_observer.py): the sole read-only observer.
 - `scripts/_desktop_actions.py` and [`scripts/_desktop_actions.ps1`](scripts/_desktop_actions.ps1):
   one named UIA action (Refresh or Save); neither decides completion or classifies prompts.

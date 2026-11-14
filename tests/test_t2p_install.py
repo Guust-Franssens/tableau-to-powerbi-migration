@@ -601,30 +601,30 @@ def _source_module() -> ModuleType:
 
 def _assert_closed_help(stdout: bytes) -> None:
     choices = re.findall(rb"\{([^{}\r\n]+)\}", stdout)
-    assert choices == [b"doctor,start,assess,status,units,refresh"] * 2, (
+    assert choices == [b"doctor,start,assess,status,units,refresh,desktop"] * 2, (
         "closed help verb assertion: usage and positional choices must be exactly "
-        "doctor/start/assess/status/units/refresh"
+        "doctor/start/assess/status/units/refresh/desktop"
     )
 
 
 def test_source_closed_help_oracle_distinguishes_prose_and_verbs() -> None:
     """The finite command choices, not the word 'next' in prose, close the surface."""
     literal = (
-        b"usage: t2p [-h] {doctor,start,assess,status,units,refresh} ...\n"
-        b"positional arguments:\n  {doctor,start,assess,status,units,refresh}\n"
+        b"usage: t2p [-h] {doctor,start,assess,status,units,refresh,desktop} ...\n"
+        b"positional arguments:\n  {doctor,start,assess,status,units,refresh,desktop}\n"
         b"    status  Read-only inventory; no next action or readiness.\n"
     )
     _assert_closed_help(literal)
     _assert_closed_help(_source_module().build_parser("t2p").format_help().encode("ascii"))
     _assert_closed_help(literal.replace(b"no next action", b"no continuation"))
     for choices in (
-        b"doctor,start,assess,status,units,refresh,next",
-        b"doctor,start,assess,status,units",
+        b"doctor,start,assess,status,units,refresh,desktop,next",
+        b"doctor,start,assess,status,units,refresh",
         b"doctor,start,assess,next",
-        b"doctor,start,status,units,refresh",
+        b"doctor,start,status,units,refresh,desktop",
     ):
         with pytest.raises(AssertionError, match="closed help verb assertion"):
-            _assert_closed_help(literal.replace(b"doctor,start,assess,status,units,refresh", choices, 1))
+            _assert_closed_help(literal.replace(b"doctor,start,assess,status,units,refresh,desktop", choices, 1))
     with pytest.raises(AssertionError, match="closed help verb assertion"):
         _assert_closed_help(b"doctor start status; no next action\n")
 
