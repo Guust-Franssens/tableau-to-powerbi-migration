@@ -650,7 +650,7 @@ Desktop, refreshes it, Saves and closes it (a skipped or failed close prints the
 `--automatic-source-scope`, so agents keep the two-step route
 ([refresh skill](../.github/skills/pbip-model-refresh/SKILL.md#one-step-open-refresh-save-close-863)).
 
-While a launch waits, `t2p desktop observe --pid <pid>` (PID printed at once by `open_desktop.py`) gives a
+While a launch waits, `t2p desktop observe --pid <pid>` (`t2p refresh` prints the PID at once) gives a
 read-only look from a second process: exit 0 only for `READY`, 3 for every other state, never a clean bill.
 A specialist that runs `open_desktop.py`, `t2p refresh` or `t2p desktop observe` keeps the exact argv, every
 `OPEN_DESKTOP:` and `REFRESH` line, the exit code and, for observe, the observation JSON in private run
