@@ -1182,7 +1182,7 @@ personas already use. Deleting them would make every persona *longer* — see
 |---|---|
 | `refresh_pbip_model.py` | `.github/skills/pbip-model-refresh/`: Desktop UI refresh plus guarded Save to `.pbi/cache.abf` |
 | `probe_desktop_query.py` | `.github/skills/pbip-model-refresh/` — one-row DAX probe against Desktop's local AS |
-| `open_desktop.py` | `.github/skills/pbip-model-refresh/`: open a `.pbip` in the installed Desktop and print its PID; `--refresh` also refreshes, Saves and closes it (`t2p refresh`); `--observe PID` takes one read-only look at a running Desktop (`t2p desktop observe`) |
+| `open_desktop.py` | `.github/skills/pbip-model-refresh/`: open a `.pbip` in the installed Desktop and print its PID; `--refresh` also refreshes, Saves and closes it (`t2p refresh`); `--observe PID` takes one read-only look at a running Desktop (`t2p desktop observe`); `--collect PID` copies its open dialog's details (`t2p desktop collect`) |
 | `set_ai_instructions.py` | `.github/skills/powerbi-ai-readiness/` — stamp `CustomInstructions`, force `qnaEnabled` |
 | `check_ai_readiness.py` | `.github/skills/powerbi-ai-readiness/` — audit description coverage + enumerated domains |
 
@@ -1290,6 +1290,7 @@ t2p status --run <absolute-local-run> [--json]
 t2p units {list | show <id> | find [--name <text>] [--luid <luid>]} [--runs-parent <path>] [--json]
 t2p refresh <pbip-or-folder> [--canaries <table> ...] [--no-save] [--json]
 t2p desktop observe --pid <pid> [--process-start <token>] [--json]
+t2p desktop collect --pid <pid> --process-start <token> --out <private-file>
 ```
 
 `uv sync --all-extras --no-editable` is the operator setup in the selected checkout. No-sync alone
@@ -1435,11 +1436,26 @@ no blocking window was observed for that PID; the PID is not verified as Power B
 shown about sign-in, source reachability, model validity or that the model opened. `NO_WINDOW` means no
 Desktop window was found yet, which is also what a still-starting Desktop or a non-Desktop PID shows.
 The human line prints `process_started_at`; pass it as `--process-start` on later looks to bind them to
-the same process. `--json` is the `t2p/v1`
+the same process (`process_started_at=unknown` cannot be passed back as `--process-start`). `--json` is the `t2p/v1`
 envelope with one evidence item holding the `desktop.observation.v2` object (no window title); an
 observation that contradicts the exit code or the asked PID is `error` with `owner_result_unavailable`.
 Only the human line says `gone=identity_changed` for a changed process-start token, because the shared
 observation JSON does not carry that field.
+
+`desktop collect` (Refs #498) runs `open_desktop.py --collect`. When the observer names an open dialog
+on that exact process (`--process-start` is required, because this clicks), it clicks Desktop's own
+"Copy details" link through the dialog's HTML (no mouse, keyboard or focus; in a helper process bounded
+at 30 seconds), accepts the clipboard text only if it changed and is owned by that PID, re-checks the
+process-start token, writes the full text to `--out` (UTF-8, overwritten; its folder must exist) and
+prints the dialog title, the `PowerBINonFatalError_ErrorCode` (top-level or inner, else `none`) and the
+first message line. Exit 0 collected, 3 no dialog (`READY`, `NO_WINDOW` or an exited process; nothing
+clicked), 2 refused or not collected (a wrong token, `UNKNOWN`, a hung or failed helper, a clipboard not
+from this PID, a changed process). A minimized Desktop hides its dialog and gives 2 with a hint to
+restore the window. There is no `--json` form. **Privacy:** the copied text holds session and user IDs,
+machine paths and stack traces, so `--out` must be private run scratch; the stdout summary is shorter,
+not redacted, and is still private. Desktop's copy replaces the clipboard and enters Windows clipboard
+history (Win+V), and Desktop writes trace-log zips when the link is clicked. Nothing else is clicked; the
+dialog stays open for the human.
 
 JSON stdout is one `t2p/v1` envelope, also for syntax/launch/interrupt failures. Common fields:
 `command`, `status`, `exit_code`, `authority`, `delegated_exit_code`, `stages`, `checks`, `evidence`,

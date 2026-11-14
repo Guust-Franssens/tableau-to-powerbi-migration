@@ -951,6 +951,26 @@ def test_desktop_observe_human_mode_streams_the_child_and_adds_nothing(monkeypat
     assert json.loads(argv_file.read_text()) == ["--observe", "123", *token]
 
 
+@pytest.mark.parametrize("code", [0, 2, 3])
+def test_desktop_collect_forwards_and_passes_the_exit_code_through(monkeypatch, tmp_path, capfd, code):
+    argv_file = _fake_observe_owner(tmp_path, "COLLECT LINE\n", code)
+    monkeypatch.setattr(t2p, "ROOT", tmp_path)
+    out = tmp_path / "details.txt"
+
+    assert t2p.main(["desktop", "collect", "--pid", "123", "--process-start", "456", "--out", str(out)]) == code
+    assert capfd.readouterr().out.splitlines() == ["COLLECT LINE"]
+    assert json.loads(argv_file.read_text()) == ["--collect", "123", "--process-start", "456", "--out", str(out)]
+
+
+@pytest.mark.parametrize("missing", ["--pid", "--process-start", "--out"], ids=["no-pid", "no-process-start", "no-out"])
+def test_desktop_collect_requires_pid_process_start_and_out(monkeypatch, missing):
+    monkeypatch.setattr(t2p.subprocess, "run", lambda *_a, **_k: pytest.fail("collect child started"))
+    options = {"--pid": "123", "--process-start": "456", "--out": "details.txt"}
+    argv = [item for name, value in options.items() if name != missing for item in (name, value)]
+
+    assert t2p.main(["desktop", "collect", *argv]) == 2
+
+
 def test_refresh_without_a_path_is_a_syntax_error_that_starts_nothing(monkeypatch, capsys):
     monkeypatch.setattr(t2p.subprocess, "run", lambda *_a, **_k: pytest.fail("refresh child started"))
 

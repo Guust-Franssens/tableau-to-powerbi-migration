@@ -9,18 +9,25 @@ usage:   python .github/skills/pbip-model-refresh/scripts/open_desktop.py <path-
          python .github/skills/pbip-model-refresh/scripts/open_desktop.py --check
          python .github/skills/pbip-model-refresh/scripts/open_desktop.py --observe PID
              [--process-start TOKEN] [--json]
+         python .github/skills/pbip-model-refresh/scripts/open_desktop.py --collect PID
+             --process-start TOKEN --out FILE
          (ships inside the `pbip-model-refresh` skill; `scripts/open_desktop.py` in this repo is a
-          forwarding shim. `t2p refresh` runs the --refresh form, `t2p desktop observe` the --observe one.)
+          forwarding shim. `t2p refresh` runs the --refresh form, `t2p desktop observe` the --observe one
+          and `t2p desktop collect` the --collect one.)
 
 Desktop is looked up at every run, so an update needs no re-pin and no config change:
 PBI_DESKTOP_PATH when that file exists (set but missing: ignored with a notice), else the Store
 install (Get-AppxPackage), else the classic install under %ProgramFiles%.
 
 The PID is printed on its own line as soon as Desktop starts, so a caller can always close exactly
-that process, even when a later step fails. Readiness is bounded at 180 seconds; until then any bridge
-reply other than "ready on this .pbip" means Desktop is still starting. Ready on a different file is
+that process, even when a later step fails; the next line is `OPEN_DESKTOP: process_start=<token>`
+(or `unknown`). Readiness is bounded at 180 seconds; until then any bridge reply other than "ready on
+this .pbip" means Desktop is still starting. Meanwhile the observer looks about every 2 seconds, and an
+owned window whose owner is disabled (a real modal) held for 10 seconds ends the wait early with exit 2,
+Desktop left open. Ready on a different file is
 refused. A .pbip that another Desktop lists as open by the same resolved absolute path is refused too
-(best effort, one listing; nothing is started). A dialog is a human stop: this script never clicks Desktop.
+(best effort, one listing; nothing is started). A dialog is a human stop: this script never clicks Desktop,
+except Copy details with --collect.
 
 --refresh runs `refresh_pbip_model.py`'s refresh on the PID it just opened. That Desktop holds no
 human work, so its unsaved-changes flag is ignored. Afterwards it closes that PID with its engine
@@ -32,9 +39,14 @@ refreshed data is discarded on close.
 --observe PID takes one read-only look at a running Desktop through the existing observer and starts,
 clicks and closes nothing. With --process-start the observation is bound to that exact process.
 --json prints the observation (`desktop.observation.v2`) as the only stdout line.
+--collect PID clicks Desktop's own "Copy details" link on the dialog the observer names (no mouse,
+keyboard or focus) and writes the copied text to --out, which must be private run scratch: it holds
+session and user IDs, machine paths and stack traces. The copy replaces the clipboard and enters its
+history. It prints the title, the error code and the first message line.
 Exit codes: 0 ready (or check passed, or refresh verdict OK); 2 refused or failed; with --refresh the
 refresh verdict (1 data or persist failure, 3 needs a human, including Desktop left open on a dialog);
-with --observe 0 only for READY, 3 for every other observed state.
+with --observe 0 only for READY, 3 for every other observed state; with --collect 0 collected, 3 no
+dialog, 2 refused or not collected.
 """
 
 from __future__ import annotations
@@ -42,6 +54,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -49,7 +62,7 @@ from pathlib import Path
 
 from _desktop_actions import DesktopActionError
 from _desktop_frame import fit_launched_frame
-from _desktop_observer import dialog_stop_detail, observe, process_start
+from _desktop_observer import dialog_stop_detail, observe, process_start, sanitize_title
 from probe_desktop_query import ADOMD_CLIENT_DLL, AdomdUnavailable, _load_adomd_from
 from refresh_pbip_model import (
     _bridge_readiness_result,
@@ -63,6 +76,13 @@ from refresh_pbip_model import (
 
 READY_TIMEOUT_SECONDS = 180
 STARTUP_POLL_SECONDS = 2.0
+# Launch-wait watch (#741): bounded bridge calls, a look every 2 s, an early stop on a held modal.
+BRIDGE_SLICE_SECONDS = 5.0
+LOOK_SECONDS = 2.0
+DIALOG_STOP_SECONDS = 10.0
+COLLECT_TIMEOUT_SECONDS = 30
+DETAILS_HELPER = Path(__file__).with_name("_desktop_details.py")
+ERROR_CODE_LABEL = re.compile(r"(?:InnerException\d+\.)?PowerBINonFatalError_ErrorCode:")
 NOT_FOUND = "OPEN_DESKTOP: ERROR Power BI Desktop not found (PBI_DESKTOP_PATH, Store install, classic install)"
 
 
@@ -140,28 +160,60 @@ def _launch_record(pid: int) -> str:
         return ""
 
 
-def _wait_ready(pid: int, pbip: Path, deadline: float) -> None:
+def _held_modal(pid: int, token: str | None) -> int | None:
+    """The handle of an OWNED window with a DISABLED owner that the observer names as the blocker, else None.
+
+    Only a real modal counts: the observer's unowned-root fallback (the startup splash or frame) never does.
+    """
+    try:
+        observation = observe(pid, expected_process_start=token)
+    except Exception:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+        return None
+    window = observation.dialog.window if observation.state == "HUMAN_ACTION_REQUIRED" else None
+    if window is None or not window.owner_hwnd or window.owner_enabled is not False:
+        return None
+    return window.hwnd
+
+
+def _wait_ready(pid: int, pbip: Path, deadline: float, token: str | None = None) -> None:
     """Return once the bridge reports exactly `pid` ready on `pbip`; raise TimeoutError, DesktopActionError, OSError.
 
     Desktop 2.160.579.0 was measured passing through several startup replies before binding the file
     (an untitled canvas, "Host is not ready", "The task was cancelled."), and they vary by version. This
     script takes no action on the model, so it waits through any of them until the deadline instead of
     listing them; refresh keeps the strict shared check. A failing status command still stops at once.
+    Each status call is bounded to a short slice so the observer can look about every 2 s in between;
+    the same modal held for DIALOG_STOP_SECONDS ends the wait early (measured: a popup about 15 s in).
     """
     command = _ui_bridge_command()
+    next_look_at = time.monotonic()
+    held, held_since = None, 0.0
     while time.monotonic() < deadline:
         if not _ui_desktop_alive(pid):
             raise DesktopActionError("Desktop process gone")
-        payload = _ui_bridge_status(command, pid, deadline)
+        delay = 0.0
         try:
-            instance, delay = _bridge_readiness_result(payload, pid)
-        except DesktopActionError:
-            instance, delay = None, STARTUP_POLL_SECONDS
-        if instance is not None:
-            bound = Path(instance["currentFilePath"]).resolve()
-            if os.path.normcase(bound) != os.path.normcase(pbip.resolve()):
-                raise DesktopActionError("bridge bound to a different file")
-            return
+            payload = _ui_bridge_status(command, pid, min(deadline, time.monotonic() + BRIDGE_SLICE_SECONDS))
+        except TimeoutError:
+            payload = None  # the slice ran out; the bridge helper already stopped its own child
+        if payload is not None:
+            try:
+                instance, delay = _bridge_readiness_result(payload, pid)
+            except DesktopActionError:
+                instance, delay = None, STARTUP_POLL_SECONDS
+            if instance is not None:
+                bound = Path(instance["currentFilePath"]).resolve()
+                if os.path.normcase(bound) != os.path.normcase(pbip.resolve()):
+                    raise DesktopActionError("bridge bound to a different file")
+                return
+        now = time.monotonic()
+        if now >= next_look_at:
+            next_look_at = now + LOOK_SECONDS
+            handle = _held_modal(pid, token)
+            if handle != held:
+                held, held_since = handle, now
+            elif handle is not None and now - held_since >= DIALOG_STOP_SECONDS:
+                raise DesktopActionError("a dialog stayed open")
         time.sleep(min(delay, max(0.0, deadline - time.monotonic())))
     raise TimeoutError
 
@@ -231,13 +283,14 @@ def open_pbip(pbip: Path) -> tuple[int | None, dict | None, str | None]:  # pyli
         return None, None, None
     token = _start_token(pid)
     print(pid, flush=True)
+    print(f"OPEN_DESKTOP: process_start={token or 'unknown'}", flush=True)
     record = _launch_record(pid)
     print(
         f"OPEN_DESKTOP: waiting for bridge readiness of PID {pid} (at most {READY_TIMEOUT_SECONDS} seconds)", flush=True
     )
     started = time.monotonic()
     try:
-        _wait_ready(pid, model, started + READY_TIMEOUT_SECONDS)
+        _wait_ready(pid, model, started + READY_TIMEOUT_SECONDS, token)
     except TimeoutError:
         failure = "timed out"
     except DesktopActionError as exc:
@@ -368,13 +421,93 @@ def observe_command(pid: str, process_start_token: str | None, as_json: bool) ->
             " sign-in, source reachability, model validity or that the model opened"
         )
     elif state == "NO_WINDOW":
-        detail = "no Desktop window found for this PID yet; it may still be starting, or the PID is not Desktop"
+        detail = (
+            "no Desktop window found for this PID yet; it may still be starting or be hung, or the PID is not Desktop"
+        )
     else:
         detail = "the windows could not be read completely; inspect that Desktop locally"
     if as_json:
         print(observation.to_json())
     print(f"{head}\n{detail}", file=sys.stderr if as_json else sys.stdout, flush=True)
     return 0 if state == "READY" else 3
+
+
+def error_code(text: str) -> str | None:
+    """The first non-empty `PowerBINonFatalError_ErrorCode` value in text order, top-level or InnerException<N>.
+
+    Desktop's copied details put each label on its own line ending in ``:`` and the value on the next
+    non-empty line, so a label followed directly by another label has no value.
+    """
+    lines = [line.strip() for line in text.splitlines()]
+    for index, line in enumerate(lines):
+        if ERROR_CODE_LABEL.fullmatch(line):
+            value = next((later for later in lines[index + 1 :] if later), "")
+            if value and not value.endswith(":"):
+                return value
+    return None
+
+
+def collect_command(pid: str, token: str, out: Path) -> int:  # pylint: disable=too-many-return-statements
+    """Click the open dialog's own Copy details and write the copied text to `out`.
+
+    0 collected, 3 established that there is no dialog, 2 refused or could not collect. The click runs in a
+    helper process bounded by COLLECT_TIMEOUT_SECONDS, so a hung Desktop UI thread cannot hang this CLI.
+    """
+    if not out.parent.is_dir():
+        print("OPEN_DESKTOP: ERROR the --out folder does not exist; nothing collected", flush=True)
+        return 2
+    try:
+        observation = observe(pid, expected_process_start=token)
+    except ValueError:
+        print("OPEN_DESKTOP: ERROR invalid --collect or --process-start identity; nothing collected", flush=True)
+        return 2
+    state = observation.state
+    if observation.process_gone == "identity_changed":
+        print("OPEN_DESKTOP: ERROR the PID is not the Desktop that token names; nothing collected", flush=True)
+        return 2
+    if state == "UNKNOWN":
+        hint = "; restore the Desktop window and retry" if observation.reason == "minimized" else ""
+        print(
+            f"OPEN_DESKTOP: ERROR could not read the windows ({observation.reason}); nothing collected{hint}",
+            flush=True,
+        )
+        return 2
+    if state != "HUMAN_ACTION_REQUIRED":
+        print(f"OPEN_DESKTOP: no dialog to collect (state={state})", flush=True)
+        return 3
+    command = [sys.executable, str(DETAILS_HELPER), pid, str(observation.dialog.window.hwnd)]
+    try:
+        done = subprocess.run(command, capture_output=True, text=True, check=False, timeout=COLLECT_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        print("OPEN_DESKTOP: ERROR collector timed out; Desktop left as is", flush=True)
+        return 2
+    try:
+        result = json.loads(done.stdout)
+    except ValueError:
+        result = None
+    if not isinstance(result, dict) or not isinstance(result.get("text"), str):
+        reason = result.get("error") if isinstance(result, dict) else None
+        print(f"OPEN_DESKTOP: ERROR could not collect ({sanitize_title(reason) or 'collector failed'})", flush=True)
+        return 2
+    if result.get("sequence_changed") is not True or result.get("owner_pid") != int(pid):
+        print("OPEN_DESKTOP: ERROR clipboard was not written by this Desktop; nothing written", flush=True)
+        return 2
+    if _start_token(int(pid)) != token:
+        print("OPEN_DESKTOP: ERROR the Desktop changed during collect; nothing written", flush=True)
+        return 2
+    try:
+        out.write_text(result["text"], encoding="utf-8", newline="")
+    except OSError as exc:
+        print(f"OPEN_DESKTOP: ERROR cannot write --out ({type(exc).__name__})", flush=True)
+        return 2
+    code = error_code(result["text"])
+    print(
+        f'OPEN_DESKTOP: collect pid={pid} title="{observation.dialog.title}"'
+        f" error_code={sanitize_title(code) if code else 'none'} out={out}",
+        flush=True,
+    )
+    print(f"message: {sanitize_title(result.get('message'))}", flush=True)
+    return 0
 
 
 def check() -> int:
@@ -410,16 +543,25 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--canaries", nargs="*", help="with --refresh: tables to verify (see refresh_pbip_model.py)")
     parser.add_argument("--no-save", action="store_true", help="with --refresh: no Save; data discarded on close")
     parser.add_argument("--observe", metavar="PID", help="one read-only observation of that running Desktop PID")
-    parser.add_argument("--process-start", help="with --observe: the exact process-start token to bind to")
+    parser.add_argument("--collect", metavar="PID", help="click Copy details on that Desktop's dialog; see --out")
+    parser.add_argument("--process-start", help="with --observe or --collect: the exact process-start token")
+    parser.add_argument("--out", type=Path, help="with --collect: private file for the copied details text")
     parser.add_argument("--json", action="store_true", help="with --observe: print the observation JSON on stdout")
     args = parser.parse_args(argv)
-    if [bool(args.pbip), args.check, args.observe is not None].count(True) != 1:
-        parser.error("give either a .pbip path or --check, or --observe PID")
+    modes = [bool(args.pbip), args.check, args.observe is not None, args.collect is not None]
+    if modes.count(True) != 1:
+        parser.error("give either a .pbip path or --check, or --observe PID, or --collect PID")
     refresh_options = args.canaries is not None or args.no_save
     if (refresh_options and not args.refresh) or (args.refresh and not args.pbip):
         parser.error("--canaries and --no-save need --refresh, which needs a .pbip path")
+    if args.collect is not None:
+        if args.process_start is None or args.out is None or args.json:
+            parser.error("--collect needs --process-start and --out, and takes no --json")
+        return collect_command(args.collect, args.process_start, args.out)
     if (args.process_start is not None or args.json) and args.observe is None:
         parser.error("--process-start and --json need --observe")
+    if args.out is not None:
+        parser.error("--out needs --collect")
     if args.observe is not None:
         return observe_command(args.observe, args.process_start, args.json)
     if args.check:

@@ -154,7 +154,7 @@ def build_parser(prog: str = "python -B scripts/t2p.py") -> argparse.ArgumentPar
         allow_abbrev=False,
         description=(
             "Narrow pilot: diagnostic doctor, assessment-only survey, live project start, read-only status, "
-            "read-only unit lookup, local .pbip refresh, read-only Desktop observation."
+            "read-only unit lookup, local .pbip refresh, Desktop observation and dialog details."
         ),
     )
     commands = parser.add_subparsers(dest="command", required=True, parser_class=Parser)
@@ -165,7 +165,10 @@ def build_parser(prog: str = "python -B scripts/t2p.py") -> argparse.ArgumentPar
         ("status", "Read-only inventory for one absolute run: units, path budget and the owner's next command."),
         ("units", "Read-only unit-ID lookup across one runs root; no allocation, rename or refresh."),
         ("refresh", "Open one .pbip in a new Power BI Desktop, refresh it, Save, close; progress streams live."),
-        ("desktop", "Read-only look at one running Power BI Desktop; nothing is started, clicked or closed."),
+        (
+            "desktop",
+            "Look at one running Power BI Desktop, or copy its open dialog's details; nothing is started or closed.",
+        ),
     ):
         child = commands.add_parser(command, help=help_text, description=help_text, allow_abbrev=False)
         if command == "units":
@@ -230,6 +233,14 @@ def _add_desktop_actions(parser: argparse.ArgumentParser) -> None:
     child.add_argument("--json", action="store_true", help="one t2p/v1 JSON envelope on stdout")
     child.add_argument("--pid", type=_pid, required=True, help="decimal process id of that Desktop")
     child.add_argument("--process-start", type=_process_start, help="exact process-start token to bind to")
+    help_text = (
+        "Click Copy details on that Desktop's open dialog and write the copied text to a private file;"
+        " exit 0 collected, 3 no dialog, 2 refused or not collected."
+    )
+    child = actions.add_parser("collect", help=help_text, description=help_text, allow_abbrev=False)
+    child.add_argument("--pid", type=_pid, required=True, help="decimal process id of that Desktop")
+    child.add_argument("--process-start", type=_process_start, required=True, help="exact process-start token")
+    child.add_argument("--out", type=Path, required=True, help="private file for the copied text (overwritten)")
 
 
 def _project_name(name: str) -> str:
@@ -1318,13 +1329,19 @@ def _observation(stdout: str, code: int, pid: str) -> dict | None:
 
 
 def desktop(args: argparse.Namespace, result: dict) -> int:
-    """Delegate one read-only observation; the exit code is 0 only for READY, 3 for any other observed state."""
-    result["authority"] = "open_desktop.py --observe"
-    result["proof_boundary"]["not_established"] += ["model_validity", "successful_open"]
-    command = [sys.executable, "-B", str(ROOT / REFRESH_OWNER), "--observe", args.pid]
-    if args.process_start:
-        command += ["--process-start", args.process_start]
-    if not args.json:
+    """Delegate collect, or one read-only observation: exit 0 only for READY, 3 for any other observed state."""
+    owner = [sys.executable, "-B", str(ROOT / REFRESH_OWNER)]
+    if args.desktop_action == "collect":
+        # A plain pass-through with no JSON form, so it never reaches the observation parsing below.
+        result["authority"] = "open_desktop.py --collect"
+        command = [*owner, "--collect", args.pid, "--process-start", args.process_start, "--out", str(args.out)]
+    else:
+        result["authority"] = "open_desktop.py --observe"
+        result["proof_boundary"]["not_established"] += ["model_validity", "successful_open"]
+        command = [*owner, "--observe", args.pid]
+        if args.process_start:
+            command += ["--process-start", args.process_start]
+    if args.desktop_action == "collect" or not args.json:
         code = subprocess.run(command, check=False).returncode
         result["delegated_exit_code"] = code
         result["status"] = "ok" if code == 0 else "cannot_establish" if code == 3 else "error"
