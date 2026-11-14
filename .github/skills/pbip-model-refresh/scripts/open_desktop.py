@@ -367,8 +367,10 @@ def observe_command(pid: str, process_start_token: str | None, as_json: bool) ->
             "no blocking window observed for this PID (not verified as Power BI Desktop); this does not show"
             " sign-in, source reachability, model validity or that the model opened"
         )
+    elif state == "NO_WINDOW":
+        detail = "no Desktop window found for this PID yet; it may still be starting, or the PID is not Desktop"
     else:
-        detail = "unreadable; inspect that Desktop locally"
+        detail = "the windows could not be read completely; inspect that Desktop locally"
     if as_json:
         print(observation.to_json())
     print(f"{head}\n{detail}", file=sys.stderr if as_json else sys.stdout, flush=True)

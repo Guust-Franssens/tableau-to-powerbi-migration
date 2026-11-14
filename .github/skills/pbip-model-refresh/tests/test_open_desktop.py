@@ -130,8 +130,8 @@ DIALOG = {"dialog": observer.DialogFinding(observer.DesktopWindow("Sign in", "#3
     [
         ({}, "READY", 0, "not verified as Power BI Desktop"),
         (DIALOG, "HUMAN_ACTION_REQUIRED", 3, 'dialog is open: "Sign in"'),
-        ({"desktop_unready": "no_window", "reason": "no_window"}, "NO_WINDOW", 3, "unreadable"),
-        ({"unknown_reason": "timeout", "complete": False, "reason": "timeout"}, "UNKNOWN", 3, "unreadable"),
+        ({"desktop_unready": "no_window", "reason": "no_window"}, "NO_WINDOW", 3, "no Desktop window found"),
+        ({"unknown_reason": "timeout", "complete": False, "reason": "timeout"}, "UNKNOWN", 3, "could not be read"),
         (GONE, "PROCESS_GONE", 3, "nothing was observed"),
         (CHANGED, "PROCESS_GONE", 3, "gone=identity_changed"),
     ],
