@@ -678,6 +678,15 @@ def test_collect_writes_the_copied_text_byte_for_byte(capsys, collect) -> None:
     ]
 
 
+@pytest.mark.parametrize("text", ["", " \t\r\n"], ids=["empty", "whitespace-only"])
+def test_collect_refuses_empty_clipboard_text(capsys, collect, text) -> None:
+    collect.helper_prints({**CLICKED, "text": text})
+
+    assert open_desktop.main(["--collect", "123", "--process-start", "456", "--out", str(collect.out)]) == 2
+    assert capsys.readouterr().out.splitlines() == ["OPEN_DESKTOP: ERROR empty clipboard text; nothing written"]
+    assert collect.clicked.exists() and not collect.out.exists()
+
+
 GONE_OBSERVATION = observer.Observation(**GONE)
 MINIMIZED = observer.Observation(unknown_reason="minimized", complete=False, reason="minimized")
 

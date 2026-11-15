@@ -495,6 +495,9 @@ def collect_command(pid: str, token: str, out: Path) -> int:  # pylint: disable=
     if _start_token(int(pid)) != token:
         print("OPEN_DESKTOP: ERROR the Desktop changed during collect; nothing written", flush=True)
         return 2
+    if not result["text"].strip():
+        print("OPEN_DESKTOP: ERROR empty clipboard text; nothing written", flush=True)
+        return 2
     try:
         out.write_text(result["text"], encoding="utf-8", newline="")
     except OSError as exc:
