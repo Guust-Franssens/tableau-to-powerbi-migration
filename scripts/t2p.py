@@ -1,6 +1,6 @@
 """
-purpose: narrow doctor/start/status/units/refresh pilot delegating to existing configuration and run owners.
-usage:   python -B scripts/t2p.py {doctor,start,assess,status,units,refresh} [args]
+purpose: narrow doctor/start/status/units/refresh/desktop pilot delegating to existing configuration and run owners.
+usage:   python -B scripts/t2p.py {doctor,start,assess,status,units,refresh,desktop} [args]
 
 No readiness, liveness, fidelity, credential validity or completion certification.
 """
@@ -59,7 +59,7 @@ ENVELOPE_SCHEMA = {
     ],
     "properties": {
         "schema_version": {"const": SCHEMA_VERSION},
-        "command": {"enum": ["doctor", "start", "assess", "status", "units", "refresh", None]},
+        "command": {"enum": ["doctor", "start", "assess", "status", "units", "refresh", "desktop", None]},
         "status": {
             "enum": [
                 "ok",
@@ -147,6 +147,15 @@ class Parser(argparse.ArgumentParser):
         raise ArgumentError("invalid_arguments_use_help")
 
 
+class ExamplesHelpFormatter(argparse.HelpFormatter):
+    """Keep example lines while wrapping normal help descriptions."""
+
+    def _fill_text(self, text: str, width: int, indent: str) -> str:
+        if text.startswith("Examples:\n"):
+            return text
+        return super()._fill_text(text, width, indent)
+
+
 def build_parser(prog: str = "python -B scripts/t2p.py") -> argparse.ArgumentParser:
     """The entire supported command tree; no implicit input routing."""
     parser = Parser(
@@ -154,8 +163,19 @@ def build_parser(prog: str = "python -B scripts/t2p.py") -> argparse.ArgumentPar
         allow_abbrev=False,
         description=(
             "Narrow pilot: diagnostic doctor, assessment-only survey, live project start, read-only status, "
-            "read-only unit lookup, local .pbip refresh."
+            "read-only unit lookup, local .pbip refresh, Desktop observation and dialog details. "
+            "Without a command, help prints to stderr and exits 2; use --help for stdout or --json for a "
+            "structured syntax-error response."
         ),
+        epilog=(
+            "Examples:\n"
+            f"  {prog} doctor\n"
+            f"  {prog} start --help\n"
+            f"  {prog} units list --help\n"
+            f"  {prog} refresh --help\n"
+            f"  {prog} desktop --help"
+        ),
+        formatter_class=ExamplesHelpFormatter,
     )
     commands = parser.add_subparsers(dest="command", required=True, parser_class=Parser)
     for command, help_text in (
@@ -165,13 +185,32 @@ def build_parser(prog: str = "python -B scripts/t2p.py") -> argparse.ArgumentPar
         ("status", "Read-only inventory for one absolute run: units, path budget and the owner's next command."),
         ("units", "Read-only unit-ID lookup across one runs root; no allocation, rename or refresh."),
         ("refresh", "Open one .pbip in a new Power BI Desktop, refresh it, Save, close; progress streams live."),
+        (
+            "desktop",
+            "Look at one running Power BI Desktop, or copy its open dialog's details; nothing is started or closed.",
+        ),
     ):
         child = commands.add_parser(command, help=help_text, description=help_text, allow_abbrev=False)
         if command == "units":
             _add_units_actions(child)
             continue
+        if command == "desktop":
+            child.epilog = (
+                "Examples:\n"
+                f"  {child.prog} observe --pid 1234\n"
+                f"  {child.prog} collect --pid 1234 --process-start 123456789 --out C:\\private\\dialog-details.txt"
+            )
+            child.formatter_class = ExamplesHelpFormatter
+            _add_desktop_actions(child)
+            continue
         child.add_argument("--json", action="store_true", help="one t2p/v1 JSON envelope on stdout")
         if command == "refresh":
+            child.epilog = (
+                "Examples:\n"
+                f"  {child.prog} C:\\path\\to\\model.pbip --canaries Orders Customers\n"
+                f"  {child.prog} C:\\path\\to\\model.pbip --no-save"
+            )
+            child.formatter_class = ExamplesHelpFormatter
             child.add_argument("path", type=Path, help="a .pbip file, or the folder holding exactly one")
             child.add_argument("--canaries", nargs="*", help="tables that must return rows, one per live source")
             child.add_argument("--no-save", action="store_true", help="refresh in memory only; nothing is saved")
@@ -205,6 +244,35 @@ def _add_units_actions(parser: argparse.ArgumentParser) -> None:
         if action == "find":
             child.add_argument("--name", help="case-insensitive substring of the original name")
             child.add_argument("--luid", help="exact source LUID")
+
+
+def _pid(text: str) -> str:
+    if not re.fullmatch(r"[1-9][0-9]{0,9}", text) or int(text) >= 2**32:
+        raise argparse.ArgumentTypeError("a decimal process id")
+    return text
+
+
+def _process_start(text: str) -> str:
+    if not re.fullmatch(r"[1-9][0-9]{0,19}", text):
+        raise argparse.ArgumentTypeError("a decimal process-start token")
+    return text
+
+
+def _add_desktop_actions(parser: argparse.ArgumentParser) -> None:
+    actions = parser.add_subparsers(dest="desktop_action", required=True, parser_class=Parser)
+    help_text = "One read-only observation of a running Desktop PID; exit 0 only when no blocking window is seen."
+    child = actions.add_parser("observe", help=help_text, description=help_text, allow_abbrev=False)
+    child.add_argument("--json", action="store_true", help="one t2p/v1 JSON envelope on stdout")
+    child.add_argument("--pid", type=_pid, required=True, help="decimal process id of that Desktop")
+    child.add_argument("--process-start", type=_process_start, help="exact process-start token to bind to")
+    help_text = (
+        "Click Copy details on that Desktop's open dialog and write the copied text to a private file;"
+        " exit 0 collected, 3 no dialog, 2 refused or not collected."
+    )
+    child = actions.add_parser("collect", help=help_text, description=help_text, allow_abbrev=False)
+    child.add_argument("--pid", type=_pid, required=True, help="decimal process id of that Desktop")
+    child.add_argument("--process-start", type=_process_start, required=True, help="exact process-start token")
+    child.add_argument("--out", type=Path, required=True, help="private file for the copied text (overwritten)")
 
 
 def _project_name(name: str) -> str:
@@ -361,9 +429,11 @@ def envelope(command: str | None) -> dict[str, Any]:
         "run_location": None,
         "runs_root": None,
         "run_location_reason": (
-            "not_applicable_no_run" if command in {"doctor", "units", "refresh"} else "not_allocated_path_withheld"
+            "not_applicable_no_run"
+            if command in {"doctor", "units", "refresh", "desktop"}
+            else "not_allocated_path_withheld"
         ),
-        "path_report": None if command in {"doctor", "assess", "units", "refresh"} else path_report(command),
+        "path_report": None if command in {"doctor", "assess", "units", "refresh", "desktop"} else path_report(command),
         "limitations": [],
         "proof_boundary": {
             "established": [],
@@ -1275,10 +1345,62 @@ def refresh(args: argparse.Namespace, result: dict) -> int:
     return code
 
 
+def _observation(stdout: str, code: int, pid: str) -> dict | None:
+    """The child's one observation line when it is coherent with its exit code and the asked PID, else None."""
+    lines = stdout.splitlines()
+    try:
+        observed = json.loads(lines[0]) if len(lines) == 1 else None
+    except ValueError:
+        return None
+    if not isinstance(observed, dict) or observed.get("schema") != "desktop.observation.v2":
+        return None
+    state = observed.get("state")
+    if observed.get("pid") != pid or not isinstance(state, str) or code not in {0, 3}:
+        return None
+    return observed if (code == 0) == (state == "READY") else None
+
+
+def desktop(args: argparse.Namespace, result: dict) -> int:
+    """Delegate collect, or one read-only observation: exit 0 only for READY, 3 for any other observed state."""
+    owner = [sys.executable, "-B", str(ROOT / REFRESH_OWNER)]
+    if args.desktop_action == "collect":
+        # A plain pass-through with no JSON form, so it never reaches the observation parsing below.
+        result["authority"] = "open_desktop.py --collect"
+        command = [*owner, "--collect", args.pid, "--process-start", args.process_start, "--out", str(args.out)]
+    else:
+        result["authority"] = "open_desktop.py --observe"
+        result["proof_boundary"]["not_established"] += ["model_validity", "successful_open"]
+        command = [*owner, "--observe", args.pid]
+        if args.process_start:
+            command += ["--process-start", args.process_start]
+    if args.desktop_action == "collect" or not args.json:
+        code = subprocess.run(command, check=False).returncode
+        result["delegated_exit_code"] = code
+        result["status"] = "ok" if code == 0 else "cannot_establish" if code == 3 else "error"
+        return code
+    # stdout is a pipe, stderr is inherited: the owner's human lines stay visible beside the one JSON line.
+    done = subprocess.run([*command, "--json"], stdout=subprocess.PIPE, text=True, check=False)
+    code = done.returncode
+    result["delegated_exit_code"] = code
+    if code not in {0, 3}:
+        return code
+    observed = _observation(done.stdout, code, args.pid)
+    if observed is None:
+        result["limitations"].append("owner_result_unavailable")
+        return 1
+    result["evidence"].append(
+        {"owner": "_desktop_observer.py", "locator": "desktop.observation.v2", "observation": observed}
+    )
+    result["status"] = "ok" if code == 0 else "cannot_establish"
+    return code
+
+
 def _delegate(args: argparse.Namespace, result: dict, *, json_mode: bool) -> int:
     """Keep the same three owners and live descriptor transport, without a command registry."""
     if args.command == "doctor":
         code = doctor(args, result)
+    elif args.command == "desktop":
+        code = desktop(args, result)
     elif args.command in {"start", "assess", "refresh"}:
         # Live progress is local, not part of the stdout JSON stream.
         owner = refresh if args.command == "refresh" else start
@@ -1299,12 +1421,17 @@ def main(argv: list[str] | None = None, *, installed: bool = False) -> int:
     """Render one versioned result without reflecting exception text or invalid argv."""
     argv = list(sys.argv[1:] if argv is None else argv)
     json_mode = "--json" in argv
-    command = argv[0] if argv and argv[0] in {"doctor", "start", "assess", "status", "units", "refresh"} else None
+    command = (
+        argv[0] if argv and argv[0] in {"doctor", "start", "assess", "status", "units", "refresh", "desktop"} else None
+    )
     result = envelope(command)
     args = None
     install_failure = False
     try:
         parser = build_parser("t2p") if installed else build_parser()
+        if not argv:
+            parser.print_help(sys.stderr)
+            return 2
         args = parser.parse_args(argv)
         if args.command == "start" and not args.project.strip():
             raise ArgumentError("nonempty_project_required")
@@ -1331,8 +1458,8 @@ def main(argv: list[str] | None = None, *, installed: bool = False) -> int:
         _status_human(result)
     elif command == "units":
         _units_human(result)
-    elif command == "refresh" and result["delegated_exit_code"] is not None:
-        pass  # the refresh CLI already printed its progress and verdict
+    elif command in {"refresh", "desktop"} and result["delegated_exit_code"] is not None:
+        pass  # the owner CLI already printed its progress and verdict
     elif command == "doctor":
         if installed:
             _doctor_human(result, args, installed=True)

@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import re
@@ -23,6 +24,7 @@ from types import SimpleNamespace
 import pytest
 
 import _desktop_actions as actions
+import _desktop_details as details
 import _source_scope as scope
 import open_desktop
 import probe_desktop_query as query_probe
@@ -3173,6 +3175,181 @@ def _taskkill_recorder(monkeypatch: pytest.MonkeyPatch, returncode: int = 0) -> 
 
 KILL_123 = [["taskkill", "/PID", "123", "/T", "/F"]]
 UNPROVEN = "PID 123 not closed: its identity is unproven; check it before stopping it"
+
+
+@pytest.mark.parametrize("copied", [True, False], ids=["details-collected", "no-copy-link"])
+@pytest.mark.parametrize("save_only", [False, True], ids=["refresh", "save-only"])
+def test_failed_refresh_reports_details_without_changing_its_verdict(
+    ui_refresh_route, monkeypatch, capsys, copied, save_only
+) -> None:
+    controls, _events, actions_seen, _bridge_operations = ui_refresh_route
+    window = DesktopWindow("Model error", "#32770", 400, 300, hwnd=77, pid="123")
+    modal = Observation(pid="123", process_started_at="456", dialog=DialogFinding(window, window.title))
+    controls["observer"] = modal
+    monkeypatch.setattr(refresh_pbip_model, "process_start", lambda _pid: "456")
+    monkeypatch.setattr(details, "process_start", lambda _pid: "456")
+    observed = []
+
+    def observe(pid, *, expected_process_start):
+        observed.append((pid, expected_process_start))
+        return modal
+
+    monkeypatch.setattr(details, "observe", observe)
+    calls = []
+    result = (
+        {
+            "text": "PowerBINonFatalError_ErrorCode:\nModelSchemaValidationFailed\n",
+            "message": "Model error",
+            "sequence_changed": True,
+            "owner_pid": 123,
+        }
+        if copied
+        else {"error": "no Copy details link"}
+    )
+
+    def child(command, **_kwargs):
+        calls.append(command)
+        return SimpleNamespace(stdout=json.dumps(result), returncode=0)
+
+    monkeypatch.setattr(details.subprocess, "run", child)
+    argv = ["--pid", "123", *(["--save-only", "--canaries", "Orders"] if save_only else [])]
+    assert refresh_pbip_model.main(argv) == 3
+    output = capsys.readouterr()
+    assert output.out.count("REFRESH:") == 1
+    assert "REFRESH: DIALOG_NEEDS_HUMAN" in output.out
+    assert "ModelSchemaValidationFailed" in output.err if copied else "no Copy details link" in output.err
+    assert observed == [("123", "456")]
+    assert len(calls) == 1 and calls[0][-2:] == ["123", "77"]
+    assert actions_seen == []
+
+
+@pytest.mark.parametrize(
+    ("args", "result"),
+    [([], 0), ([], 1), (["--verify-only"], 2), (["--save-only", "--canaries", "Orders"], 3)],
+    ids=["success", "refresh-failed", "verify-only-failed", "save-failed"],
+)
+def test_diagnostic_wrapper_preserves_result_and_read_only_mode(monkeypatch, args, result) -> None:
+    calls = []
+    starts = []
+    monkeypatch.setattr(refresh_pbip_model, "process_start", lambda pid: starts.append(pid) or "456")
+
+    def operation(_args, pid, *, require_clean):
+        assert pid == 123
+        assert require_clean is (not _args.save_only)
+        return result
+
+    monkeypatch.setattr(refresh_pbip_model, "_run_operation", operation)
+    monkeypatch.setattr(refresh_pbip_model, "collect_command", lambda pid, token: calls.append((pid, token)) or 0)
+    assert refresh_pbip_model.main(["--pid", "123", *args]) == result
+    assert calls == ([("123", "456")] if result and "--verify-only" not in args else [])
+    assert starts == ([] if "--verify-only" in args else [123])
+
+
+def test_failed_refresh_without_diagnostic_identity_keeps_its_verdict(monkeypatch, capsys) -> None:
+    def unavailable(_pid):
+        raise OSError("identity unavailable")
+
+    monkeypatch.setattr(refresh_pbip_model, "process_start", unavailable)
+    monkeypatch.setattr(refresh_pbip_model, "_run_operation", lambda *_a, **_k: 1)
+    monkeypatch.setattr(details, "observe", lambda *_a, **_k: pytest.fail("observed without held identity"))
+    assert refresh_pbip_model.main(["--pid", "123"]) == 1
+    assert "process-start identity unavailable" in capsys.readouterr().err
+
+
+def test_failed_refresh_escapes_unencodable_details_to_ascii_stderr(ui_refresh_route, monkeypatch, capsys) -> None:
+    controls, _events, actions_seen, _bridge_operations = ui_refresh_route
+    window = DesktopWindow("Model error", "#32770", 400, 300, hwnd=77, pid="123")
+    modal = Observation(pid="123", process_started_at="456", dialog=DialogFinding(window, window.title))
+    controls["observer"] = modal
+    monkeypatch.setattr(refresh_pbip_model, "process_start", lambda _pid: "456")
+    monkeypatch.setattr(details, "process_start", lambda _pid: "456")
+    monkeypatch.setattr(details, "observe", lambda *_args, **_kwargs: modal)
+    monkeypatch.setattr(
+        details,
+        "_read_details",
+        lambda *_args, **_kwargs: {
+            "text": "Copied details: 😀\n",
+            "message": "Model error",
+            "sequence_changed": True,
+            "owner_pid": 123,
+        },
+    )
+    stderr = io.TextIOWrapper(io.BytesIO(), encoding="ascii", errors="strict")
+    monkeypatch.setattr(sys, "stderr", stderr)
+
+    assert refresh_pbip_model.main(["--pid", "123"]) == 3
+
+    stderr.flush()
+    diagnostics = stderr.buffer.getvalue().decode("ascii")
+    assert r"\U0001f600" in diagnostics
+    assert "REFRESH: DIALOG_NEEDS_HUMAN" in capsys.readouterr().out
+    assert actions_seen == []
+
+
+@pytest.mark.parametrize(
+    "args",
+    [[], ["--save-only", "--canaries", "Orders"]],
+    ids=["refresh", "save-only"],
+)
+def test_unexpected_collector_exception_is_reported_without_replacing_result(monkeypatch, capsys, args) -> None:
+    monkeypatch.setattr(refresh_pbip_model, "process_start", lambda _pid: "456")
+    monkeypatch.setattr(refresh_pbip_model, "_run_operation", lambda *_args, **_kwargs: 3)
+
+    def fail_collection(*_args, **_kwargs):
+        raise RuntimeError("unexpected diagnostic failure")
+
+    monkeypatch.setattr(refresh_pbip_model, "collect_command", fail_collection)
+    assert refresh_pbip_model.main(["--pid", "123", *args]) == 3
+    assert "DESKTOP_DETAILS: ERROR automatic collection failed (RuntimeError)" in capsys.readouterr().err
+
+
+def test_manual_collect_message_uses_encoding_safe_line_emitter(monkeypatch) -> None:
+    window = DesktopWindow("Model error", "#32770", 400, 300, hwnd=77, pid="123")
+    modal = Observation(pid="123", process_started_at="456", dialog=DialogFinding(window, window.title))
+    monkeypatch.setattr(details, "observe", lambda *_args, **_kwargs: modal)
+    monkeypatch.setattr(details, "process_start", lambda _pid: "456")
+    monkeypatch.setattr(
+        details,
+        "_read_details",
+        lambda *_args, **_kwargs: {
+            "text": "Copied details: 😀\n",
+            "message": "Model 😀",
+            "sequence_changed": True,
+            "owner_pid": 123,
+        },
+    )
+    destination = Path.cwd() / f".pytest-collect-details-{os.getpid()}.txt"
+    stdout = io.TextIOWrapper(io.BytesIO(), encoding="ascii", errors="strict")
+    monkeypatch.setattr(sys, "stdout", stdout)
+
+    try:
+        assert details.collect_command("123", "456", destination) == 0
+        stdout.flush()
+        output = stdout.buffer.getvalue().decode("ascii")
+        assert "message: Model \\U0001f600" in output
+        assert destination.read_text(encoding="utf-8") == "Copied details: 😀\n"
+    finally:
+        destination.unlink(missing_ok=True)
+
+
+def test_failed_collection_report_does_not_replace_result_when_stderr_fails(monkeypatch) -> None:
+    class BrokenStderr:
+        encoding = "ascii"
+
+        def write(self, _text: str) -> None:
+            raise OSError("stderr unavailable")
+
+        def flush(self) -> None:
+            raise OSError("stderr unavailable")
+
+    def fail_collection(*_args, **_kwargs):
+        raise RuntimeError("unexpected diagnostic failure")
+
+    monkeypatch.setattr(refresh_pbip_model, "process_start", lambda _pid: "456")
+    monkeypatch.setattr(refresh_pbip_model, "_run_operation", lambda *_args, **_kwargs: 3)
+    monkeypatch.setattr(refresh_pbip_model, "collect_command", fail_collection)
+    monkeypatch.setattr(sys, "stderr", BrokenStderr())
+    assert refresh_pbip_model.main(["--pid", "123"]) == 3
 
 
 @pytest.mark.parametrize("dirty", [True, None], ids=["unsaved", "unknown"])

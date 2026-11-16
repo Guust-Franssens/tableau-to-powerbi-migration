@@ -11,6 +11,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 import types
 from pathlib import Path
 
@@ -19,6 +20,8 @@ import pytest
 SKILL_SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SKILL_SCRIPTS))
 import open_desktop  # noqa: E402  # pylint: disable=wrong-import-position,import-error
+import _desktop_details as details  # noqa: E402  # pylint: disable=wrong-import-position,import-error
+import _desktop_observer as observer  # noqa: E402  # pylint: disable=wrong-import-position,import-error
 import probe_desktop_query as pdq  # noqa: E402  # pylint: disable=wrong-import-position,import-error
 
 PID = 4242
@@ -101,6 +104,76 @@ def test_exactly_one_of_a_pbip_or_check(argv) -> None:
     assert caught.value.code == 2
 
 
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--observe", "1", "model.pbip"],
+        ["--observe", "1", "--check"],
+        ["--observe", "1", "--refresh"],
+        ["--process-start", "5", "model.pbip"],
+        ["--json", "--check"],
+        ["--collect", "1", "--out", "x.txt"],
+        ["--collect", "1", "--process-start", "5"],
+        ["--collect", "1", "--process-start", "5", "--out", "x.txt", "--json"],
+        ["--collect", "1", "--observe", "1", "--process-start", "5", "--out", "x.txt"],
+        ["--observe", "1", "--out", "x.txt"],
+    ],
+)
+def test_observe_is_its_own_mode(monkeypatch, argv) -> None:
+    monkeypatch.setattr(open_desktop, "observe", lambda *_a, **_k: pytest.fail("observed"))
+    with pytest.raises(SystemExit) as caught:
+        open_desktop.main(argv)
+    assert caught.value.code == 2
+
+
+GONE = {"process_gone": "process_gone", "complete": False, "reason": "process_gone"}
+CHANGED = {"process_gone": "identity_changed", "complete": False, "reason": "process_gone"}
+DIALOG = {"dialog": observer.DialogFinding(observer.DesktopWindow("Sign in", "#32770", 400, 300, hwnd=7), "Sign in")}
+
+
+@pytest.mark.parametrize("as_json", [False, True], ids=["human", "json"])
+@pytest.mark.parametrize(
+    ("fields", "state", "code", "sentence"),
+    [
+        ({}, "READY", 0, "not verified as Power BI Desktop"),
+        (DIALOG, "HUMAN_ACTION_REQUIRED", 3, 'dialog is open: "Sign in"'),
+        ({"desktop_unready": "no_window", "reason": "no_window"}, "NO_WINDOW", 3, "no Desktop window found"),
+        ({"unknown_reason": "timeout", "complete": False, "reason": "timeout"}, "UNKNOWN", 3, "could not be read"),
+        (GONE, "PROCESS_GONE", 3, "nothing was observed"),
+        (CHANGED, "PROCESS_GONE", 3, "gone=identity_changed"),
+    ],
+    ids=["ready", "dialog", "no_window", "unknown", "gone", "changed"],
+)
+def test_observe_mode_maps_each_observer_state(monkeypatch, capsys, as_json, fields, state, code, sentence) -> None:
+    seen = {}
+
+    def fake(pid, **kwargs):
+        seen.update(pid=pid, **kwargs)
+        return observer.Observation(pid=pid, process_started_at="456", **fields)
+
+    monkeypatch.setattr(open_desktop, "observe", fake)
+
+    assert open_desktop.main(["--observe", "123", "--process-start", "456", *(["--json"] if as_json else [])]) == code
+    out, err = capsys.readouterr()
+    assert seen == {"pid": "123", "expected_process_start": "456"}
+    human = err if as_json else out
+    assert f"state={state}" in human and sentence in human
+    if as_json:
+        assert [json.loads(line)["state"] for line in out.splitlines()] == [state]
+        assert "Sign in" not in out, "no title may reach the structured output"
+    assert not any(word in human for word in ("clean", "healthy")) or state == "READY"
+
+
+@pytest.mark.parametrize("as_json", [False, True], ids=["human", "json"])
+@pytest.mark.parametrize(("pid", "token"), [("abc", None), ("0", None), ("7", "007")])
+def test_observe_mode_refuses_a_bad_identity_with_exit_2(capsys, pid, token, as_json) -> None:
+    argv = ["--observe", pid, *(["--process-start", token] if token else []), *(["--json"] if as_json else [])]
+    assert open_desktop.main(argv) == 2
+    out, err = capsys.readouterr()
+    assert "nothing observed" in (err if as_json else out)
+    assert not as_json or out == "", "--json keeps stdout for the observation line only"
+
+
 @pytest.fixture(name="launch")
 def _launch(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     """A launch whose start, launch record and bridge helpers are fakes; returns the .pbip and a log."""
@@ -114,13 +187,15 @@ def _launch(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     monkeypatch.setattr(open_desktop, "_ui_bridge_command", lambda: ["powerbi-desktop"])
     monkeypatch.setattr(open_desktop, "_ui_desktop_alive", lambda pid: True)
     monkeypatch.setattr(open_desktop, "_open_elsewhere", lambda model: None)
-    monkeypatch.setattr(open_desktop, "time", types.SimpleNamespace(monotonic=lambda: 100.0, sleep=lambda _s: None))
+    clock = _Clock()
+    monkeypatch.setattr(open_desktop, "time", clock)
+    monkeypatch.setattr(open_desktop, "observe", lambda *_a, **_k: observer.Observation())
     monkeypatch.setattr(
         open_desktop,
         "_credential_state",
         lambda pid: types.SimpleNamespace(dialog=None, state="READY"),
     )
-    return types.SimpleNamespace(pbip=pbip, log=log)
+    return types.SimpleNamespace(pbip=pbip, log=log, clock=clock)
 
 
 def test_success_prints_the_pid_first_fits_the_frame_and_ends_with_json(monkeypatch, capsys, launch) -> None:
@@ -140,7 +215,7 @@ def test_success_prints_the_pid_first_fits_the_frame_and_ends_with_json(monkeypa
 
     assert open_desktop.main([str(launch.pbip)]) == 0
     lines = capsys.readouterr().out.splitlines()
-    assert lines[0] == str(PID)
+    assert lines[:2] == [str(PID), f"OPEN_DESKTOP: process_start=start-{PID}"]
     assert "frame: fitted" in lines
     assert json.loads(lines[-1]) == {"pid": PID, "exe_source": "appx", "ready_seconds": 0}
     assert launch.log["start"] == [(launch.pbip.parent / "bin" / "PBIDesktop.exe", launch.pbip.resolve())]
@@ -151,10 +226,10 @@ def test_success_prints_the_pid_first_fits_the_frame_and_ends_with_json(monkeypa
 def test_open_pbip_returns_the_start_token_of_the_pid_it_started(monkeypatch, launch, ready) -> None:
     reused = []
 
-    def status(*_args):
+    def status(*args):
         reused.append(True)
         if not ready:
-            raise TimeoutError
+            return _slice_timeout(*args)
         return {}
 
     # Once the readiness wait has polled, the PID is held by a stranger; the token must predate that.
@@ -192,17 +267,33 @@ def _raise(exc: Exception):
     return boom
 
 
+def _slow_raise(exc: Exception):
+    """A bridge call that takes 1 s and raises `exc`, so a regression that retried would end at the deadline."""
+
+    def boom(*_args):
+        open_desktop.time.now += 1
+        raise exc
+
+    return boom
+
+
+def _slice_timeout(_command, _pid, deadline):
+    """A bridge status call that uses its whole bounded slice and then times out (the fixture clock moves)."""
+    open_desktop.time.now = deadline
+    raise TimeoutError
+
+
 @pytest.mark.parametrize(
-    ("patches", "reason"),
+    ("patches", "seconds", "reason"),
     [
-        ({"_ui_bridge_status": _raise(TimeoutError())}, "timed out"),
-        ({"_ui_desktop_alive": lambda pid: False}, "Desktop process gone"),
-        ({"_ui_bridge_status": _raise(open_desktop.DesktopActionError("bridge refused"))}, "bridge refused"),
-        ({"_ui_bridge_status": _raise(PermissionError("D:\\private\\secret.pbip"))}, "PermissionError"),
+        ({"_ui_bridge_status": _slice_timeout}, open_desktop.READY_TIMEOUT_SECONDS, "timed out"),
+        ({"_ui_desktop_alive": lambda pid: False}, 0, "Desktop process gone"),
+        ({"_ui_bridge_status": _slow_raise(open_desktop.DesktopActionError("bridge refused"))}, 1, "bridge refused"),
+        ({"_ui_bridge_status": _slow_raise(PermissionError("D:\\private\\secret.pbip"))}, 1, "PermissionError"),
     ],
     ids=["timeout", "gone", "bridge-error", "bridge-oserror"],
 )
-def test_the_pid_is_printed_when_readiness_fails(monkeypatch, capsys, launch, patches, reason) -> None:
+def test_the_pid_is_printed_when_readiness_fails(monkeypatch, capsys, launch, patches, seconds, reason) -> None:
     for name, value in patches.items():
         monkeypatch.setattr(open_desktop, name, value)
     monkeypatch.setattr(open_desktop, "fit_launched_frame", lambda *_a: pytest.fail("frame fitted"))
@@ -212,13 +303,13 @@ def test_the_pid_is_printed_when_readiness_fails(monkeypatch, capsys, launch, pa
     assert lines[0] == str(PID)
     assert "OPEN_DESKTOP: diagnostic: READY; inspect that Desktop locally" in lines
     assert lines[-2:] == [
-        f"OPEN_DESKTOP: ERROR PID {PID} not ready after 0 seconds ({reason})",
+        f"OPEN_DESKTOP: ERROR PID {PID} not ready after {seconds} seconds ({reason})",
         f"OPEN_DESKTOP: Desktop PID {PID} left open",
     ]
 
 
 def test_a_dialog_is_reported_for_a_human_and_left_alone(monkeypatch, capsys, launch) -> None:
-    monkeypatch.setattr(open_desktop, "_ui_bridge_status", _raise(TimeoutError()))
+    monkeypatch.setattr(open_desktop, "_ui_bridge_status", _slice_timeout)
     monkeypatch.setattr(
         open_desktop, "_credential_state", lambda pid: types.SimpleNamespace(dialog=object(), state="DIALOG")
     )
@@ -382,7 +473,7 @@ def test_ready_on_a_different_file_is_refused(monkeypatch, capsys, launch, tmp_p
 
     assert open_desktop.main([str(launch.pbip)]) == 2
     assert capsys.readouterr().out.splitlines()[-2] == (
-        f"OPEN_DESKTOP: ERROR PID {PID} not ready after 0 seconds (bridge bound to a different file)"
+        f"OPEN_DESKTOP: ERROR PID {PID} not ready after 2 seconds (bridge bound to a different file)"
     )
 
 
@@ -431,7 +522,7 @@ def test_the_deadline_still_bounds_a_startup_that_never_settles(monkeypatch, cap
     polls: list[float] = []
 
     def status(_command, _pid, held_deadline):
-        assert held_deadline == deadline
+        assert held_deadline == min(deadline, clock.now + open_desktop.BRIDGE_SLICE_SECONDS)
         if clock.now >= deadline:
             pytest.fail("polled at or after the deadline")
         polls.append(clock.now)
@@ -448,6 +539,306 @@ def test_the_deadline_still_bounds_a_startup_that_never_settles(monkeypatch, cap
     assert capsys.readouterr().out.splitlines()[-2] == (
         f"OPEN_DESKTOP: ERROR PID {PID} not ready after {open_desktop.READY_TIMEOUT_SECONDS} seconds (timed out)"
     )
+
+
+def _modal(hwnd: int = 11, owner_hwnd: int = 9, owner_enabled: bool | None = False) -> observer.Observation:
+    """What the observer names as the blocker; owned with a disabled owner is a real modal."""
+    window = observer.DesktopWindow(
+        "Unable to open document", "#32770", 400, 300, hwnd=hwnd, owner_hwnd=owner_hwnd, owner_enabled=owner_enabled
+    )
+    return observer.Observation(dialog=observer.DialogFinding(window, window.title))
+
+
+def _pending(_command, _pid, _deadline):
+    """A bridge that answers at once with a startup reply (its own 0.5 s retry), never ready."""
+    return {"status": "not_connected", "instances": []}
+
+
+BRIDGES = pytest.mark.parametrize(
+    ("bridge", "first_look"), [(_pending, 100.0), (_slice_timeout, 105.0)], ids=["pending", "slice-timeout"]
+)
+
+
+@BRIDGES
+def test_a_held_modal_ends_the_launch_wait_early_and_leaves_desktop_open(
+    monkeypatch, capsys, launch, bridge, first_look
+) -> None:
+    looks = []
+
+    def look(pid, expected_process_start):
+        looks.append(launch.clock.now)
+        assert (pid, expected_process_start) == (PID, f"start-{PID}")
+        return _modal()
+
+    monkeypatch.setattr(open_desktop, "observe", look)
+    monkeypatch.setattr(open_desktop, "_ui_bridge_status", bridge)
+    monkeypatch.setattr(open_desktop, "fit_launched_frame", lambda *_a: pytest.fail("frame fitted"))
+
+    assert open_desktop.main([str(launch.pbip)]) == 2
+    lines = capsys.readouterr().out.splitlines()
+    stopped = round(first_look + 10 - 100)  # the plan's 10 s hold, counted from the first look
+    assert lines[:2] == [str(PID), f"OPEN_DESKTOP: process_start=start-{PID}"]
+    assert lines[-3:] == [
+        "OPEN_DESKTOP: diagnostic: READY; inspect that Desktop locally",
+        f"OPEN_DESKTOP: ERROR PID {PID} not ready after {stopped} seconds (a dialog stayed open)",
+        f"OPEN_DESKTOP: Desktop PID {PID} left open",
+    ]
+    assert all(later - earlier >= open_desktop.LOOK_SECONDS for earlier, later in itertools.pairwise(looks))
+
+
+@BRIDGES
+@pytest.mark.parametrize(
+    "looks",
+    [
+        lambda n: _modal(owner_hwnd=0),
+        lambda n: _modal(owner_enabled=True),
+        lambda n: _modal(owner_enabled=None),
+        lambda n: _modal(hwnd=11 + n % 2),
+        lambda n: observer.Observation(unknown_reason="minimized", complete=False, reason="minimized"),
+        lambda n: (_ for _ in ()).throw(OSError("cannot enumerate")),
+    ],
+    ids=["unowned-splash", "owner-enabled", "owner-unknown", "handle-changes", "unknown", "observer-raises"],
+)
+def test_anything_but_one_held_modal_waits_to_the_deadline(monkeypatch, capsys, launch, bridge, first_look, looks):
+    del first_look
+    count = itertools.count()
+    monkeypatch.setattr(open_desktop, "observe", lambda *_a, **_k: looks(next(count)))
+    monkeypatch.setattr(open_desktop, "_ui_bridge_status", bridge)
+
+    assert open_desktop.main([str(launch.pbip)]) == 2
+    assert capsys.readouterr().out.splitlines()[-2] == (
+        f"OPEN_DESKTOP: ERROR PID {PID} not ready after {open_desktop.READY_TIMEOUT_SECONDS} seconds (timed out)"
+    )
+
+
+@BRIDGES
+def test_bridge_ready_in_the_pass_that_would_stop_still_wins(monkeypatch, capsys, launch, bridge, first_look) -> None:
+    stop = first_look + 10
+    ready = _ready(currentFilePath=str(launch.pbip))
+
+    def status(command, pid, deadline):
+        if launch.clock.now >= stop:
+            return ready
+        try:
+            return bridge(command, pid, deadline)
+        except TimeoutError:
+            if launch.clock.now >= stop:
+                return ready  # this slice's reply arrived at its end, in the pass that would have stopped
+            raise
+
+    monkeypatch.setattr(open_desktop, "observe", lambda *_a, **_k: _modal())
+    monkeypatch.setattr(open_desktop, "_ui_bridge_status", status)
+    monkeypatch.setattr(open_desktop, "fit_launched_frame", lambda *_a: types.SimpleNamespace(describe=lambda: ""))
+
+    assert open_desktop.main([str(launch.pbip)]) == 0
+    assert json.loads(capsys.readouterr().out.splitlines()[-1])["pid"] == PID
+
+
+@pytest.fixture(name="collect")
+def _collect(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """A collect whose observer and identity check are fakes and whose helper is a tiny real script."""
+    state = types.SimpleNamespace(observation=_modal(hwnd=77), token="456", out=tmp_path / "details.txt")
+    helper = tmp_path / "helper.py"
+    monkeypatch.setattr(details, "DETAILS_HELPER", helper)
+    monkeypatch.setattr(details, "observe", lambda *_a, **_k: state.observation)
+    monkeypatch.setattr(details, "process_start", lambda pid: state.token)
+
+    def helper_prints(result: dict | None = None, body: str = "") -> None:
+        clicked = tmp_path / "clicked.json"
+        line = f"print({json.dumps(json.dumps(result))})" if result is not None else ""
+        helper.write_text(
+            "import json, pathlib, sys\n"
+            f"pathlib.Path({str(clicked)!r}).write_text(json.dumps(sys.argv[1:]))\n{body}\n{line}\n",
+            encoding="utf-8",
+        )
+        state.clicked = clicked
+
+    state.helper_prints = helper_prints
+    helper_prints({})
+    return state
+
+
+COPIED = (
+    "Feedback Type:\r\nFrown (Error)\r\n\r\nPowerBINonFatalError_ErrorCode:\r\n\r\n"
+    "InnerException0.PowerBINonFatalError_ErrorCode:\r\nModelSchemaValidationFailed\r\nUser: caf\u00e9\r\n"
+)
+CLICKED = {"message": "Unable to open document", "text": COPIED, "sequence_changed": True, "owner_pid": 123}
+
+
+def test_collect_writes_the_copied_text_byte_for_byte(capsys, collect) -> None:
+    collect.helper_prints(CLICKED)
+
+    assert open_desktop.main(["--collect", "123", "--process-start", "456", "--out", str(collect.out)]) == 0
+    assert collect.out.read_bytes() == COPIED.encode("utf-8")
+    assert json.loads(collect.clicked.read_text(encoding="utf-8")) == ["123", "77"]
+    assert capsys.readouterr().out.splitlines() == [
+        f'OPEN_DESKTOP: collect pid=123 title="Unable to open document" error_code=ModelSchemaValidationFailed'
+        f" out={collect.out}",
+        "message: Unable to open document",
+    ]
+
+
+@pytest.mark.parametrize("text", ["", " \t\r\n"], ids=["empty", "whitespace-only"])
+def test_collect_refuses_empty_clipboard_text(capsys, collect, text) -> None:
+    collect.helper_prints({**CLICKED, "text": text})
+
+    assert open_desktop.main(["--collect", "123", "--process-start", "456", "--out", str(collect.out)]) == 2
+    assert capsys.readouterr().out.splitlines() == ["OPEN_DESKTOP: ERROR empty clipboard text; nothing written"]
+    assert collect.clicked.exists() and not collect.out.exists()
+
+
+GONE_OBSERVATION = observer.Observation(**GONE)
+MINIMIZED = observer.Observation(unknown_reason="minimized", complete=False, reason="minimized")
+
+
+@pytest.mark.parametrize(
+    ("observation", "code", "message"),
+    [
+        (observer.Observation(), 3, "OPEN_DESKTOP: no dialog to collect (state=READY)"),
+        (observer.Observation(desktop_unready="no_window"), 3, "OPEN_DESKTOP: no dialog to collect (state=NO_WINDOW)"),
+        (GONE_OBSERVATION, 3, "OPEN_DESKTOP: no dialog to collect (state=PROCESS_GONE)"),
+        (
+            observer.Observation(**CHANGED),
+            2,
+            "OPEN_DESKTOP: ERROR the PID is not the Desktop that token names; nothing collected",
+        ),
+        (
+            MINIMIZED,
+            2,
+            "OPEN_DESKTOP: ERROR could not read the windows (minimized); nothing collected;"
+            " restore the Desktop window and retry",
+        ),
+        (
+            observer.Observation(unknown_reason="timeout", complete=False, reason="timeout"),
+            2,
+            "OPEN_DESKTOP: ERROR could not read the windows (timeout); nothing collected",
+        ),
+    ],
+    ids=["ready", "no-window", "exited", "identity-changed", "minimized", "unknown"],
+)
+def test_collect_without_a_readable_dialog_clicks_nothing(capsys, collect, observation, code, message) -> None:
+    collect.observation = observation
+
+    assert open_desktop.main(["--collect", "123", "--process-start", "456", "--out", str(collect.out)]) == code
+    assert capsys.readouterr().out.splitlines() == [message]
+    assert not collect.clicked.exists() and not collect.out.exists()
+
+
+@pytest.mark.parametrize(
+    ("result", "token", "message"),
+    [
+        (
+            {**CLICKED, "sequence_changed": False},
+            "456",
+            "OPEN_DESKTOP: ERROR clipboard was not written by this Desktop; nothing written",
+        ),
+        (
+            {**CLICKED, "owner_pid": 999},
+            "456",
+            "OPEN_DESKTOP: ERROR clipboard was not written by this Desktop; nothing written",
+        ),
+        (CLICKED, "789", "OPEN_DESKTOP: ERROR the Desktop changed during collect; nothing written"),
+        ({"error": "no IE control"}, "456", "OPEN_DESKTOP: ERROR could not collect (no IE control)"),
+        (None, "456", "OPEN_DESKTOP: ERROR could not collect (collector failed)"),
+    ],
+    ids=["sequence-unchanged", "other-owner", "identity-changed-after-click", "helper-refused", "helper-crashed"],
+)
+def test_collect_writes_nothing_it_cannot_attribute_to_this_desktop(capsys, collect, result, token, message) -> None:
+    collect.helper_prints(result)
+    collect.token = token
+
+    assert open_desktop.main(["--collect", "123", "--process-start", "456", "--out", str(collect.out)]) == 2
+    assert capsys.readouterr().out.splitlines() == [message]
+    assert collect.clicked.exists() and not collect.out.exists()
+
+
+def test_a_hung_collector_is_killed_at_the_timeout(monkeypatch, capsys, collect) -> None:
+    collect.helper_prints(CLICKED, body="import time\ntime.sleep(60)")
+    monkeypatch.setattr(details, "COLLECT_TIMEOUT_SECONDS", 1)
+    started = time.monotonic()
+
+    assert open_desktop.main(["--collect", "123", "--process-start", "456", "--out", str(collect.out)]) == 2
+    assert time.monotonic() - started < 30
+    assert capsys.readouterr().out.splitlines() == ["OPEN_DESKTOP: ERROR collector timed out; Desktop left as is"]
+    assert not collect.out.exists()
+
+
+def test_collect_refuses_a_missing_out_folder_before_looking(capsys, collect) -> None:
+    out = collect.out.parent / "missing" / "details.txt"
+
+    assert open_desktop.main(["--collect", "123", "--process-start", "456", "--out", str(out)]) == 2
+    assert capsys.readouterr().out.splitlines() == [
+        "OPEN_DESKTOP: ERROR the --out folder does not exist; nothing collected"
+    ]
+    assert not collect.clicked.exists()
+
+
+@pytest.mark.parametrize("refresh", [False, True], ids=["launch", "one-step-refresh"])
+def test_failed_launch_collects_once_without_extra_arguments(monkeypatch, capsys, launch, collect, refresh) -> None:
+    collect.helper_prints({**CLICKED, "owner_pid": PID, "text": COPIED + "\nREFRESH: DATA_OK\n"})
+    monkeypatch.setattr(open_desktop, "process_start", lambda _pid: collect.token)
+    monkeypatch.setattr(open_desktop, "_ui_bridge_status", _pending)
+    monkeypatch.setattr(open_desktop, "observe", lambda *_a, **_k: collect.observation)
+    monkeypatch.setattr(open_desktop, "_credential_state", lambda _pid: collect.observation)
+    monkeypatch.setattr(open_desktop, "_run", lambda *_a, **_k: pytest.fail("refresh invoked after failed launch"))
+    run = details.subprocess.run
+    calls = []
+
+    def child(*args, **kwargs):
+        calls.append(args[0])
+        return run(*args, **kwargs)
+
+    monkeypatch.setattr(details.subprocess, "run", child)
+    assert open_desktop.main([str(launch.pbip), *(["--refresh"] if refresh else [])]) == (3 if refresh else 2)
+    output = capsys.readouterr()
+    assert "a dialog stayed open" in output.out
+    assert len(calls) == 1
+    assert json.loads(collect.clicked.read_text(encoding="utf-8")) == [str(PID), "77"]
+    assert not collect.out.exists()
+    assert "DESKTOP_DETAILS: ModelSchemaValidationFailed" in output.err
+    assert "DESKTOP_DETAILS: REFRESH: DATA_OK" in output.err
+    assert all(line.startswith("DESKTOP_DETAILS:") for line in output.err.splitlines())
+
+
+def test_automatic_collection_without_identity_does_not_click(capsys, collect) -> None:
+    assert details.collect_command("123", None) == 2
+    assert "process-start identity unavailable" in capsys.readouterr().err
+    assert not collect.clicked.exists()
+
+
+@pytest.mark.parametrize("phase", ["start", "identity"])
+def test_automatic_collection_reports_os_failures(monkeypatch, capsys, collect, phase) -> None:
+    collect.helper_prints(CLICKED)
+    if phase == "start":
+        monkeypatch.setattr(details.subprocess, "run", _raise(OSError("cannot start child")))
+    else:
+        monkeypatch.setattr(details, "process_start", _raise(OSError("cannot read identity")))
+    assert details.collect_command("123", "456") == 2
+    assert "DESKTOP_DETAILS: ERROR" in capsys.readouterr().err
+    assert not collect.out.exists()
+
+
+@pytest.mark.parametrize(
+    ("text", "code"),
+    [
+        (
+            "PowerBINonFatalError_ErrorCode:\nTopLevel\nInnerException0.PowerBINonFatalError_ErrorCode:\nInner\n",
+            "TopLevel",
+        ),
+        ("PowerBINonFatalError_ErrorCode:\nInnerException0.PowerBINonFatalError_ErrorCode:\nInner\n", "Inner"),
+        ("  PowerBINonFatalError_ErrorCode:  \r\n\r\n  NextLine  \r\n", "NextLine"),
+        ("Feedback Type:\nFrown (Error)\nPowerBINonFatalError_ErrorCode:\n", None),
+    ],
+    ids=["top-level", "inner-after-empty-top", "value-on-a-later-line", "none"],
+)
+def test_the_error_code_is_the_first_non_empty_labelled_value(text, code) -> None:
+    assert details.error_code(text) == code
+
+
+def test_the_details_helper_imports_and_refuses_bad_arguments_without_windows_apis(capsys) -> None:
+    """Every test host imports it (ubuntu CI included): Windows APIs bind only once a dialog is named."""
+    assert details.main(["not-a-pid"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"error": "ValueError"}
 
 
 @pytest.fixture(name="fake_netfx")

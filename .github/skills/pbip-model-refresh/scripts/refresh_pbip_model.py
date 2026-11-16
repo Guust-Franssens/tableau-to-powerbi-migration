@@ -21,7 +21,8 @@ How it works
 - Default: check the bridge, the observer and the model identity, invoke Desktop's own Refresh through
   UI Automation, wait for typed engine completion (every source partition refreshed after the Invoke),
   run the canaries, then Desktop's own guarded Save, then print one `REFRESH:` verdict. `--no-save`
-  skips Save only. A dialog is never clicked: it stops the run for a human (`DIALOG_NEEDS_HUMAN`).
+  skips Save only. A dialog stops the run for a human (`DIALOG_NEEDS_HUMAN`); on failure its Copy details
+  link is collected automatically to stderr. No other prompt action is taken, and the verdict is unchanged.
 - Progress: `REFRESH_STATUS` lines stream on every field change and at least every 30 seconds, read
   from a separate ADOMD connection that stays readable while Desktop's refresh popup is up. Progress
   never decides the result. `REFRESH_SUMMARY` precedes the data verdict; on a refusal it follows the
@@ -106,6 +107,7 @@ from _desktop_actions import (
     read_partition_snapshot,
 )
 from _source_scope import SourceScopeError, check_source_scope, load_expected_sources
+from _desktop_details import collect_command, emit_line
 
 # Per-model interprocess lock that serializes one model's UI Refresh/Save, in its own module;
 # re-exported so callers and tests reach it via refresh_pbip_model.
@@ -137,6 +139,7 @@ from _desktop_observer import (
     dialog_stop_detail,
     main_frame,
     POLL_INTERVAL_SECONDS,
+    process_start,
 )
 
 
@@ -1802,7 +1805,27 @@ def main(argv: list[str] | None = None) -> int:
     return _run(args, args.pid, require_clean=not args.save_only)
 
 
-def _run(  # pylint: disable=too-many-return-statements,too-many-locals,too-many-branches
+def _run(args: argparse.Namespace, pid: int, *, require_clean: bool) -> int:
+    """Run the operation, then add bounded dialog details on failure without changing its result."""
+    token = None
+    if not args.verify_only:
+        try:
+            token = process_start(pid)
+        except Exception:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+            pass  # A missing diagnostic identity cannot authorize collection or prevent the operation.
+    result = _run_operation(args, pid, require_clean=require_clean)
+    if result != 0 and not args.verify_only:
+        try:
+            collect_command(str(pid), token)
+        except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+            try:
+                emit_line(sys.stderr, f"DESKTOP_DETAILS: ERROR automatic collection failed ({type(exc).__name__})")
+            except Exception:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+                pass  # A broken diagnostic stream must not replace the refresh/save-only result.
+    return result
+
+
+def _run_operation(  # pylint: disable=too-many-return-statements,too-many-locals,too-many-branches
     args: argparse.Namespace, pid: int, *, require_clean: bool
 ) -> int:
     """Refresh (or `--save-only`/`--verify-only`) the Desktop `pid`; `require_clean` refuses unsaved changes."""
