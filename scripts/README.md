@@ -1425,6 +1425,14 @@ with the child's output on stderr. No run is allocated and no path gate applies.
 [refresh skill](../.github/skills/pbip-model-refresh/SKILL.md#one-step-open-refresh-save-close-863) owns
 the procedure.
 
+Launch, refresh and save-only failures automatically collect Desktop's Copy details text when a
+supported dialog is open. The shared collector prints the full details on stderr, prefixed
+`DESKTOP_DETAILS:` on every line, without extra flags or an output file. It holds the operation's
+PID/start identity, attempts collection once, and never changes the original verdict, retries Refresh
+or Save, or dismisses a prompt. Its helper has a separate 30-second limit after the operation fails.
+No dialog or unavailable details are reported explicitly. Success and read-only verify/observe/check
+do not collect. Existing capture API callers are unchanged.
+
 `desktop observe` (Refs #741) takes one read-only look at a running Desktop PID: `t2p desktop observe
 --pid <pid> [--process-start <token>] [--json]` runs `open_desktop.py --observe`, which calls the existing
 observer and adds no detector or state. It starts, clicks and closes nothing, so it can run while a launch

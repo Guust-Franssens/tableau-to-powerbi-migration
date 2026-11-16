@@ -147,6 +147,15 @@ class Parser(argparse.ArgumentParser):
         raise ArgumentError("invalid_arguments_use_help")
 
 
+class ExamplesHelpFormatter(argparse.HelpFormatter):
+    """Keep example lines while wrapping normal help descriptions."""
+
+    def _fill_text(self, text: str, width: int, indent: str) -> str:
+        if text.startswith("Examples:\n"):
+            return text
+        return super()._fill_text(text, width, indent)
+
+
 def build_parser(prog: str = "python -B scripts/t2p.py") -> argparse.ArgumentParser:
     """The entire supported command tree; no implicit input routing."""
     parser = Parser(
@@ -154,8 +163,19 @@ def build_parser(prog: str = "python -B scripts/t2p.py") -> argparse.ArgumentPar
         allow_abbrev=False,
         description=(
             "Narrow pilot: diagnostic doctor, assessment-only survey, live project start, read-only status, "
-            "read-only unit lookup, local .pbip refresh, Desktop observation and dialog details."
+            "read-only unit lookup, local .pbip refresh, Desktop observation and dialog details. "
+            "Without a command, help prints to stderr and exits 2; use --help for stdout or --json for a "
+            "structured syntax-error response."
         ),
+        epilog=(
+            "Examples:\n"
+            f"  {prog} doctor\n"
+            f"  {prog} start --help\n"
+            f"  {prog} units list --help\n"
+            f"  {prog} refresh --help\n"
+            f"  {prog} desktop --help"
+        ),
+        formatter_class=ExamplesHelpFormatter,
     )
     commands = parser.add_subparsers(dest="command", required=True, parser_class=Parser)
     for command, help_text in (
@@ -175,10 +195,22 @@ def build_parser(prog: str = "python -B scripts/t2p.py") -> argparse.ArgumentPar
             _add_units_actions(child)
             continue
         if command == "desktop":
+            child.epilog = (
+                "Examples:\n"
+                f"  {child.prog} observe --pid 1234\n"
+                f"  {child.prog} collect --pid 1234 --process-start 123456789 --out C:\\private\\dialog-details.txt"
+            )
+            child.formatter_class = ExamplesHelpFormatter
             _add_desktop_actions(child)
             continue
         child.add_argument("--json", action="store_true", help="one t2p/v1 JSON envelope on stdout")
         if command == "refresh":
+            child.epilog = (
+                "Examples:\n"
+                f"  {child.prog} C:\\path\\to\\model.pbip --canaries Orders Customers\n"
+                f"  {child.prog} C:\\path\\to\\model.pbip --no-save"
+            )
+            child.formatter_class = ExamplesHelpFormatter
             child.add_argument("path", type=Path, help="a .pbip file, or the folder holding exactly one")
             child.add_argument("--canaries", nargs="*", help="tables that must return rows, one per live source")
             child.add_argument("--no-save", action="store_true", help="refresh in memory only; nothing is saved")
@@ -1397,6 +1429,9 @@ def main(argv: list[str] | None = None, *, installed: bool = False) -> int:
     install_failure = False
     try:
         parser = build_parser("t2p") if installed else build_parser()
+        if not argv:
+            parser.print_help(sys.stderr)
+            return 2
         args = parser.parse_args(argv)
         if args.command == "start" and not args.project.strip():
             raise ArgumentError("nonempty_project_required")

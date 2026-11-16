@@ -639,9 +639,9 @@ def _collect(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     """A collect whose observer and identity check are fakes and whose helper is a tiny real script."""
     state = types.SimpleNamespace(observation=_modal(hwnd=77), token="456", out=tmp_path / "details.txt")
     helper = tmp_path / "helper.py"
-    monkeypatch.setattr(open_desktop, "DETAILS_HELPER", helper)
-    monkeypatch.setattr(open_desktop, "observe", lambda *_a, **_k: state.observation)
-    monkeypatch.setattr(open_desktop, "_start_token", lambda pid: state.token)
+    monkeypatch.setattr(details, "DETAILS_HELPER", helper)
+    monkeypatch.setattr(details, "observe", lambda *_a, **_k: state.observation)
+    monkeypatch.setattr(details, "process_start", lambda pid: state.token)
 
     def helper_prints(result: dict | None = None, body: str = "") -> None:
         clicked = tmp_path / "clicked.json"
@@ -754,7 +754,7 @@ def test_collect_writes_nothing_it_cannot_attribute_to_this_desktop(capsys, coll
 
 def test_a_hung_collector_is_killed_at_the_timeout(monkeypatch, capsys, collect) -> None:
     collect.helper_prints(CLICKED, body="import time\ntime.sleep(60)")
-    monkeypatch.setattr(open_desktop, "COLLECT_TIMEOUT_SECONDS", 1)
+    monkeypatch.setattr(details, "COLLECT_TIMEOUT_SECONDS", 1)
     started = time.monotonic()
 
     assert open_desktop.main(["--collect", "123", "--process-start", "456", "--out", str(collect.out)]) == 2
@@ -773,6 +773,51 @@ def test_collect_refuses_a_missing_out_folder_before_looking(capsys, collect) ->
     assert not collect.clicked.exists()
 
 
+@pytest.mark.parametrize("refresh", [False, True], ids=["launch", "one-step-refresh"])
+def test_failed_launch_collects_once_without_extra_arguments(monkeypatch, capsys, launch, collect, refresh) -> None:
+    collect.helper_prints({**CLICKED, "owner_pid": PID, "text": COPIED + "\nREFRESH: DATA_OK\n"})
+    monkeypatch.setattr(open_desktop, "process_start", lambda _pid: collect.token)
+    monkeypatch.setattr(open_desktop, "_ui_bridge_status", _pending)
+    monkeypatch.setattr(open_desktop, "observe", lambda *_a, **_k: collect.observation)
+    monkeypatch.setattr(open_desktop, "_credential_state", lambda _pid: collect.observation)
+    monkeypatch.setattr(open_desktop, "_run", lambda *_a, **_k: pytest.fail("refresh invoked after failed launch"))
+    run = details.subprocess.run
+    calls = []
+
+    def child(*args, **kwargs):
+        calls.append(args[0])
+        return run(*args, **kwargs)
+
+    monkeypatch.setattr(details.subprocess, "run", child)
+    assert open_desktop.main([str(launch.pbip), *(["--refresh"] if refresh else [])]) == (3 if refresh else 2)
+    output = capsys.readouterr()
+    assert "a dialog stayed open" in output.out
+    assert len(calls) == 1
+    assert json.loads(collect.clicked.read_text(encoding="utf-8")) == [str(PID), "77"]
+    assert not collect.out.exists()
+    assert "DESKTOP_DETAILS: ModelSchemaValidationFailed" in output.err
+    assert "DESKTOP_DETAILS: REFRESH: DATA_OK" in output.err
+    assert all(line.startswith("DESKTOP_DETAILS:") for line in output.err.splitlines())
+
+
+def test_automatic_collection_without_identity_does_not_click(capsys, collect) -> None:
+    assert details.collect_command("123", None) == 2
+    assert "process-start identity unavailable" in capsys.readouterr().err
+    assert not collect.clicked.exists()
+
+
+@pytest.mark.parametrize("phase", ["start", "identity"])
+def test_automatic_collection_reports_os_failures(monkeypatch, capsys, collect, phase) -> None:
+    collect.helper_prints(CLICKED)
+    if phase == "start":
+        monkeypatch.setattr(details.subprocess, "run", _raise(OSError("cannot start child")))
+    else:
+        monkeypatch.setattr(details, "process_start", _raise(OSError("cannot read identity")))
+    assert details.collect_command("123", "456") == 2
+    assert "DESKTOP_DETAILS: ERROR" in capsys.readouterr().err
+    assert not collect.out.exists()
+
+
 @pytest.mark.parametrize(
     ("text", "code"),
     [
@@ -787,7 +832,7 @@ def test_collect_refuses_a_missing_out_folder_before_looking(capsys, collect) ->
     ids=["top-level", "inner-after-empty-top", "value-on-a-later-line", "none"],
 )
 def test_the_error_code_is_the_first_non_empty_labelled_value(text, code) -> None:
-    assert open_desktop.error_code(text) == code
+    assert details.error_code(text) == code
 
 
 def test_the_details_helper_imports_and_refuses_bad_arguments_without_windows_apis(capsys) -> None:

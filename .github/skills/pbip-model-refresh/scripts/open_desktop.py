@@ -26,8 +26,9 @@ this .pbip" means Desktop is still starting. Meanwhile the observer looks about 
 owned window whose owner is disabled (a real modal) held for 10 seconds ends the wait early with exit 2,
 Desktop left open. Ready on a different file is
 refused. A .pbip that another Desktop lists as open by the same resolved absolute path is refused too
-(best effort, one listing; nothing is started). A dialog is a human stop: this script never clicks Desktop,
-except Copy details with --collect.
+(best effort, one listing; nothing is started). A dialog is a human stop: only Copy details is clicked,
+automatically on a failed launch/refresh or explicitly with --collect. Automatic diagnostics print the
+copied details to stderr without changing the operation's exit code or requiring an output file.
 
 --refresh runs `refresh_pbip_model.py`'s refresh on the PID it just opened. That Desktop holds no
 human work, so its unsaved-changes flag is ignored. Afterwards it closes that PID with its engine
@@ -54,15 +55,15 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import subprocess
 import sys
 import time
 from pathlib import Path
 
 from _desktop_actions import DesktopActionError
+from _desktop_details import collect_command
 from _desktop_frame import fit_launched_frame
-from _desktop_observer import dialog_stop_detail, observe, process_start, sanitize_title
+from _desktop_observer import dialog_stop_detail, observe, process_start
 from probe_desktop_query import ADOMD_CLIENT_DLL, AdomdUnavailable, _load_adomd_from
 from refresh_pbip_model import (
     _bridge_readiness_result,
@@ -80,9 +81,6 @@ STARTUP_POLL_SECONDS = 2.0
 BRIDGE_SLICE_SECONDS = 5.0
 LOOK_SECONDS = 2.0
 DIALOG_STOP_SECONDS = 10.0
-COLLECT_TIMEOUT_SECONDS = 30
-DETAILS_HELPER = Path(__file__).with_name("_desktop_details.py")
-ERROR_CODE_LABEL = re.compile(r"(?:InnerException\d+\.)?PowerBINonFatalError_ErrorCode:")
 NOT_FOUND = "OPEN_DESKTOP: ERROR Power BI Desktop not found (PBI_DESKTOP_PATH, Store install, classic install)"
 
 
@@ -218,12 +216,13 @@ def _wait_ready(pid: int, pbip: Path, deadline: float, token: str | None = None)
     raise TimeoutError
 
 
-def _diagnose(pid: int) -> None:
-    """One read-only dialog diagnostic. A dialog is a human stop: nothing is clicked or closed."""
+def _diagnose(pid: int, token: str | None) -> None:
+    """Report a launch failure and copy its dialog's details; leave the dialog open for a human."""
     try:
         state = _credential_state(pid)
         if state.dialog is not None:
             print(f"OPEN_DESKTOP: diagnostic: {dialog_stop_detail(state.dialog)}", flush=True)
+            collect_command(str(pid), token)
         else:
             print(f"OPEN_DESKTOP: diagnostic: {state.state}; inspect that Desktop locally", flush=True)
     except Exception:  # noqa: BLE001  # pylint: disable=broad-exception-caught
@@ -306,7 +305,7 @@ def open_pbip(pbip: Path) -> tuple[int | None, dict | None, str | None]:  # pyli
             print(f"frame: not fitted ({type(exc).__name__})", flush=True)
         return pid, {"pid": pid, "exe_source": source, "ready_seconds": seconds}, token
     seconds = round(time.monotonic() - started)
-    _diagnose(pid)
+    _diagnose(pid, token)
     print(f"OPEN_DESKTOP: ERROR PID {pid} not ready after {seconds} seconds ({failure})", flush=True)
     return pid, None, token
 
@@ -430,87 +429,6 @@ def observe_command(pid: str, process_start_token: str | None, as_json: bool) ->
         print(observation.to_json())
     print(f"{head}\n{detail}", file=sys.stderr if as_json else sys.stdout, flush=True)
     return 0 if state == "READY" else 3
-
-
-def error_code(text: str) -> str | None:
-    """The first non-empty `PowerBINonFatalError_ErrorCode` value in text order, top-level or InnerException<N>.
-
-    Desktop's copied details put each label on its own line ending in ``:`` and the value on the next
-    non-empty line, so a label followed directly by another label has no value.
-    """
-    lines = [line.strip() for line in text.splitlines()]
-    for index, line in enumerate(lines):
-        if ERROR_CODE_LABEL.fullmatch(line):
-            value = next((later for later in lines[index + 1 :] if later), "")
-            if value and not value.endswith(":"):
-                return value
-    return None
-
-
-def collect_command(pid: str, token: str, out: Path) -> int:  # pylint: disable=too-many-return-statements
-    """Click the open dialog's own Copy details and write the copied text to `out`.
-
-    0 collected, 3 established that there is no dialog, 2 refused or could not collect. The click runs in a
-    helper process bounded by COLLECT_TIMEOUT_SECONDS, so a hung Desktop UI thread cannot hang this CLI.
-    """
-    if not out.parent.is_dir():
-        print("OPEN_DESKTOP: ERROR the --out folder does not exist; nothing collected", flush=True)
-        return 2
-    try:
-        observation = observe(pid, expected_process_start=token)
-    except ValueError:
-        print("OPEN_DESKTOP: ERROR invalid --collect or --process-start identity; nothing collected", flush=True)
-        return 2
-    state = observation.state
-    if observation.process_gone == "identity_changed":
-        print("OPEN_DESKTOP: ERROR the PID is not the Desktop that token names; nothing collected", flush=True)
-        return 2
-    if state == "UNKNOWN":
-        hint = "; restore the Desktop window and retry" if observation.reason == "minimized" else ""
-        print(
-            f"OPEN_DESKTOP: ERROR could not read the windows ({observation.reason}); nothing collected{hint}",
-            flush=True,
-        )
-        return 2
-    if state != "HUMAN_ACTION_REQUIRED":
-        print(f"OPEN_DESKTOP: no dialog to collect (state={state})", flush=True)
-        return 3
-    command = [sys.executable, str(DETAILS_HELPER), pid, str(observation.dialog.window.hwnd)]
-    try:
-        done = subprocess.run(command, capture_output=True, text=True, check=False, timeout=COLLECT_TIMEOUT_SECONDS)
-    except subprocess.TimeoutExpired:
-        print("OPEN_DESKTOP: ERROR collector timed out; Desktop left as is", flush=True)
-        return 2
-    try:
-        result = json.loads(done.stdout)
-    except ValueError:
-        result = None
-    if not isinstance(result, dict) or not isinstance(result.get("text"), str):
-        reason = result.get("error") if isinstance(result, dict) else None
-        print(f"OPEN_DESKTOP: ERROR could not collect ({sanitize_title(reason) or 'collector failed'})", flush=True)
-        return 2
-    if result.get("sequence_changed") is not True or result.get("owner_pid") != int(pid):
-        print("OPEN_DESKTOP: ERROR clipboard was not written by this Desktop; nothing written", flush=True)
-        return 2
-    if _start_token(int(pid)) != token:
-        print("OPEN_DESKTOP: ERROR the Desktop changed during collect; nothing written", flush=True)
-        return 2
-    if not result["text"].strip():
-        print("OPEN_DESKTOP: ERROR empty clipboard text; nothing written", flush=True)
-        return 2
-    try:
-        out.write_text(result["text"], encoding="utf-8", newline="")
-    except OSError as exc:
-        print(f"OPEN_DESKTOP: ERROR cannot write --out ({type(exc).__name__})", flush=True)
-        return 2
-    code = error_code(result["text"])
-    print(
-        f'OPEN_DESKTOP: collect pid={pid} title="{observation.dialog.title}"'
-        f" error_code={sanitize_title(code) if code else 'none'} out={out}",
-        flush=True,
-    )
-    print(f"message: {sanitize_title(result.get('message'))}", flush=True)
-    return 0
 
 
 def check() -> int:

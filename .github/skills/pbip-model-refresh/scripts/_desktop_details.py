@@ -1,8 +1,8 @@
 """purpose: click Power BI Desktop's own "Copy details" link in one error dialog and read what it copied.
-usage:   python _desktop_details.py <pid> <dialog-hwnd>   (run by `open_desktop.py --collect` as a bounded child)
+usage:   python _desktop_details.py <pid> <dialog-hwnd>   (run by collect_command as a bounded child)
 internal: true
-internal-reason: Native half of `open_desktop.py --collect`; it runs in its own process so a hung COM call
-                 can be killed without touching Desktop.
+internal-reason: Shared launch/refresh failure diagnostics and explicit collection; the native half runs
+                 in its own process so a hung COM call can be killed without touching Desktop.
 
 The dialog body is an embedded MSHTML (IE7-mode) document. Its `span.js-copyDetails` element is clicked
 through the DOM (IDispatch), so no mouse, keyboard or focus is used and Desktop need not be in front.
@@ -17,9 +17,18 @@ from __future__ import annotations
 
 import ctypes
 import json
+import re
+import subprocess
 import sys
 import time
+from pathlib import Path
+from typing import TextIO
 
+from _desktop_observer import observe, process_start, sanitize_title
+
+COLLECT_TIMEOUT_SECONDS = 30
+DETAILS_HELPER = Path(__file__)
+ERROR_CODE_LABEL = re.compile(r"(?:InnerException\d+\.)?PowerBINonFatalError_ErrorCode:")
 IE_CLASS = "Internet Explorer_Server"
 COPY_CLASS = "js-copyDetails"
 IID_IHTMLDOCUMENT2 = bytes.fromhex("20c56f621ea4cf11a73100a0c9082637")  # {626FC520-A41E-11CF-A731-00A0C9082637}
@@ -50,6 +59,13 @@ class _DispParams(ctypes.Structure):  # pylint: disable=too-few-public-methods
 
 class CollectError(Exception):
     """A refusal the parent reports as `could not collect (<reason>)`."""
+
+
+def emit_line(stream: TextIO, line: str) -> None:
+    """Print one line, escaping characters the destination encoding cannot represent."""
+    encoding = getattr(stream, "encoding", None) or "utf-8"
+    safe_line = line.encode(encoding, errors="backslashreplace").decode(encoding)
+    print(safe_line, file=stream, flush=True)
 
 
 class _Native:
@@ -221,6 +237,102 @@ def collect(pid: int, dialog: int) -> dict:
     native.call(link, "click", DISPATCH_METHOD)
     after, owner_pid, text = native.clipboard()
     return {"message": message, "text": text, "sequence_changed": after != before, "owner_pid": owner_pid}
+
+
+def error_code(text: str) -> str | None:
+    """The first non-empty top-level or inner PowerBINonFatalError_ErrorCode labelled value."""
+    lines = [line.strip() for line in text.splitlines()]
+    for index, line in enumerate(lines):
+        if ERROR_CODE_LABEL.fullmatch(line):
+            value = next((later for later in lines[index + 1 :] if later), "")
+            if value and not value.endswith(":"):
+                return value
+    return None
+
+
+def _read_details(pid: str, token: str, hwnd: int) -> dict:
+    """Run the bounded native child and return only text attributed to the held Desktop."""
+    command = [sys.executable, str(DETAILS_HELPER), pid, str(hwnd)]
+    try:
+        done = subprocess.run(command, capture_output=True, text=True, check=False, timeout=COLLECT_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired as exc:
+        raise CollectError("collector timed out; Desktop left as is") from exc
+    except OSError as exc:
+        raise CollectError(f"collector could not start ({type(exc).__name__}); Desktop left as is") from exc
+    try:
+        result = json.loads(done.stdout)
+    except ValueError:
+        result = None
+    if not isinstance(result, dict) or not isinstance(result.get("text"), str):
+        reason = result.get("error") if isinstance(result, dict) else None
+        raise CollectError(f"could not collect ({sanitize_title(reason) or 'collector failed'})")
+    if result.get("sequence_changed") is not True or result.get("owner_pid") != int(pid):
+        raise CollectError("clipboard was not written by this Desktop; nothing written")
+    try:
+        live_token = process_start(int(pid))
+    except OSError as exc:
+        raise CollectError("the Desktop identity could not be read after collection; nothing written") from exc
+    if live_token != token:
+        raise CollectError("the Desktop changed during collect; nothing written")
+    if not result["text"].strip():
+        raise CollectError("empty clipboard text; nothing written")
+    return result
+
+
+def collect_command(  # pylint: disable=too-many-return-statements
+    pid: str, token: str | None, out: Path | None = None
+) -> int:
+    """Collect once: 0 collected, 3 no dialog, 2 refused. Without `out`, print details to stderr."""
+    stream = sys.stderr if out is None else sys.stdout
+    prefix = "DESKTOP_DETAILS" if out is None else "OPEN_DESKTOP"
+
+    def emit(message: str) -> None:
+        emit_line(stream, f"{prefix}: {message}")
+
+    if out is not None and not out.parent.is_dir():
+        emit("ERROR the --out folder does not exist; nothing collected")
+        return 2
+    if token is None:
+        emit("ERROR process-start identity unavailable; nothing collected")
+        return 2
+    try:
+        observation = observe(pid, expected_process_start=token)
+    except (ValueError, OSError) as exc:
+        emit(f"ERROR invalid or unreadable collection identity ({type(exc).__name__}); nothing collected")
+        return 2
+    state = observation.state
+    if observation.process_gone == "identity_changed":
+        emit("ERROR the PID is not the Desktop that token names; nothing collected")
+        return 2
+    if state == "UNKNOWN":
+        hint = "; restore the Desktop window and retry" if observation.reason == "minimized" else ""
+        emit(f"ERROR could not read the windows ({observation.reason}); nothing collected{hint}")
+        return 2
+    if state != "HUMAN_ACTION_REQUIRED":
+        emit(f"no dialog to collect (state={state})")
+        return 3
+    try:
+        result = _read_details(pid, token, observation.dialog.window.hwnd)
+    except CollectError as exc:
+        emit(f"ERROR {exc}")
+        return 2
+    code = error_code(result["text"])
+    summary = (
+        f'collect pid={pid} title="{observation.dialog.title}" error_code={sanitize_title(code) if code else "none"}'
+    )
+    if out is None:
+        emit(summary)
+        for line in result["text"].splitlines():
+            emit(line)
+    else:
+        try:
+            out.write_text(result["text"], encoding="utf-8", newline="")
+        except OSError as exc:
+            emit(f"ERROR cannot write --out ({type(exc).__name__})")
+            return 2
+        emit(f"{summary} out={out}")
+        emit_line(stream, f"message: {sanitize_title(result.get('message'))}")
+    return 0
 
 
 def main(argv: list[str]) -> int:
