@@ -559,6 +559,9 @@ def test_doctor_child_cannot_create_pycache(monkeypatch, tmp_path, capsys):
         ["desktop", "observe", "--pid", "4294967296"],
         ["desktop", "observe", "--pid", "7", "--process-start", "007"],
         ["desktop", "observe", "--pid", "7", "--hwnd", "1"],
+        ["desktop", "observe", "--pid", "7", "model.pbip"],
+        ["desktop", "observe", "model.pbip", "--process-start", "5"],
+        ["desktop", "observe", "model.pbip", "other.pbip"],
     ],
 )
 def test_closed_surface_and_safe_syntax(argv, capsys):
@@ -969,6 +972,54 @@ def test_desktop_collect_requires_pid_process_start_and_out(monkeypatch, missing
     argv = [item for name, value in options.items() if name != missing for item in (name, value)]
 
     assert t2p.main(["desktop", "collect", *argv]) == 2
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["model.pbip", "--process-start", "456", "--out", "details.txt"],
+        ["--pid", "123", "model.pbip", "--process-start", "456", "--out", "details.txt"],
+        ["model.pbip"],
+        [],
+    ],
+    ids=["path-with-token", "pid-and-path", "path-without-out", "no-target"],
+)
+def test_desktop_collect_takes_a_pid_with_its_token_or_a_path_without_one(monkeypatch, argv):
+    monkeypatch.setattr(t2p.subprocess, "run", lambda *_a, **_k: pytest.fail("collect child started"))
+
+    assert t2p.main(["desktop", "collect", *argv]) == 2
+
+
+@pytest.mark.parametrize("action", ["observe", "collect"])
+def test_desktop_by_path_forwards_the_absolute_path_and_no_token(monkeypatch, tmp_path, capfd, action):
+    argv_file = _fake_observe_owner(tmp_path, "OWNER LINE\n", 3)
+    monkeypatch.setattr(t2p, "ROOT", tmp_path)
+    monkeypatch.chdir(tmp_path)
+    out = tmp_path / "details.txt"
+    extra = ["--out", str(out)] if action == "collect" else []
+
+    assert t2p.main(["desktop", action, os.path.join("a b", "model.pbip"), *extra]) == 3
+    assert capfd.readouterr().out.splitlines() == ["OWNER LINE"]
+    resolved = str((tmp_path / "a b" / "model.pbip").resolve())
+    assert json.loads(argv_file.read_text()) == [f"--{action}", resolved, *extra]
+
+
+@pytest.mark.parametrize(
+    ("pid", "status"),
+    [("4321", "ok"), ("0", "error"), ("0123", "error"), ("abc", "error"), (4321, "error")],
+    ids=["decimal", "zero", "leading-zero", "not-digits", "not-a-string"],
+)
+def test_desktop_observe_by_path_accepts_any_decimal_pid_the_owner_found(monkeypatch, tmp_path, capfd, pid, status):
+    line = json.dumps({"schema": "desktop.observation.v2", "pid": pid, "state": "READY"})
+    argv_file = _fake_observe_owner(tmp_path, line + "\n", 0)
+    monkeypatch.setattr(t2p, "ROOT", tmp_path)
+
+    assert t2p.main(["desktop", "observe", str(tmp_path / "model.pbip"), "--json"]) == (0 if status == "ok" else 1)
+    result = json.loads(capfd.readouterr().out)
+    jsonschema.validate(result, t2p.ENVELOPE_SCHEMA)
+    assert result["status"] == status
+    assert [item["observation"]["pid"] for item in result["evidence"]] == ([pid] if status == "ok" else [])
+    assert json.loads(argv_file.read_text()) == ["--observe", str((tmp_path / "model.pbip").resolve()), "--json"]
 
 
 def test_refresh_without_a_path_is_a_syntax_error_that_starts_nothing(monkeypatch, capsys):

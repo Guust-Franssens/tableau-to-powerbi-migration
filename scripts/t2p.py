@@ -197,7 +197,9 @@ def build_parser(prog: str = "python -B scripts/t2p.py") -> argparse.ArgumentPar
         if command == "desktop":
             child.epilog = (
                 "Examples:\n"
+                f"  {child.prog} observe C:\\path\\to\\model.pbip\n"
                 f"  {child.prog} observe --pid 1234\n"
+                f"  {child.prog} collect C:\\path\\to\\model.pbip --out C:\\private\\dialog-details.txt\n"
                 f"  {child.prog} collect --pid 1234 --process-start 123456789 --out C:\\private\\dialog-details.txt"
             )
             child.formatter_class = ExamplesHelpFormatter
@@ -260,19 +262,38 @@ def _process_start(text: str) -> str:
 
 def _add_desktop_actions(parser: argparse.ArgumentParser) -> None:
     actions = parser.add_subparsers(dest="desktop_action", required=True, parser_class=Parser)
-    help_text = "One read-only observation of a running Desktop PID; exit 0 only when no blocking window is seen."
+    help_text = "One read-only observation of a running Desktop; exit 0 only when no blocking window is seen."
     child = actions.add_parser("observe", help=help_text, description=help_text, allow_abbrev=False)
     child.add_argument("--json", action="store_true", help="one t2p/v1 JSON envelope on stdout")
-    child.add_argument("--pid", type=_pid, required=True, help="decimal process id of that Desktop")
-    child.add_argument("--process-start", type=_process_start, help="exact process-start token to bind to")
+    _add_desktop_target(child)
+    child.add_argument("--process-start", type=_process_start, help="with --pid: exact process-start token to bind to")
     help_text = (
         "Click Copy details on that Desktop's open dialog and write the copied text to a private file;"
         " exit 0 collected, 3 no dialog, 2 refused or not collected."
     )
     child = actions.add_parser("collect", help=help_text, description=help_text, allow_abbrev=False)
-    child.add_argument("--pid", type=_pid, required=True, help="decimal process id of that Desktop")
-    child.add_argument("--process-start", type=_process_start, required=True, help="exact process-start token")
+    _add_desktop_target(child)
+    child.add_argument("--process-start", type=_process_start, help="required with --pid: exact process-start token")
     child.add_argument("--out", type=Path, required=True, help="private file for the copied text (overwritten)")
+
+
+def _add_desktop_target(parser: argparse.ArgumentParser) -> None:
+    target = parser.add_mutually_exclusive_group(required=True)
+    target.add_argument("--pid", type=_pid, help="instead of PATH: decimal process id of that Desktop")
+    target.add_argument(
+        "path",
+        nargs="?",
+        type=Path,
+        metavar="PATH",
+        help="instead of --pid: a .pbip, or the folder holding exactly one, that one running Desktop has open",
+    )
+
+
+def _desktop_target_valid(args: argparse.Namespace) -> bool:
+    """A path brings no --process-start (its token is read); collect by --pid needs one."""
+    if args.path is not None:
+        return args.process_start is None
+    return args.desktop_action == "observe" or args.process_start is not None
 
 
 def _project_name(name: str) -> str:
@@ -1345,8 +1366,11 @@ def refresh(args: argparse.Namespace, result: dict) -> int:
     return code
 
 
-def _observation(stdout: str, code: int, pid: str) -> dict | None:
-    """The child's one observation line when it is coherent with its exit code and the asked PID, else None."""
+def _observation(stdout: str, code: int, pid: str | None) -> dict | None:
+    """The child's one observation line when it is coherent with its exit code and the asked PID, else None.
+
+    A path names no PID, so any decimal PID the owner resolved and observed is accepted.
+    """
     lines = stdout.splitlines()
     try:
         observed = json.loads(lines[0]) if len(lines) == 1 else None
@@ -1355,7 +1379,12 @@ def _observation(stdout: str, code: int, pid: str) -> dict | None:
     if not isinstance(observed, dict) or observed.get("schema") != "desktop.observation.v2":
         return None
     state = observed.get("state")
-    if observed.get("pid") != pid or not isinstance(state, str) or code not in {0, 3}:
+    seen = observed.get("pid")
+    if pid is None:
+        pid_ok = isinstance(seen, str) and re.fullmatch(r"[1-9][0-9]{0,9}", seen) is not None
+    else:
+        pid_ok = seen == pid
+    if not pid_ok or not isinstance(state, str) or code not in {0, 3}:
         return None
     return observed if (code == 0) == (state == "READY") else None
 
@@ -1363,16 +1392,16 @@ def _observation(stdout: str, code: int, pid: str) -> dict | None:
 def desktop(args: argparse.Namespace, result: dict) -> int:
     """Delegate collect, or one read-only observation: exit 0 only for READY, 3 for any other observed state."""
     owner = [sys.executable, "-B", str(ROOT / REFRESH_OWNER)]
+    target = args.pid if args.path is None else str(args.path.expanduser().resolve())
+    identity = ["--process-start", args.process_start] if args.process_start else []
     if args.desktop_action == "collect":
         # A plain pass-through with no JSON form, so it never reaches the observation parsing below.
         result["authority"] = "open_desktop.py --collect"
-        command = [*owner, "--collect", args.pid, "--process-start", args.process_start, "--out", str(args.out)]
+        command = [*owner, "--collect", target, *identity, "--out", str(args.out)]
     else:
         result["authority"] = "open_desktop.py --observe"
         result["proof_boundary"]["not_established"] += ["model_validity", "successful_open"]
-        command = [*owner, "--observe", args.pid]
-        if args.process_start:
-            command += ["--process-start", args.process_start]
+        command = [*owner, "--observe", target, *identity]
     if args.desktop_action == "collect" or not args.json:
         code = subprocess.run(command, check=False).returncode
         result["delegated_exit_code"] = code
@@ -1435,6 +1464,8 @@ def main(argv: list[str] | None = None, *, installed: bool = False) -> int:
         args = parser.parse_args(argv)
         if args.command == "start" and not args.project.strip():
             raise ArgumentError("nonempty_project_required")
+        if args.command == "desktop" and not _desktop_target_valid(args):
+            raise ArgumentError("invalid_arguments_use_help")
         install_failure = installed and not _install_binding(result)
         code = result["exit_code"] if install_failure else _delegate(args, result, json_mode=json_mode)
     except ArgumentError:
