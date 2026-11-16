@@ -116,8 +116,9 @@ and binds the observation or collection as with a PID, after
 `OPEN_DESKTOP: the .pbip is open in Desktop PID <pid> (process_start=<token>)`.
 
 Exit 2, nothing observed or collected, with `give the PID instead`: no running Desktop has the file,
-several do, one cannot be ruled out (no current file and an unreadable command line), the listing is
-unreadable, or `--process-start` is given with a path. A Desktop that failed to load a file chosen
+several do, one cannot be ruled out (no current file, and an unreadable command line or a relative
+`.pbip` argument), the listing is unreadable, or the holder's start token cannot be read.
+`--process-start` with a path is a usage error (exit 2). A Desktop that failed to load a file chosen
 through File > Open is not found this way; use its PID. Measured on Desktop 2.160.579.0: with two
 Desktops open, one READY and one on an `Unable to open document` modal, each path resolved to its own
 PID, and collection by folder copied the modal's details.

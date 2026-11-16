@@ -361,7 +361,8 @@ def test_a_holder_whose_start_token_cannot_be_read_is_refused(monkeypatch, capsy
 
     assert open_desktop.main(["--observe", str(held.pbip)]) == 2
     assert capsys.readouterr().out == (
-        "OPEN_DESKTOP: ERROR Desktop PID 99 exited or its start time is unreadable; nothing observed\n"
+        "OPEN_DESKTOP: ERROR Desktop PID 99 exited or its start time is unreadable; give the PID instead;"
+        " nothing observed\n"
     )
     assert held.seen == []
 

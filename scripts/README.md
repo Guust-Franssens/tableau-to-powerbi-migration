@@ -1472,7 +1472,8 @@ finds the one running Desktop that has that file open (by the bridge's current f
 PBIDesktop.exe launch command line, which covers a Desktop stuck on a load error), reads its
 process-start token at once and prints `OPEN_DESKTOP: the .pbip is open in Desktop PID <pid>
 (process_start=<token>)` before the usual result. No such Desktop, several, one that cannot be ruled out
-or an unreadable listing gives exit 2 with nothing observed or collected; give the PID instead. A file
+(no current file, and an unreadable command line or a relative `.pbip` argument), an unreadable listing
+or an unreadable start token gives exit 2 with nothing observed or collected; give the PID instead. A file
 chosen through File > Open that failed to load is not found this way.
 
 JSON stdout is one `t2p/v1` envelope, also for syntax/launch/interrupt failures. Common fields:

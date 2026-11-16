@@ -53,9 +53,10 @@ only digits is a PID; write .\\2024 for a folder named 2024). The one running De
 is found: by the bridge's current file, else by its PBIDesktop.exe launch command line, which covers a
 Desktop stuck on a load error. Its process-start token is read at once and binds the rest, as with a PID,
 after `OPEN_DESKTOP: the .pbip is open in Desktop PID <pid> (process_start=<token>)`. Refused with exit 2,
-nothing observed or collected: no such Desktop, several, a Desktop that cannot be ruled out (no current file
-and an unreadable command line), an unreadable listing, or --process-start with a path; give the PID instead.
-A Desktop that failed to load a file chosen through File > Open is not found this way.
+nothing observed or collected, and a hint to give the PID instead: no such Desktop, several, a Desktop that
+cannot be ruled out (no current file, and an unreadable command line or a relative .pbip argument), an
+unreadable listing, or a holder whose start token cannot be read. --process-start with a path is a usage
+error (exit 2). A Desktop that failed to load a file chosen through File > Open is not found this way.
 Exit codes: 0 ready (or check passed, or refresh verdict OK); 2 refused or failed; with --refresh the
 refresh verdict (1 data or persist failure, 3 needs a human, including Desktop left open on a dialog);
 with --observe 0 only for READY, 3 for every other observed state; with --collect 0 collected, 3 no
@@ -476,7 +477,7 @@ def by_path(path: Path, verb: str, act, stream) -> int:
         return refuse(f"{exc}; give the PID instead")
     token = _start_token(pid)
     if token is None:
-        return refuse(f"Desktop PID {pid} exited or its start time is unreadable")
+        return refuse(f"Desktop PID {pid} exited or its start time is unreadable; give the PID instead")
     print(f"OPEN_DESKTOP: the .pbip is open in Desktop PID {pid} (process_start={token})", file=stream, flush=True)
     return act(str(pid), token)
 
