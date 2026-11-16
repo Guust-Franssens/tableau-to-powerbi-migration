@@ -831,7 +831,7 @@ def test_installed_help_and_syntax_before_binding(
             assert b"--json" in child.stdout or not argv
             if not argv:
                 _assert_closed_help(child.stdout)
-            flags = {b"--help", *([] if not argv else [b"--json"])}
+            flags = {b"--help", b"--json"}
             if argv and argv[0] in {"doctor", "start", "assess"}:
                 flags.add(b"--env")
             if argv == ["start"]:
