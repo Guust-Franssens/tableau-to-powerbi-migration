@@ -1182,7 +1182,7 @@ personas already use. Deleting them would make every persona *longer* — see
 |---|---|
 | `refresh_pbip_model.py` | `.github/skills/pbip-model-refresh/`: Desktop UI refresh plus guarded Save to `.pbi/cache.abf` |
 | `probe_desktop_query.py` | `.github/skills/pbip-model-refresh/` — one-row DAX probe against Desktop's local AS |
-| `open_desktop.py` | `.github/skills/pbip-model-refresh/`: open a `.pbip` in the installed Desktop and print its PID; `--refresh` also refreshes, Saves and closes it (`t2p refresh`); `--observe PID` takes one read-only look at a running Desktop (`t2p desktop observe`); `--collect PID` copies its open dialog's details (`t2p desktop collect`) |
+| `open_desktop.py` | `.github/skills/pbip-model-refresh/`: open a `.pbip` in the installed Desktop and print its PID; `--refresh` also refreshes, Saves and closes it (`t2p refresh`); `--observe PID|PATH` takes one read-only look at a running Desktop (`t2p desktop observe`); `--collect PID|PATH` copies its open dialog's details (`t2p desktop collect`); a PATH is the `.pbip`, or its folder, that Desktop has open |
 | `set_ai_instructions.py` | `.github/skills/powerbi-ai-readiness/` — stamp `CustomInstructions`, force `qnaEnabled` |
 | `check_ai_readiness.py` | `.github/skills/powerbi-ai-readiness/` — audit description coverage + enumerated domains |
 
@@ -1289,8 +1289,8 @@ t2p start --project <exact-name|LUID> [--env <path>] [--runs-parent <path>] [--s
 t2p status --run <absolute-local-run> [--json]
 t2p units {list | show <id> | find [--name <text>] [--luid <luid>]} [--runs-parent <path>] [--json]
 t2p refresh <pbip-or-folder> [--canaries <table> ...] [--no-save] [--json]
-t2p desktop observe --pid <pid> [--process-start <token>] [--json]
-t2p desktop collect --pid <pid> --process-start <token> --out <private-file>
+t2p desktop observe {--pid <pid> [--process-start <token>] | <pbip-or-folder>} [--json]
+t2p desktop collect {--pid <pid> --process-start <token> | <pbip-or-folder>} --out <private-file>
 ```
 
 `uv sync --all-extras --no-editable` is the operator setup in the selected checkout. No-sync alone
@@ -1327,7 +1327,7 @@ python -B scripts/t2p.py start --project <exact-name|LUID> [--env <path>] [--run
 python -B scripts/t2p.py status --run <absolute-local-run> [--json]
 python -B scripts/t2p.py units {list | show <id> | find [--name <text>] [--luid <luid>]} [--runs-parent <path>] [--json]
 python -B scripts/t2p.py refresh <pbip-or-folder> [--canaries <table> ...] [--no-save] [--json]
-python -B scripts/t2p.py desktop observe --pid <pid> [--process-start <token>] [--json]
+python -B scripts/t2p.py desktop observe {--pid <pid> [--process-start <token>] | <pbip-or-folder>} [--json]
 ```
 
 Ordinary `doctor` prints a short human verdict, every configuration/failed-critical blocker, safe
@@ -1464,6 +1464,16 @@ machine paths and stack traces, so `--out` must be private run scratch; the stdo
 not redacted, and is still private. Desktop's copy replaces the clipboard and enters Windows clipboard
 history (Win+V), and Desktop writes trace-log zips when the link is clicked. Nothing else is clicked; the
 dialog stays open for the human.
+
+Both `desktop` actions also take a target path instead of `--pid` (Refs #874): `t2p desktop observe
+<pbip-or-folder>` and `t2p desktop collect <pbip-or-folder> --out <private-file>`. A folder must hold
+exactly one `.pbip`; t2p passes the absolute path, and `--process-start` is refused with a path. The owner
+finds the one running Desktop that has that file open (by the bridge's current file, else by the
+PBIDesktop.exe launch command line, which covers a Desktop stuck on a load error), reads its
+process-start token at once and prints `OPEN_DESKTOP: the .pbip is open in Desktop PID <pid>
+(process_start=<token>)` before the usual result. No such Desktop, several, one that cannot be ruled out
+or an unreadable listing gives exit 2 with nothing observed or collected; give the PID instead. A file
+chosen through File > Open that failed to load is not found this way.
 
 JSON stdout is one `t2p/v1` envelope, also for syntax/launch/interrupt failures. Common fields:
 `command`, `status`, `exit_code`, `authority`, `delegated_exit_code`, `stages`, `checks`, `evidence`,

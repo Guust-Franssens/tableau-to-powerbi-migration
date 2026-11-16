@@ -29,6 +29,7 @@ Install `pythonnet`; otherwise install or repair Desktop, then rerun.
   also refresh, Save and close it ([one step](#one-step-open-refresh-save-close-863)); with `--observe PID`,
   one read-only observer look (exit 0 only for READY, which proves nothing else; `t2p desktop observe`);
   with `--collect PID`, [the open dialog's Copy details text](#collect-a-dialogs-details-498) (`t2p desktop collect`).
+  Both also take [the `.pbip` or its folder instead of the PID](#target-a-desktop-by-its-pbip-874).
 - `scripts/_desktop_details.py`: shared automatic failure diagnostics and explicit collection; clicks
   Copy details and reads the clipboard in a bounded child.
 - [**`scripts/_desktop_observer.py`**](scripts/_desktop_observer.py): the sole read-only observer.
@@ -77,6 +78,7 @@ Existing capture API callers are unchanged. The same shared collector also remai
 ```
 python scripts/open_desktop.py --collect <pid> --process-start <token> --out <private-file>
 t2p desktop collect --pid <pid> --process-start <token> --out <private-file>
+t2p desktop collect <pbip-or-folder> --out <private-file>
 ```
 
 When the observer names an open dialog on that exact process, this clicks Desktop's own "Copy
@@ -85,7 +87,8 @@ a helper process killed after 30 s. It keeps the text only when the clipboard ch
 that PID and the process-start token still matches, writes it to `--out` (UTF-8, overwritten; the
 folder must exist) and prints the title, `error_code=` (`PowerBINonFatalError_ErrorCode`, top-level or
 `InnerException<N>`, else `none`) and the first message line. Take the token from the launcher's
-`process_start=` line or `--observe`'s `process_started_at=` (not `unknown`).
+`process_start=` line or `--observe`'s `process_started_at=` (not `unknown`). Given a path instead, it
+reads the token itself ([below](#target-a-desktop-by-its-pbip-874)).
 
 - Exit 0 collected; 3 no dialog (`READY`, `NO_WINDOW`, an exited process; nothing clicked); 2 refused or
   not collected (a wrong token, `UNKNOWN`, no or several HTML panes, a hung or failed helper, a clipboard
@@ -95,6 +98,29 @@ folder must exist) and prints the title, `error_code=` (`PowerBINonFatalError_Er
   private. Desktop's copy replaces the clipboard and enters Windows clipboard history (Win+V), and
   Desktop writes trace-log zips when the link is clicked.
 - Nothing else is clicked; the dialog stays open for the human.
+
+### Target a Desktop by its .pbip (#874)
+
+```
+python scripts/open_desktop.py --observe <pbip-or-folder> [--json]
+python scripts/open_desktop.py --collect <pbip-or-folder> --out <private-file>
+t2p desktop observe <pbip-or-folder> [--json]
+t2p desktop collect <pbip-or-folder> --out <private-file>
+```
+
+A folder must hold exactly one `.pbip`. A value of only digits is a PID, so write `.\2024` for a
+folder named 2024. The one running Desktop that has that file open is found by the bridge's current
+file, else by its PBIDesktop.exe launch command line. The command line covers a Desktop stuck on a
+load error: the bridge then lists it without a current file. Its process-start token is read at once
+and binds the observation or collection as with a PID, after
+`OPEN_DESKTOP: the .pbip is open in Desktop PID <pid> (process_start=<token>)`.
+
+Exit 2, nothing observed or collected, with `give the PID instead`: no running Desktop has the file,
+several do, one cannot be ruled out (no current file and an unreadable command line), the listing is
+unreadable, or `--process-start` is given with a path. A Desktop that failed to load a file chosen
+through File > Open is not found this way; use its PID. Measured on Desktop 2.160.579.0: with two
+Desktops open, one READY and one on an `Unable to open document` modal, each path resolved to its own
+PID, and collection by folder copied the modal's details.
 
 ### One step: open, refresh, Save, close (#863)
 

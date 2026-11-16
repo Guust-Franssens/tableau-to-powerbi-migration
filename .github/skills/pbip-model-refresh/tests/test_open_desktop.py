@@ -117,10 +117,16 @@ def test_exactly_one_of_a_pbip_or_check(argv) -> None:
         ["--collect", "1", "--process-start", "5", "--out", "x.txt", "--json"],
         ["--collect", "1", "--observe", "1", "--process-start", "5", "--out", "x.txt"],
         ["--observe", "1", "--out", "x.txt"],
+        ["--observe", "model.pbip", "--process-start", "5"],
+        ["--observe", "model.pbip", "--out", "x.txt"],
+        ["--collect", "model.pbip"],
+        ["--collect", "model.pbip", "--process-start", "5", "--out", "x.txt"],
+        ["--collect", "model.pbip", "--out", "x.txt", "--json"],
     ],
 )
 def test_observe_is_its_own_mode(monkeypatch, argv) -> None:
     monkeypatch.setattr(open_desktop, "observe", lambda *_a, **_k: pytest.fail("observed"))
+    monkeypatch.setattr(open_desktop, "_holder", lambda *_a: pytest.fail("Desktops listed"))
     with pytest.raises(SystemExit) as caught:
         open_desktop.main(argv)
     assert caught.value.code == 2
@@ -172,6 +178,275 @@ def test_observe_mode_refuses_a_bad_identity_with_exit_2(capsys, pid, token, as_
     out, err = capsys.readouterr()
     assert "nothing observed" in (err if as_json else out)
     assert not as_json or out == "", "--json keeps stdout for the observation line only"
+
+
+@pytest.fixture(name="held")
+def _held(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """A .pbip, a fake bridge listing and a fake PBIDesktop.exe process listing; observe and the token are fakes."""
+    folder = tmp_path / "a b caf\u00e9"
+    folder.mkdir()
+    pbip = folder / "model.pbip"
+    pbip.write_text("{}", encoding="utf-8")
+    state = types.SimpleNamespace(
+        pbip=pbip,
+        exe=str(tmp_path / "bin" / "PBIDesktop.exe"),
+        other=str(tmp_path / "other.pbip"),
+        bridge=[],
+        processes=[],
+        token="456",
+        listed=[],
+        seen=[],
+    )
+
+    def status(_command, pid, _deadline):
+        state.listed.append(pid)
+        return {"status": "ready", "instances": state.bridge}
+
+    def fake_observe(pid, **kwargs):
+        state.seen.append((pid, kwargs))
+        return observer.Observation(pid=pid, process_started_at=kwargs["expected_process_start"])
+
+    monkeypatch.setattr(open_desktop, "_ui_bridge_command", lambda: ["powerbi-desktop"])
+    monkeypatch.setattr(open_desktop, "_ui_bridge_status", status)
+    monkeypatch.setattr(open_desktop, "_processes", lambda: state.processes)
+    monkeypatch.setattr(open_desktop, "process_start", lambda pid: state.token)
+    monkeypatch.setattr(open_desktop, "observe", fake_observe)
+    return state
+
+
+FOUND = "OPEN_DESKTOP: the .pbip is open in Desktop PID 99 (process_start=456)"
+
+
+@pytest.mark.parametrize("as_json", [False, True], ids=["human", "json"])
+@pytest.mark.parametrize("by", ["bridge", "command-line", "folder"])
+def test_observe_by_path_binds_the_one_desktop_holding_it(capsys, held, by, as_json) -> None:
+    # The same file spelled with a detour through its own folder: it resolves identically on every host.
+    detour = str(held.pbip.parent / ".." / held.pbip.parent.name / held.pbip.name)
+    held.bridge = [{"pid": 7, "currentFilePath": held.other}, {"pid": 99}]
+    held.processes = [(5, [held.exe]), (6, [held.exe, held.other]), (7, None)]
+    if by == "bridge":
+        held.bridge[1]["currentFilePath"] = detour
+        held.processes.append((99, None))
+    else:
+        held.processes.append((99, [held.exe, "/nologo", detour]))
+    target = held.pbip.parent if by == "folder" else held.pbip
+
+    assert open_desktop.main(["--observe", str(target), *(["--json"] if as_json else [])]) == 0
+    out, err = capsys.readouterr()
+    assert held.seen == [("99", {"expected_process_start": "456"})]
+    human = (err if as_json else out).splitlines()
+    assert human[0] == FOUND and human[1].startswith("OPEN_DESKTOP: observe pid=99 state=READY")
+    if as_json:
+        assert [json.loads(line)["pid"] for line in out.splitlines()] == ["99"]
+    assert held.listed == [None]
+
+
+@pytest.mark.parametrize("bridge_says", ["other", "this"])
+def test_the_bridge_current_file_overrides_the_launch_command_line(capsys, held, bridge_says) -> None:
+    """A Desktop launched on one .pbip that now shows another (File > Open) is matched by what it shows."""
+    held.bridge = [{"pid": 99, "currentFilePath": held.other if bridge_says == "other" else str(held.pbip)}]
+    held.processes = [(99, [held.exe, held.other if bridge_says == "this" else str(held.pbip)])]
+
+    code = open_desktop.main(["--observe", str(held.pbip)])
+    out = capsys.readouterr().out
+    if bridge_says == "this":
+        assert code == 0 and out.splitlines()[0] == FOUND
+    else:
+        assert code == 2 and held.seen == []
+        assert (
+            out
+            == "OPEN_DESKTOP: ERROR no running Desktop has this .pbip open; give the PID instead; nothing observed\n"
+        )
+
+
+@pytest.mark.parametrize(
+    ("bridge", "processes", "message"),
+    [
+        ([], [], "no running Desktop has this .pbip open"),
+        (
+            [{"pid": 77, "currentFilePath": "{pbip}"}],
+            [(99, ["{exe}", "{pbip}"])],
+            "is open in several Desktops (PIDs 77, 99)",
+        ),
+        (
+            [{"pid": 77, "currentFilePath": "{pbip}"}],
+            [(99, None)],
+            "cannot tell whether Desktop PID 99 has this .pbip open",
+        ),
+        ([{"pid": 99, "currentFilePath": " "}], [(99, None)], "cannot tell whether Desktop PID 99 has this .pbip open"),
+        ([], [(98, ["{exe}", "model.pbip"]), (99, None)], "cannot tell whether Desktop PID 98, 99 has this .pbip open"),
+        ([{"pid": 99, "currentFilePath": "model.pbip"}], [(99, None)], "no running Desktop has this .pbip open"),
+    ],
+    ids=[
+        "none",
+        "several",
+        "unreadable-command-line",
+        "blank-current-file",
+        "relative-pbip-argument",
+        "relative-current-file",
+    ],
+)
+def test_observe_by_path_refuses_unless_exactly_one_desktop_certainly_holds_it(
+    monkeypatch, capsys, held, bridge, processes, message
+) -> None:
+    def fill(value):
+        return value.format(pbip=held.pbip, exe=held.exe) if isinstance(value, str) else value
+
+    # Run from the model's own folder, so a relative path would resolve to it here but not in that Desktop.
+    monkeypatch.chdir(held.pbip.parent)
+    held.bridge = [{key: fill(value) for key, value in item.items()} for item in bridge]
+    held.processes = [(pid, None if argv is None else [fill(arg) for arg in argv]) for pid, argv in processes]
+
+    assert open_desktop.main(["--observe", str(held.pbip)]) == 2
+    out = capsys.readouterr().out.splitlines()
+    assert len(out) == 1 and message in out[0] and out[0].endswith("; give the PID instead; nothing observed")
+    assert held.seen == []
+
+
+@pytest.mark.parametrize(
+    ("failure", "detail"),
+    [
+        ("bridge-timeout", "TimeoutError"),
+        ("bridge-error", "bridge status command failed"),
+        ("bridge-malformed", "malformed bridge instances"),
+        ("process-listing", "process listing unreadable"),
+    ],
+)
+def test_an_unreadable_listing_refuses_and_observes_nothing(monkeypatch, capsys, held, failure, detail) -> None:
+    held.processes = [(99, [held.exe, str(held.pbip)])]
+    if failure == "bridge-timeout":
+        monkeypatch.setattr(open_desktop, "_ui_bridge_status", _raise(TimeoutError()))
+    elif failure == "bridge-error":
+        monkeypatch.setattr(open_desktop, "_ui_bridge_status", _raise(open_desktop.DesktopActionError(detail)))
+    elif failure == "bridge-malformed":
+        monkeypatch.setattr(open_desktop, "_ui_bridge_status", lambda *_a: {"instances": "x"})
+    else:
+        monkeypatch.setattr(open_desktop, "_processes", _raise(OSError(detail)))
+
+    assert open_desktop.main(["--observe", str(held.pbip)]) == 2
+    assert capsys.readouterr().out == (
+        f"OPEN_DESKTOP: ERROR cannot list the open Desktops ({detail}); give the PID instead; nothing observed\n"
+    )
+    assert held.seen == []
+
+
+@pytest.mark.parametrize("layout", ["no-pbip", "two-pbips", "not-a-pbip"])
+def test_a_path_naming_no_single_pbip_is_refused_before_any_listing(monkeypatch, capsys, held, layout) -> None:
+    target = held.pbip.parent
+    if layout == "no-pbip":
+        held.pbip.unlink()
+    elif layout == "two-pbips":
+        (target / "second.pbip").write_text("{}", encoding="utf-8")
+    else:
+        target = target / "model.txt"
+        target.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(open_desktop, "_processes", lambda: pytest.fail("processes listed"))
+
+    assert open_desktop.main(["--observe", str(target), "--json"]) == 2
+    out, err = capsys.readouterr()
+    assert out == "", "--json keeps stdout for the observation line only"
+    assert err == (
+        "OPEN_DESKTOP: ERROR the path is not a .pbip file or a folder holding exactly one; nothing observed\n"
+    )
+    assert held.listed == []
+
+
+@pytest.mark.parametrize("token", [None, OSError("access denied")], ids=["exited", "unreadable"])
+def test_a_holder_whose_start_token_cannot_be_read_is_refused(monkeypatch, capsys, held, token) -> None:
+    held.processes = [(99, [held.exe, str(held.pbip)])]
+    if token is None:
+        held.token = None
+    else:
+        monkeypatch.setattr(open_desktop, "process_start", _raise(token))
+
+    assert open_desktop.main(["--observe", str(held.pbip)]) == 2
+    assert capsys.readouterr().out == (
+        "OPEN_DESKTOP: ERROR Desktop PID 99 exited or its start time is unreadable; nothing observed\n"
+    )
+    assert held.seen == []
+
+
+def test_collect_by_path_hands_the_found_pid_and_its_token_to_the_collector(monkeypatch, capsys, held) -> None:
+    held.processes = [(99, [held.exe, str(held.pbip)])]
+    calls = []
+    monkeypatch.setattr(open_desktop, "collect_command", lambda *a, **k: calls.append((a, k)) or 3)
+    out_file = held.pbip.parent / "details.txt"
+
+    assert open_desktop.main(["--collect", str(held.pbip), "--out", str(out_file)]) == 3
+    assert calls == [(("99", "456"), {"out": out_file})]
+    assert capsys.readouterr().out.splitlines() == [FOUND]
+
+
+@pytest.mark.parametrize(
+    ("value", "as_pid"),
+    [("2024", True), (os.path.join(".", "2024"), False), ("\uff12\uff10\uff12\uff14", False), ("12a", False)],
+    ids=["digits", "dotted-folder", "fullwidth-digits", "mixed"],
+)
+def test_only_ascii_digits_name_a_pid(monkeypatch, capsys, held, value, as_pid) -> None:
+    folder = held.pbip.parent.parent / value
+    folder.mkdir()
+    (folder / "model.pbip").write_text("{}", encoding="utf-8")
+    monkeypatch.chdir(held.pbip.parent.parent)
+    monkeypatch.setattr(open_desktop, "_holder", lambda model: held.seen.append(("path", model)) or 99)
+
+    open_desktop.main(["--observe", value])
+    capsys.readouterr()
+    if as_pid:
+        assert held.seen == [(value, {"expected_process_start": None})]
+    else:
+        assert held.seen[0] == ("path", (folder / "model.pbip").resolve())
+
+
+class _Done:
+    def __init__(self, stdout: str, returncode: int = 0) -> None:
+        self.stdout, self.returncode = stdout, returncode
+
+
+def test_the_process_listing_keeps_unreadable_command_lines_as_unknown(monkeypatch) -> None:
+    rows = [{"ProcessId": 5, "CommandLine": None}, {"ProcessId": 6, "CommandLine": " \t"}, {"ProcessId": 7}]
+    monkeypatch.setattr(open_desktop.subprocess, "run", lambda *_a, **_k: _Done(json.dumps(rows)))
+    monkeypatch.setattr(open_desktop, "_argv", lambda _line: pytest.fail("a blank command line was split"))
+
+    assert open_desktop._processes() == [(5, None), (6, None), (7, None)]  # pylint: disable=protected-access
+
+
+@pytest.mark.parametrize(
+    ("stdout", "returncode", "exc"),
+    [
+        ("[]", 1, None),
+        ("not json", 0, None),
+        ('{"ProcessId": 5}', 0, None),
+        ('[{"ProcessId": "5", "CommandLine": null}]', 0, None),
+        ('[{"ProcessId": true, "CommandLine": null}]', 0, None),
+        ("", 0, subprocess.TimeoutExpired("powershell.exe", 60)),
+        ("", 0, FileNotFoundError("powershell.exe")),
+    ],
+    ids=["exit-1", "not-json", "not-a-list", "string-pid", "bool-pid", "timeout", "no-powershell"],
+)
+def test_an_unreadable_process_listing_raises(monkeypatch, stdout, returncode, exc) -> None:
+    def run(*_args, **_kwargs):
+        if exc is not None:
+            raise exc
+        return _Done(stdout, returncode)
+
+    monkeypatch.setattr(open_desktop.subprocess, "run", run)
+    with pytest.raises(OSError):
+        open_desktop._processes()  # pylint: disable=protected-access
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Win32 process identity is Windows-only")
+def test_the_real_process_listing_returns_the_exact_argv(tmp_path) -> None:
+    """A real child whose .pbip argument holds a space and a non-ASCII letter comes back exactly as passed."""
+    model = str(tmp_path / "a b caf\u00e9" / "model.pbip")
+    code = "import time; time.sleep(60)"
+    child = subprocess.Popen([sys.executable, "-c", code, model])  # pylint: disable=consider-using-with
+    try:
+        image = Path(sys.executable).name
+        listed = dict(open_desktop._processes(image))  # pylint: disable=protected-access
+        assert listed[child.pid][1:] == ["-c", code, model]
+    finally:
+        child.kill()
+        child.wait(timeout=30)
 
 
 @pytest.fixture(name="launch")

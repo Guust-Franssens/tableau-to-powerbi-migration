@@ -79,6 +79,8 @@ def test_json_without_command_keeps_syntax_error_envelope() -> None:
     [
         ("refresh", "refresh C:\\path\\to\\model.pbip --canaries Orders Customers"),
         ("desktop", "desktop observe --pid 1234"),
+        ("desktop", "desktop observe C:\\path\\to\\model.pbip"),
+        ("desktop", "desktop collect C:\\path\\to\\model.pbip --out C:\\private\\dialog-details.txt"),
     ],
 )
 def test_actionable_subcommand_help_includes_examples(command: str, example: str) -> None:
