@@ -168,6 +168,20 @@ fix; PR #658 alone does not make final manual-reference completion usable.
 
 ### Package-local review iteration commands
 
+Both standalone and package capture use the target Desktop window's DPI divided by 96 as the
+bridge capture scale. At 125% Windows scaling this is `1.25`, not a new report zoom level.
+This avoids the bridge CLI's implicit `2x` capture enlargement. The report's existing Page View
+(including Fit to width or Fit to page) is left alone; no PBIR settings are rewritten. Fit to width
+can leave the bottom of a tall page outside the visible viewport, so this is not a full-page guarantee.
+An unreadable, blocked or ambiguous window, or DPI outside the bridge's 100%-300% range, fails
+capture instead of guessing a scale.
+
+Defaults are `--poll 20 --stable-seconds 20 --max-wait 75`: a settled page needs two matching
+captures separated by 20 idle seconds, not six captures four seconds apart. A changed frame resets
+the dwell and needs another sample; slow screenshot calls do not count as idle time. Explicit
+timing options remain supported. Only the final PNG is retained. Two samples are still a
+progressive-render heuristic, not proof that nothing changed between them or that all data rendered.
+
 ```text
 python scripts\capture_powerbi_pages.py iterate --package <package> --pid <pid>
 python scripts\capture_powerbi_pages.py iterate --package <package> --pid <pid> --refresh --canary-table <table> --persist

@@ -9,6 +9,7 @@ import subprocess
 import sys
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -155,6 +156,127 @@ class ManualClock:
 
     def sleep(self, seconds: float) -> None:
         self.now += seconds
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["Book.Report", "out", "--pid", "1234"],
+        ["iterate", "--package", "package", "--pid", "1234"],
+    ],
+)
+@pytest.mark.parametrize("changes", [False, True])
+def test_default_capture_samples_twice_per_dwell(tmp_path: Path, argv: list[str], changes: bool) -> None:
+    """Default consumers keep the dwell without six disruptive bridge calls per settled page."""
+    args = capture.parse_args(argv)
+    clock = ManualClock()
+    captured_at = []
+
+    def shot(_page: str, _pid: str, path: Path) -> bool:
+        captured_at.append(clock())
+        path.write_bytes(b"partial" if changes and len(captured_at) == 1 else b"settled")
+        # A blocking capture still earns no idle dwell.
+        clock.sleep(3)
+        return True
+
+    dest = tmp_path / "page.png"
+    result = capture.capture_stable(
+        "p1",
+        "1234",
+        dest,
+        capture.CaptureOptions(args.poll, args.stable_seconds, args.max_wait),
+        capture.CaptureRuntime(shot, clock.sleep, clock),
+    )
+    assert result.captured and result.converged
+    assert captured_at == ([0, 23, 46] if changes else [0, 23])
+    assert result.frames == (3 if changes else 2)
+    assert result.stable_elapsed_seconds == 20
+    assert dest.read_bytes() == b"settled"
+    assert list(tmp_path.iterdir()) == [dest]
+
+
+@pytest.fixture(name="desktop_dpi")
+def desktop_dpi_fixture(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Supply one exact frame and a mutable per-window DPI, without using the host display."""
+    values = [120]
+    window = modal.DesktopWindow("", "", 1200, 800, hwnd=0x100000008)
+
+    def inspect(pid: str) -> modal.Observation:
+        assert pid == "1234"
+        return modal.Observation(target_window=window)
+
+    def get_dpi(hwnd: int) -> int:
+        assert hwnd == window.hwnd
+        return values[0]
+
+    def load_library(name: str, *, use_last_error: bool) -> SimpleNamespace:
+        assert name == "user32" and use_last_error
+        return SimpleNamespace(GetDpiForWindow=get_dpi)
+
+    monkeypatch.setattr(capture, "observe", inspect)
+    monkeypatch.setattr(capture.ctypes, "WinDLL", load_library, raising=False)
+    return values
+
+
+def test_screenshot_matches_each_target_window_dpi(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, desktop_dpi: list[int]
+) -> None:
+    """Monitor moves are re-read; no hard-coded 1.25, 1 or implicit bridge 2x is used."""
+    commands = []
+    dest = tmp_path / "page.png"
+
+    def run(argv: list[str], **_kwargs) -> subprocess.CompletedProcess:
+        commands.append(argv)
+        Path(argv[argv.index("--output") + 1]).write_bytes(b"png")
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(capture.subprocess, "run", run)
+    for dpi, scale in [(96, "1"), (120, "1.25"), (144, "1.5"), (192, "2"), (288, "3")]:
+        desktop_dpi[0] = dpi
+        assert capture.screenshot("ReportSectionMap", "1234", dest)
+        assert commands[-1] == [
+            "powerbi-desktop",
+            "screenshot",
+            "ReportSectionMap",
+            "--pid",
+            "1234",
+            "--output",
+            str(dest),
+            "--scale",
+            scale,
+            "--wait-seconds",
+            str(capture.BRIDGE_WAIT_SECONDS),
+        ]
+    assert len(commands) == 5
+
+
+@pytest.mark.parametrize("failure", ["zero-dpi", "low-dpi", "high-dpi", "missing-api", "no-frame", "dialog"])
+def test_screenshot_refuses_unavailable_scale_without_guessing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, desktop_dpi: list[int], capsys, failure: str
+) -> None:
+    """No DPI fallback or bridge call can disguise a missing/unsupported target window."""
+    if failure in {"zero-dpi", "low-dpi", "high-dpi"}:
+        desktop_dpi[0] = {"zero-dpi": 0, "low-dpi": 72, "high-dpi": 384}[failure]
+    elif failure == "missing-api":
+        monkeypatch.delattr(capture.ctypes, "WinDLL")
+    elif failure == "no-frame":
+        monkeypatch.setattr(capture, "observe", lambda _: modal.Observation())
+    else:
+        window = modal.DesktopWindow("", "", 1200, 800, hwnd=22)
+        monkeypatch.setattr(
+            capture,
+            "observe",
+            lambda _: modal.Observation(dialog=modal.DialogFinding(window), target_window=window),
+        )
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("the bridge must not run when the capture scale is unestablished")
+
+    monkeypatch.setattr(capture.subprocess, "run", forbidden)
+    dest = tmp_path / "page.png"
+    assert not capture.screenshot("p1", "1234", dest)
+    assert not dest.exists()
+    assert "No screenshot taken." in capsys.readouterr().err
 
 
 def _workspace(name: str) -> Path:
@@ -527,7 +649,9 @@ def test_capture_report_full_sweep_captures_every_page() -> None:
         shutil.rmtree(root.parent, ignore_errors=True)
 
 
-def test_screenshot_timeout_treats_a_hung_bridge_call_as_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_screenshot_timeout_treats_a_hung_bridge_call_as_failure(
+    monkeypatch: pytest.MonkeyPatch, desktop_dpi: list[int]
+) -> None:
     """The Python timeout caps a bridge subprocess that does not return itself."""
     observed_timeout: int | None = None
 
@@ -540,6 +664,7 @@ def test_screenshot_timeout_treats_a_hung_bridge_call_as_failure(monkeypatch: py
 
     monkeypatch.setattr(capture.subprocess, "run", fake_run)
 
+    assert desktop_dpi == [120]
     assert not capture.screenshot("ReportSectionMap", "1234", Path("unused.png"))
     assert observed_timeout == capture.SCREENSHOT_TIMEOUT_SECONDS
     assert observed_timeout > capture.BRIDGE_WAIT_SECONDS

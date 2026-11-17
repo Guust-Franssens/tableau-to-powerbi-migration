@@ -14,6 +14,8 @@ status, reloads that PID, and requires finite positive polling/dwell and repeate
 
 Stability remains a heuristic, not a render-readiness signal. A progressive azureMap can pause
 longer than a dwell before drawing more marks. Blocking screenshot time earns no stable dwell.
+By default, sample twice 20 seconds apart rather than recapturing every four seconds. Capture at
+the target window's DPI scale, not the bridge's implicit 2x; leave the report's page-fit setting alone.
 Standalone capture still writes bare PNGs. A zero-dwell standalone request now needs two frames,
 not one, but its existing positional grammar and failure/partial-frame behavior remain.
 """
@@ -21,6 +23,7 @@ not one, but its existing positional grammar and failure/partial-frame behavior 
 from __future__ import annotations
 
 import argparse
+import ctypes
 import hashlib
 import json
 import math
@@ -29,6 +32,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable
+from ctypes import wintypes
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -118,8 +122,32 @@ class CaptureOptions:
     page_ids: frozenset[str] | None = None
 
 
+def _capture_scale(pid: str) -> float:
+    """Match this Desktop's pixel density without changing its Page View or Windows DPI."""
+    state = observe(pid)
+    window = state.target_window
+    if state.state != "READY" or window is None or not window.hwnd:
+        raise OSError("target Desktop frame unavailable")
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    user32.GetDpiForWindow.argtypes = [wintypes.HWND]
+    user32.GetDpiForWindow.restype = wintypes.UINT
+    dpi = user32.GetDpiForWindow(window.hwnd)
+    if not 96 <= dpi <= 288:
+        raise OSError("window DPI unavailable or outside bridge scale range")
+    return dpi / 96
+
+
 def screenshot(page_id: str, pid: str, dest: Path) -> bool:
-    """Capture through the PID-scoped bridge without persisting its diagnostic output."""
+    """Capture at the target window's density through the PID-scoped bridge."""
+    try:
+        scale = _capture_scale(pid)
+    except (OSError, ValueError, AttributeError):
+        _emit(
+            "FAILED: target Desktop window/DPI unavailable or outside supported 100%-300% scaling; "
+            "restore the target window and check its display scaling. No screenshot taken.",
+            stream=sys.stderr,
+        )
+        return False
     try:
         proc = subprocess.run(
             [
@@ -130,6 +158,8 @@ def screenshot(page_id: str, pid: str, dest: Path) -> bool:
                 pid,
                 "--output",
                 str(dest),
+                "--scale",
+                f"{scale:g}",
                 "--wait-seconds",
                 str(BRIDGE_WAIT_SECONDS),
             ],
@@ -613,8 +643,10 @@ class _Parser(argparse.ArgumentParser):
 
 
 def _timing_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--poll", type=float, default=4.0)
-    parser.add_argument("--stable-seconds", type=float, default=20.0)
+    parser.add_argument("--poll", type=float, default=20.0, help="Idle seconds between captures (default: 20)")
+    parser.add_argument(
+        "--stable-seconds", type=float, default=20.0, help="Required unchanged idle dwell (default: 20)"
+    )
     parser.add_argument("--max-wait", type=float, default=75.0)
     parser.add_argument("--pages", type=_page_ids, help="Exact, comma-separated page IDs")
 
