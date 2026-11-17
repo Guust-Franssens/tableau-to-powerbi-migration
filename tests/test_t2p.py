@@ -877,6 +877,8 @@ def test_model_check_transports_native_result_and_lexical_path(monkeypatch, tmp_
 
     toolkit, package = tmp_path / "toolkit", tmp_path / "package"
     package.mkdir()
+    (package / "nested").mkdir()
+    lexical_target = package / "nested" / ".."
     (package / "pinned").write_bytes(b"do not change")
     monkeypatch.setattr(t2p, "ROOT", toolkit)
     monkeypatch.setattr(check_unit, "REPO_ROOT", toolkit)
@@ -884,14 +886,9 @@ def test_model_check_transports_native_result_and_lexical_path(monkeypatch, tmp_
     before = _snapshot(package)
     outputs = []
     native = _model_result(code) if code != 64 else None
-    real_resolve = Path.resolve
-
-    def forbid_target_resolution(path, *args, **kwargs):
-        assert path.absolute() != package, "the owner must classify the original lexical path"
-        return real_resolve(path, *args, **kwargs)
 
     def child(argv, **kwargs):
-        assert argv[:4] == [sys.executable, "-B", str(toolkit / "scripts" / "check_unit.py"), str(package)]
+        assert argv[:4] == [sys.executable, "-B", str(toolkit / "scripts" / "check_unit.py"), str(lexical_target)]
         assert argv[4:7] == ["--scope", "model", "--json"] and argv[8:] == ["--quiet"]
         assert kwargs == {"check": False}
         output = Path(argv[7])
@@ -903,9 +900,8 @@ def test_model_check_transports_native_result_and_lexical_path(monkeypatch, tmp_
         os.write(2, b"private owner stderr\n")
         return subprocess.CompletedProcess(argv, code)
 
-    monkeypatch.setattr(Path, "resolve", forbid_target_resolution)
     monkeypatch.setattr(t2p.subprocess, "run", child)
-    assert t2p.main(["check", "package", "--scope", "model", "--json"]) == code
+    assert t2p.main(["check", str(Path("package") / "nested" / ".."), "--scope", "model", "--json"]) == code
     result, captured = _json(capfd)
     assert result["checks"] == [] and result["authority"] == "check_unit.py"
     assert result["delegated_exit_code"] == code
@@ -1136,6 +1132,24 @@ def test_model_check_alias_is_classified_by_native_owner(tmp_path, capfd):
             alias.rmdir()
         else:
             alias.unlink()
+
+
+def test_model_check_containing_target_refuses_before_real_delegation(tmp_path, monkeypatch, capfd):
+    import check_unit
+
+    toolkit = tmp_path / "toolkit"
+    (toolkit / "scripts").mkdir(parents=True)
+    (toolkit / "pinned").write_bytes(b"untouched target")
+    monkeypatch.setattr(check_unit, "REPO_ROOT", toolkit)
+    before = _snapshot(toolkit)
+    entries = set(toolkit.rglob("*"))
+    code = t2p.main(["check", str(toolkit / "scripts" / ".."), "--scope", "model", "--json"])
+    assert set(toolkit.rglob("*")) == entries, "refusal must not create even empty scratch directories"
+    assert _snapshot(toolkit) == before
+    result, _ = _json(capfd)
+    assert code == 1 and result["status"] == "error"
+    assert result["delegated_exit_code"] is None and "unit_check" not in result
+    assert "owner_result_unavailable" in result["limitations"]
 
 
 def _fake_refresh_owner(root: Path, code: int) -> None:

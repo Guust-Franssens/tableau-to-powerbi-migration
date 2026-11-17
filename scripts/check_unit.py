@@ -3511,8 +3511,21 @@ def check_engine_receipt(target: Path) -> dict[str, Any]:
 def _temp_json_dir(target: Path) -> Path:
     """Allocate private per-invocation output, never inside the selected package."""
     parent = REPO_ROOT / "_scratch" / "check-unit"
-    if parent.absolute().is_relative_to(target.absolute()):
-        raise ValueError("check output must be outside the selected package")
+    # Resolve only for containment; the native owner still receives the lexical target.
+    physical_parent, physical_target = parent.resolve(), target.resolve()
+    anchor = physical_target
+    while not anchor.exists() and anchor != anchor.parent:
+        anchor = anchor.parent
+    # Native identity also equates Windows extended paths; keep any not-yet-created suffix.
+    if anchor.exists():
+        suffix = physical_target.relative_to(anchor)
+        for ancestor in (physical_parent, *physical_parent.parents):
+            if (
+                ancestor.exists()
+                and ancestor.samefile(anchor)
+                and physical_parent.relative_to(ancestor).is_relative_to(suffix)
+            ):
+                raise ValueError("check output must be outside the selected package")
     parent.mkdir(parents=True, exist_ok=True)
     return Path(tempfile.mkdtemp(dir=parent))
 

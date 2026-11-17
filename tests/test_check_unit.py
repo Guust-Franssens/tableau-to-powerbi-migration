@@ -6200,18 +6200,78 @@ def test_scratch_cleanup_keeps_a_parent_another_run_still_uses(tmp_path: Path, m
     assert list(sibling.parent.iterdir()) == []
 
 
-def test_scratch_refuses_package_containing_output_and_exposes_cleanup_failure(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(cu, "REPO_ROOT", tmp_path)
+@pytest.mark.parametrize("spelling", ["canonical", "absolute-dotdot", "relative-dotdot", "output-parent"])
+def test_scratch_refuses_package_containing_output_before_allocation(tmp_path, monkeypatch, spelling) -> None:
+    toolkit = tmp_path / "toolkit"
+    (toolkit / "scripts").mkdir(parents=True)
+    monkeypatch.setattr(cu, "REPO_ROOT", toolkit)
+    monkeypatch.chdir(tmp_path)
+    target = {
+        "canonical": toolkit,
+        "absolute-dotdot": toolkit / "scripts" / "..",
+        "relative-dotdot": Path("toolkit") / "scripts" / "..",
+        "output-parent": toolkit / "_scratch" / "check-unit",
+    }[spelling]
     with pytest.raises(ValueError, match="outside the selected package"):
-        cu._temp_json_dir(tmp_path)
-    assert list(tmp_path.iterdir()) == []
+        cu._temp_json_dir(target)
+    assert list(toolkit.iterdir()) == [toolkit / "scripts"]
+
+
+@pytest.mark.parametrize("alias_side", ["target", "scratch"])
+def test_scratch_refuses_physical_containment_through_directory_alias(tmp_path, monkeypatch, alias_side) -> None:
+    toolkit, package = tmp_path / "toolkit", tmp_path / "package"
+    toolkit.mkdir()
+    monkeypatch.setattr(cu, "REPO_ROOT", toolkit)
+    if alias_side == "target":
+        _link_directory(package, toolkit)
+    else:
+        package.mkdir()
+        _link_directory(toolkit / "_scratch", package)
+    before = set(tmp_path.rglob("*"))
+    with pytest.raises(ValueError, match="outside the selected package"):
+        cu._temp_json_dir(package)
+    assert set(tmp_path.rglob("*")) == before
+    assert not (toolkit / "_scratch" / "check-unit").exists()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-specific path spelling")
+@pytest.mark.parametrize("target_kind", ["toolkit", "output-parent", "external"])
+@pytest.mark.parametrize("alias_side", ["target", "scratch"])
+def test_scratch_extended_path_uses_physical_containment(tmp_path, monkeypatch, target_kind, alias_side) -> None:
+    toolkit, package = tmp_path / "toolkit", tmp_path / "package"
+    toolkit.mkdir()
+    package.mkdir()
+    target = {
+        "toolkit": toolkit,
+        "output-parent": toolkit / "_scratch" / "check-unit",
+        "external": package,
+    }[target_kind]
+    monkeypatch.setattr(cu, "REPO_ROOT", Path("\\\\?\\" + str(toolkit)) if alias_side == "scratch" else toolkit)
+    if alias_side == "target":
+        target = Path("\\\\?\\" + str(target))
+    if target_kind != "external":
+        with pytest.raises(ValueError, match="outside the selected package"):
+            cu._temp_json_dir(target)
+        assert list(toolkit.iterdir()) == []
+    else:
+        child = cu._temp_json_dir(target)
+        assert child.is_dir() and not child.resolve().is_relative_to(package.resolve())
+        cu._remove_json_dir(child)
+        assert not child.exists() and list(package.iterdir()) == []
+
+
+def test_scratch_exposes_cleanup_failure(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(cu, "REPO_ROOT", tmp_path)
     child = cu._temp_json_dir(tmp_path / "package")
     with monkeypatch.context() as patch:
 
-        def fail_cleanup(*_args, **_kwargs):
-            raise PermissionError("synthetic cleanup refusal")
+        def fail_cleanup(_path, ignore_errors=False):
+            if not ignore_errors:
+                raise PermissionError("synthetic cleanup refusal")
 
         patch.setattr(cu.shutil, "rmtree", fail_cleanup)
         with pytest.raises(PermissionError, match="synthetic cleanup refusal"):
             cu._remove_json_dir(child)
+    assert child.is_dir()
     cu._remove_json_dir(child)
+    assert not child.exists()
