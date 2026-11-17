@@ -30,6 +30,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -2797,9 +2798,12 @@ def _apply_stub_exemptions(check: dict[str, Any], exemptions: dict[str, Any]) ->
     payload = check.get("payload") if isinstance(check.get("payload"), dict) else {}
     stubs, findings = _stub_findings(payload)
     exempted, contested = resolve_exemptions(exemptions["entries"], "stub-measures", findings)
+    matches = [(entry, resolve_exemptions([entry], "stub-measures", findings)[0]) for entry in exemptions["entries"]]
     for stub in stubs:
         stub["exempted"] = stub["key"] in exempted
+        stub["matched_exemptions"] = [entry for entry, keys in matches if stub["key"] in keys]
     unexempted = [stub for stub in stubs if not stub["exempted"]]
+    check["stubs"] = stubs
     check["stub_exemptions"] = len(stubs) - len(unexempted)
     check["unexempted_stubs"] = len(unexempted)
     check["contested_exemptions"] = contested
@@ -2992,6 +2996,7 @@ def check_ai_descriptions(target: Path) -> dict[str, Any]:
                 "model": str(model),
                 "total": total,
                 "described": described,
+                "counts": counts,
                 "categorical_gaps": gaps,
                 "status": "SKIPPED" if total == 0 else ("OK" if described == total and not gaps else "FINDINGS"),
             }
@@ -3504,19 +3509,17 @@ def check_engine_receipt(target: Path) -> dict[str, Any]:
 
 
 def _temp_json_dir(target: Path) -> Path:
-    digest = hashlib.sha256(str(target).encode("utf-8")).hexdigest()[:16]
-    path = REPO_ROOT / ".check-unit-scratch" / digest
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+    """Allocate private per-invocation output, never inside the selected package."""
+    parent = REPO_ROOT / "_scratch" / "check-unit"
+    if parent.absolute().is_relative_to(target.absolute()):
+        raise ValueError("check output must be outside the selected package")
+    parent.mkdir(parents=True, exist_ok=True)
+    return Path(tempfile.mkdtemp(dir=parent))
 
 
 def _remove_json_dir(path: Path) -> None:
-    shutil.rmtree(path, ignore_errors=True)
-    parent = path.parent
-    try:
-        parent.rmdir()
-    except OSError:
-        pass
+    """Remove only our child; another invocation may be allocating in the shared parent."""
+    shutil.rmtree(path)
 
 
 def _all_check_ids() -> frozenset[str]:
@@ -4121,6 +4124,37 @@ def _render_check_headline(check: dict[str, Any]) -> list[str]:  # pylint: disab
     return [f"  {check_id}: {status}{detail}"]
 
 
+def _render_model_detail(check: dict[str, Any]) -> list[str]:
+    """Expose already-measured model coverage and decisions, including on passing rows."""
+    lines = []
+    for model in check.get("models", []):
+        if check["id"] == "ai-descriptions":
+            counts = "; ".join(
+                f"{kind}: {count['described']}/{count['total']} described"
+                for kind, count in sorted(model.get("counts", {}).items())
+            )
+            lines.append(f"      model: {model['model']} [{model['status']}]; {counts}")
+            lines.extend(f"      categorical gap: {gap}" for gap in model.get("categorical_gaps", []))
+        elif check["id"] == "ai-instructions":
+            lines.append(f"      model: {model['model']} (native exit {model['native_exit']})")
+            for stream in ("stdout", "stderr"):
+                if model.get(stream):
+                    lines.append(f"      {stream}: {model[stream]}")
+        elif check["id"] == "cache-freshness":
+            lines.append(f"      model: {model['model']} [{model['status']}]")
+    if check.get("verification") == "PARTIAL":
+        lines.append(
+            "      PARTIAL: cache presence/mtime only; "
+            "not proof of loaded data, persistence or cold-reopen correctness."
+        )
+    for stub in check.get("stubs", []):
+        state = "EXEMPTED (not repaired)" if stub["exempted"] else "UNEXEMPTED"
+        lines.append(f"      {stub['canonical']}: {state}")
+        for entry in stub["matched_exemptions"]:
+            lines.append(f"        item: {entry['item']}; reason: {entry['reason']}; decided_by: {entry['decided_by']}")
+    return lines
+
+
 def render(report: dict[str, Any]) -> str:
     """Human-readable unit verdict."""
     scope = report.get("scope", SCOPE_ALL)
@@ -4134,6 +4168,7 @@ def render(report: dict[str, Any]) -> str:
     for check in report["checks"]:
         lines.extend(_render_check_headline(check))
         lines.extend(_render_actionable_detail(check))
+        lines.extend(_render_model_detail(check))
     ex = report["exemptions"]
     if ex["accepted"] or ex["invalid"]:
         lines.append(f"  documented why-not exemptions: {ex['accepted']} accepted, {ex['invalid']} invalid")

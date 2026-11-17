@@ -27,6 +27,7 @@ def test_no_arguments_print_help_with_usage_error_exit() -> None:
     assert result.stdout == b""
     assert b"usage: python -B scripts/t2p.py" in result.stderr
     assert b"python -B scripts/t2p.py desktop --help" in result.stderr
+    assert b"python -B scripts/t2p.py check C:\\private\\package --scope model" in result.stderr
     assert b'"schema_version"' not in result.stderr
     _assert_description_wraps(result.stderr)
 
@@ -78,13 +79,14 @@ def test_json_without_command_keeps_syntax_error_envelope() -> None:
     ("command", "example"),
     [
         ("refresh", "refresh C:\\path\\to\\model.pbip --canaries Orders Customers"),
+        ("check", "check C:\\private\\package --scope model --json"),
         ("desktop", "desktop observe --pid 1234"),
         ("desktop", "desktop observe C:\\path\\to\\model.pbip"),
         ("desktop", "desktop collect C:\\path\\to\\model.pbip --out C:\\private\\dialog-details.txt"),
     ],
 )
 def test_actionable_subcommand_help_includes_examples(command: str, example: str) -> None:
-    """Refresh and Desktop help show copyable command forms."""
+    """Local operation help shows copyable command forms."""
     result = subprocess.run(
         [sys.executable, "-B", str(T2P_SCRIPT), command, "--help"],
         capture_output=True,

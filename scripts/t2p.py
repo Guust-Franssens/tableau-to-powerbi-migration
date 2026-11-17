@@ -1,6 +1,6 @@
 """
-purpose: narrow doctor/start/status/units/refresh/desktop pilot delegating to existing configuration and run owners.
-usage:   python -B scripts/t2p.py {doctor,start,assess,status,units,refresh,desktop} [args]
+purpose: narrow diagnostic and migration pilot delegating to existing owners.
+usage:   python -B scripts/t2p.py {doctor,start,assess,status,units,refresh,desktop,check} [args]
 
 No readiness, liveness, fidelity, credential validity or completion certification.
 """
@@ -38,6 +38,11 @@ ASSESS_ONLY_OWNERS = {
 }
 ALL_STAGE_OWNERS = STAGE_OWNERS | ASSESS_ONLY_OWNERS
 REFRESH_OWNER = Path(".github", "skills", "pbip-model-refresh", "scripts", "open_desktop.py")
+MODEL_CHECK_DISCLAIMER = (
+    "Model-only automated checks: not START_READY, visual/numeric fidelity, validated data persistence/"
+    "cold reopen or Phase-2 COMPLETE. Presence/coverage is not semantic quality or DAX correctness. "
+    "Exemptions are accepted limitations, not repairs."
+)
 ENVELOPE_SCHEMA = {
     "type": "object",
     "required": [
@@ -59,7 +64,7 @@ ENVELOPE_SCHEMA = {
     ],
     "properties": {
         "schema_version": {"const": SCHEMA_VERSION},
-        "command": {"enum": ["doctor", "start", "assess", "status", "units", "refresh", "desktop", None]},
+        "command": {"enum": ["doctor", "start", "assess", "status", "units", "refresh", "desktop", "check", None]},
         "status": {
             "enum": [
                 "ok",
@@ -112,6 +117,7 @@ ENVELOPE_SCHEMA = {
         "runs_root": {"type": "null"},
         "path_report": {"type": ["object", "null"]},
         "limitations": {"type": "array", "items": {"type": "string"}},
+        "unit_check": {"type": "object"},
         "unit_lookup": {
             "type": "object",
             "required": ["schema_version", "action", "result", "reason", "query", "runs_root", "candidates", "runs"],
@@ -163,7 +169,7 @@ def build_parser(prog: str = "python -B scripts/t2p.py") -> argparse.ArgumentPar
         allow_abbrev=False,
         description=(
             "Narrow pilot: diagnostic doctor, assessment-only survey, live project start, read-only status, "
-            "read-only unit lookup, local .pbip refresh, Desktop observation and dialog details. "
+            "read-only unit lookup, local .pbip refresh, Desktop observation, dialog details and model checks. "
             "Without a command, help prints to stderr and exits 2; use --help for stdout or --json for a "
             "structured syntax-error response."
         ),
@@ -173,7 +179,8 @@ def build_parser(prog: str = "python -B scripts/t2p.py") -> argparse.ArgumentPar
             f"  {prog} start --help\n"
             f"  {prog} units list --help\n"
             f"  {prog} refresh --help\n"
-            f"  {prog} desktop --help"
+            f"  {prog} desktop --help\n"
+            f"  {prog} check C:\\private\\package --scope model"
         ),
         formatter_class=ExamplesHelpFormatter,
     )
@@ -189,6 +196,7 @@ def build_parser(prog: str = "python -B scripts/t2p.py") -> argparse.ArgumentPar
             "desktop",
             "Look at one running Power BI Desktop, or copy its open dialog's details; nothing is started or closed.",
         ),
+        ("check", "Read-only model completeness through check_unit.py; not readiness or completion certification."),
     ):
         child = commands.add_parser(command, help=help_text, description=help_text, allow_abbrev=False)
         if command == "units":
@@ -206,6 +214,15 @@ def build_parser(prog: str = "python -B scripts/t2p.py") -> argparse.ArgumentPar
             _add_desktop_actions(child)
             continue
         child.add_argument("--json", action="store_true", help="one t2p/v1 JSON envelope on stdout")
+        if command == "check":
+            child.add_argument("path", type=Path, help="explicit package path, relative or absolute; not a unit ID")
+            child.add_argument("--scope", required=True, choices=["model"], help="model-only automated checks")
+            child.epilog = (
+                "Examples:\n"
+                f"  {child.prog} C:\\private\\package --scope model\n"
+                f"  {child.prog} C:\\private\\package --scope model --json\n\n" + MODEL_CHECK_DISCLAIMER
+            )
+            child.formatter_class = ExamplesHelpFormatter
         if command == "refresh":
             child.epilog = (
                 "Examples:\n"
@@ -451,10 +468,12 @@ def envelope(command: str | None) -> dict[str, Any]:
         "runs_root": None,
         "run_location_reason": (
             "not_applicable_no_run"
-            if command in {"doctor", "units", "refresh", "desktop"}
+            if command in {"doctor", "units", "refresh", "desktop", "check"}
             else "not_allocated_path_withheld"
         ),
-        "path_report": None if command in {"doctor", "assess", "units", "refresh", "desktop"} else path_report(command),
+        "path_report": (
+            None if command in {"doctor", "assess", "units", "refresh", "desktop", "check"} else path_report(command)
+        ),
         "limitations": [],
         "proof_boundary": {
             "established": [],
@@ -1424,12 +1443,117 @@ def desktop(args: argparse.Namespace, result: dict) -> int:
     return code
 
 
+def _unit_check_result(path: Path, code: int) -> dict | None:
+    """Check transport shape/coherence only; the native owner retains all checking policy."""
+    try:
+        native = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError):
+        return None
+    fields = {
+        "version": int,
+        "scope": str,
+        "exit_code": int,
+        "status": str,
+        "target": str,
+        "omitted_checks": list,
+        "exemptions": dict,
+        "checks": list,
+    }
+    # Exact scalar types reject booleans masquerading as version or exit integers.
+    # pylint: disable=unidiomatic-typecheck
+    if not isinstance(native, dict) or any(type(native.get(key)) is not kind for key, kind in fields.items()):
+        return None
+    checks = native["checks"]
+    exemptions = native["exemptions"]
+    if (
+        native["version"] != 1
+        or native["scope"] != "model"
+        or native["exit_code"] != code
+        or not native["target"]
+        or not checks
+    ):
+        return None
+    if any(type(exemptions.get(key)) is not int for key in ("accepted", "invalid")) or any(
+        not isinstance(row, dict)
+        or not isinstance(row.get("id"), str)
+        or not row["id"]
+        or not isinstance(row.get("status"), str)
+        or not row["status"]
+        for row in checks
+    ):
+        return None
+    # pylint: enable=unidiomatic-typecheck
+    expected = {0: "AUTOMATED_CHECKS_PASS", 1: "FINDINGS", 2: "NOT_CHECKED", 4: "PRECONDITION_FAILED"}
+    if native.get("status") != expected.get(code) or (code == 0 and any(row["status"] != "PASS" for row in checks)):
+        return None
+    return native
+
+
+def check(args: argparse.Namespace, result: dict) -> int:
+    """Delegate model checks and private scratch ownership without resolving the caller's target."""
+    import check_unit  # pylint: disable=import-outside-toplevel
+
+    result["authority"] = "check_unit.py"
+    result["limitations"].append(MODEL_CHECK_DISCLAIMER)
+    result["proof_boundary"]["not_established"] += [
+        "semantic_quality",
+        "DAX_correctness",
+        "loaded_data",
+        "data_persistence",
+        "cold_reopen",
+    ]
+    target = args.path.expanduser().absolute()
+    # The owner must see the lexical alias/junction, not a dereferenced replacement.
+    output_dir = check_unit._temp_json_dir(target)  # pylint: disable=protected-access
+    try:
+        output = output_dir / "unit-check.json"
+        command = [
+            sys.executable,
+            "-B",
+            str(ROOT / "scripts" / "check_unit.py"),
+            str(target),
+            "--scope",
+            "model",
+            "--json",
+            str(output),
+            "--quiet",
+        ]
+        with _native_to_stderr():
+            code = subprocess.run(command, check=False).returncode
+        result["delegated_exit_code"] = code
+        native = _unit_check_result(output, code)
+    finally:
+        check_unit._remove_json_dir(output_dir)  # pylint: disable=protected-access
+    if native is None:
+        result["limitations"].append("owner_result_unavailable")
+        return code or 1
+    result["unit_check"] = native
+    result["status"] = {0: "ok", 1: "findings", 2: "cannot_establish"}.get(code, "error")
+    return code
+
+
+def _check_human(result: dict) -> None:
+    if "unit_check" in result:
+        import check_unit  # pylint: disable=import-outside-toplevel
+
+        _print_safe(check_unit.render(result["unit_check"]))
+    else:
+        _print_safe(
+            f"MODEL CHECK: result unavailable (exit {result['exit_code']}; "
+            f"delegated exit {result['delegated_exit_code']}). "
+            "Inspect private diagnostics; no successful check was established."
+        )
+    _print_safe(MODEL_CHECK_DISCLAIMER)
+
+
 def _delegate(args: argparse.Namespace, result: dict, *, json_mode: bool) -> int:
-    """Keep the same three owners and live descriptor transport, without a command registry."""
+    """Keep native owners and live descriptor transport, without a command registry."""
     if args.command == "doctor":
         code = doctor(args, result)
     elif args.command == "desktop":
         code = desktop(args, result)
+    elif args.command == "check":
+        code = check(args, result)
     elif args.command in {"start", "assess", "refresh"}:
         # Live progress is local, not part of the stdout JSON stream.
         owner = refresh if args.command == "refresh" else start
@@ -1451,7 +1575,9 @@ def main(argv: list[str] | None = None, *, installed: bool = False) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     json_mode = "--json" in argv
     command = (
-        argv[0] if argv and argv[0] in {"doctor", "start", "assess", "status", "units", "refresh", "desktop"} else None
+        argv[0]
+        if argv and argv[0] in {"doctor", "start", "assess", "status", "units", "refresh", "desktop", "check"}
+        else None
     )
     result = envelope(command)
     args = None
@@ -1489,6 +1615,8 @@ def main(argv: list[str] | None = None, *, installed: bool = False) -> int:
         _status_human(result)
     elif command == "units":
         _units_human(result)
+    elif command == "check":
+        _check_human(result)
     elif command in {"refresh", "desktop"} and result["delegated_exit_code"] is not None:
         pass  # the owner CLI already printed its progress and verdict
     elif command == "doctor":

@@ -57,8 +57,8 @@ def _gate_by_id(check_id: str) -> cu.Gate:
     return matches[0]
 
 
-def _freshen_clean_fixture_cache() -> Path:
-    fixture = REPO_ROOT / "tests" / "fixtures" / "check-unit-clean-integration"
+def _freshen_clean_fixture_cache(fixture: Path | None = None) -> Path:
+    fixture = fixture or REPO_ROOT / "tests" / "fixtures" / "check-unit-clean-integration"
     cache = fixture / "pbip" / "Book" / "Book.SemanticModel" / ".pbi" / "cache.abf"
     cache.parent.mkdir(parents=True, exist_ok=True)
     cache.write_text("cache placeholder\n", encoding="utf-8")
@@ -1785,6 +1785,57 @@ def test_stub_exemptions_subtract_only_named_attributed_items(tmp_path: Path, mo
     assert updated["status"] == cu.STATUS_FINDINGS
     assert updated["stub_exemptions"] == 1
     assert updated["unexempted_stubs"] == 1
+    assert updated["native_status"] == "STUBS"
+    accepted, unresolved = updated["stubs"]
+    assert accepted["canonical"] == "measure:Sales[Cannot Translate]"
+    assert accepted["exempted"] is True
+    assert accepted["matched_exemptions"] == exemptions["entries"]
+    assert unresolved["exempted"] is False
+    assert unresolved["matched_exemptions"] == []
+    rendered = cu.render(cu._finalize(tmp_path, [updated], {**exemptions, "path": None, "invalid": []}, "model"))
+    assert "measure:Sales[Cannot Translate]: EXEMPTED (not repaired)" in rendered
+    assert "reason: source calc uses unsupported custom extension; decided_by: validator" in rendered
+    assert "measure:Sales[Still Unexamined]: UNEXEMPTED" in rendered
+
+
+@pytest.mark.parametrize(
+    "item,reason,decided_by,exempted,contested",
+    [
+        ("measure:Sales[Pending]", "accepted limitation", "reviewer", True, []),
+        ("Pending", "all stubs acknowledged", "reviewer", False, ["Pending"]),
+        ("all", "all stubs acknowledged", "reviewer", False, []),
+        ("measure:Sales[Pending]", "", "reviewer", False, []),
+        ("measure:Sales[Pending]", "accepted limitation", "", False, []),
+    ],
+)
+def test_stub_decisions_require_valid_unique_attribution(
+    tmp_path, item, reason, decided_by, exempted, contested
+) -> None:
+    _write_exemptions(tmp_path, [{"check": "stub-measures", "item": item, "reason": reason, "decided_by": decided_by}])
+    exemptions = cu.load_exemptions(tmp_path)
+    findings = [{"kind": "measure", "table": table, "name": "Pending"} for table in ("Sales", "Orders")]
+    check = {
+        "id": "stub-measures",
+        "status": cu.STATUS_FINDINGS,
+        "native_status": "STUBS",
+        "native_exit": 1,
+        "payload": {"models": [{"findings": findings}]},
+    }
+    updated = cu._apply_stub_exemptions(check, exemptions)
+    assert updated["native_status"] == "STUBS"
+    assert updated["status"] == cu.STATUS_FINDINGS
+    assert updated["stubs"][0]["exempted"] is exempted
+    assert updated["stubs"][0]["matched_exemptions"] == (exemptions["entries"] if exempted else [])
+    assert updated["stubs"][1]["exempted"] is False
+    assert updated["stubs"][1]["matched_exemptions"] == []
+    assert updated["contested_exemptions"] == contested
+    assert len(exemptions["invalid"]) == (0 if reason and decided_by else 1)
+
+    if exempted:
+        check["payload"]["models"][0]["findings"] = findings[:1]
+        updated = cu._apply_stub_exemptions(check, exemptions)
+        assert updated["status"] == cu.STATUS_PASS
+        assert updated["native_status"] == "STUBS" and updated["native_exit"] == 1
 
 
 def test_native_gate_skipped_is_not_a_pass(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -6131,11 +6182,36 @@ def test_r2_only_one_owned_workbook_target_can_complete(
     assert r2_gate_runtime == []
 
 
-def test_scratch_cleanup_keeps_a_parent_another_run_still_uses(tmp_path: Path) -> None:
-    """Concurrent units share the scratch parent; removing one run's dir must not fail or take a sibling's."""
-    mine, sibling = tmp_path / "scratch" / "mine", tmp_path / "scratch" / "sibling"
-    mine.mkdir(parents=True)
-    sibling.mkdir()
+def test_scratch_cleanup_keeps_a_parent_another_run_still_uses(tmp_path: Path, monkeypatch) -> None:
+    """Same-target overlapping invocations own distinct children, even when the shared parent becomes empty."""
+    monkeypatch.setattr(cu, "REPO_ROOT", tmp_path / "toolkit")
+    target = tmp_path / "package"
+    mine, sibling = cu._temp_json_dir(target), cu._temp_json_dir(target)
+    assert mine != sibling
+    assert mine.parent == sibling.parent == tmp_path / "toolkit" / "_scratch" / "check-unit"
+    assert not mine.is_relative_to(target)
     (mine / "gate.json").write_text("{}", encoding="utf-8")
+    (sibling / "gate.json").write_text('{"other": true}', encoding="utf-8")
     cu._remove_json_dir(mine)
     assert not mine.exists() and sibling.is_dir()
+    assert (sibling / "gate.json").read_text(encoding="utf-8") == '{"other": true}'
+    cu._remove_json_dir(sibling)
+    assert sibling.parent.is_dir()
+    assert list(sibling.parent.iterdir()) == []
+
+
+def test_scratch_refuses_package_containing_output_and_exposes_cleanup_failure(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(cu, "REPO_ROOT", tmp_path)
+    with pytest.raises(ValueError, match="outside the selected package"):
+        cu._temp_json_dir(tmp_path)
+    assert list(tmp_path.iterdir()) == []
+    child = cu._temp_json_dir(tmp_path / "package")
+    with monkeypatch.context() as patch:
+
+        def fail_cleanup(*_args, **_kwargs):
+            raise PermissionError("synthetic cleanup refusal")
+
+        patch.setattr(cu.shutil, "rmtree", fail_cleanup)
+        with pytest.raises(PermissionError, match="synthetic cleanup refusal"):
+            cu._remove_json_dir(child)
+    cu._remove_json_dir(child)
