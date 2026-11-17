@@ -843,7 +843,7 @@ def test_installed_help_and_syntax_before_binding(
                 flags.update({b"--runs-parent", b"--session-id"})
             if argv == ["status"]:
                 flags.add(b"--run")
-            if argv == ["check"]:
+            if not argv or argv == ["check"]:
                 flags.add(b"--scope")
             assert set(re.findall(rb"--[\w-]+", child.stdout)) == flags, "the installed flags are closed"
             if not unavailable:
