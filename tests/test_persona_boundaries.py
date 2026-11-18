@@ -44,9 +44,11 @@ PER_PERSONA = {
         "Task tool only, to dispatch S, R and V",
         "Route every repair, even a one-line one, to its owner.",
         "Only `python scripts\\check_unit.py <package> --scope all --receipt-sha256 <H>` establishes COMPLETE.",
+        "retry the exact originating command and arguments",
     ),
     "dry-run-operator": (
         "stop for a human, even in autopilot",
+        "retry the exact originating command and arguments",
         "Never publish.",
     ),
     "pbi-report-builder": (
@@ -79,6 +81,11 @@ CASES = [(name, needle) for name in PER_PERSONA for needle in (*SHARED, *PER_PER
 @pytest.mark.parametrize(("name", "needle"), CASES)
 def test_persona_keeps_its_boundary_sentence(name: str, needle: str) -> None:
     assert _flat(needle) in _flat(_read(name)), f"{name} lost: {needle}"
+
+
+@pytest.mark.parametrize("name", NAMES)
+def test_persona_keeps_its_role_lead(name: str) -> None:
+    assert "**Role.** You " in _read(name), f"{name} lost its **Role.** lead"
 
 
 def test_validator_can_view_but_has_no_write_tool() -> None:

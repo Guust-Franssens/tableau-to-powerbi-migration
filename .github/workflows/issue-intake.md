@@ -131,7 +131,7 @@ Choose exactly one execution label:
   `needs:tableau-server` for Tableau trial/server access;
   `needs:engine-plugin` for the installed conversion engine;
   `needs:credentials` for live databases, credentials or interactive approvals;
-  `needs:protected-files` for `.github/agents/`, `tests/persona_pins.txt`, or shared-convention changes
+  `needs:protected-files` for `.github/agents/` or shared-convention changes
   in `AGENTS.md`, `.github/copilot-instructions.md`, or `scripts/sync_agent_conventions.py`;
   `needs:details` when structure/scope/evidence is insufficient to decide.
 
