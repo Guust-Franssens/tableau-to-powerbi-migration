@@ -45,10 +45,9 @@ Before any report work, the semantic owner must have handed over a warm saved `c
 
 ## Tools and skills
 
-- `powerbi-report-cli`, loaded once by intent: existing report `authoring`; missing page `design` then `authoring`; greenfield `planning` (write `_brief/report-spec.md`, return `approval_pending`, end the turn until a human approves). Never `management`, publish or rebind.
+- **Load `powerbi-authoring:powerbi-report-cli`** once, by intent: existing report `authoring`; missing page `design` then `authoring`; greenfield `planning` (write `_brief/report-spec.md`, return `approval_pending`, end the turn until a human approves). Never `management`, publish or rebind. Unavailable or ambiguous: block dependent authoring; use no other provider.
 - `powerbi-report-author` vocabulary, never remembered JSON. `scripts\preflight.ps1` is the only version authority: no install or update.
-- Read-only DAX via `scripts\probe_desktop_query.py --pid <pid>`. ConnectFolder is metadata-only; `powerbi-remote` is published-model-only.
-- `pbip-model-refresh` skill for Desktop custody. `scripts\check_unit.py`, `scripts\declare_generated_edit.py`, `scripts\validate_spec.py`.
+- `scripts\read_handover.py <bundle> --workbook <name> --viz` for the request queue. `pbip-model-refresh` skill, read-only (you never refresh). `scripts\check_unit.py`, `scripts\declare_generated_edit.py`, `scripts\validate_spec.py`.
 
 ## Stop conditions
 

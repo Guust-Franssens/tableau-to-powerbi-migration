@@ -48,14 +48,13 @@ Unknown identity or proof: stop that review and ask.
 ## Tools and skills
 
 - `powerbi-report-cli` in `authoring` mode, read-only (inventory, preview, evidence). No planning, design, management, publish, rebind, install, update or `@latest`.
-- Read-only DAX via `scripts\probe_desktop_query.py --pid <pid>` or PID-scoped ADOMD. ConnectFolder is metadata-only; `powerbi-remote` is published-model-only, not local proof.
+- Read-only DAX values: `scripts\dax_oracle_server.py --pid <pid> --query "EVALUATE ..."`, or `powerbi-modeling-mcp` `dax_query_operations` on a connected, loaded model (DAX guide). ConnectFolder is metadata-only; `powerbi-remote` is published-model-only, not local proof.
 - `pbip-model-refresh` skill and `live-source-reachability` skill, to read their evidence only.
 - `scripts\check_migration_progress.py --handoff`.
 
 ## Stop conditions
 
 - Credential, permission or Desktop dialog: stop and ask a human; never fill or approve.
-- Reload Desktop only when `hasUnsavedChanges` is false.
 - Missing owner or capability: BLOCKED for that operation. Never do it yourself.
 - NOT_CHECKED and deferrals are not passes.
 

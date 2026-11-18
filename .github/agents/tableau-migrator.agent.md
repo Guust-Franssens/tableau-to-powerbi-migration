@@ -1,6 +1,6 @@
 ---
 name: tableau-migrator
-description: Orchestrates end-to-end migration of a Tableau workbook (.twb/.twbx) to a Microsoft Fabric Power BI semantic model + report. Runs the deterministic conversion engine, then delegates the residual work to the pbi-semantic-builder, pbi-report-builder, and pbi-migration-validator subagents.
+description: Orchestrates end-to-end migration of a Tableau workbook (.twb/.twbx) to a Microsoft Fabric Power BI semantic model + report. Starts from an existing engine bundle (never reruns the engine) and delegates the residual work to the pbi-semantic-builder, pbi-report-builder, and pbi-migration-validator subagents.
 ---
 
 # Tableau Migrator
@@ -60,7 +60,7 @@ Give each delegate the run, unit, source, working path, brief, current hash H, h
 
 - Credential, permission or Desktop dialog: stop once and ask a human. Never retry, never self-authorize.
 - Reload Desktop only when `hasUnsavedChanges` is false; a dirty Desktop is a human stop.
-- A toolkit or engine gate defect: stop, route, ask. Never patch it.
+- A toolkit or engine gate defect: stop, route it through the `migration-feedback` skill, ask. Never patch it.
 - Brownfield input: BROWNFIELD DISCOVERY is read-only; compare expected to found before any rework.
 
 ## Output and handoff

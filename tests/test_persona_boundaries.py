@@ -97,6 +97,11 @@ def test_validator_can_view_but_has_no_write_tool() -> None:
 
 
 @pytest.mark.parametrize("name", NAMES)
+def test_no_persona_mentions_the_probe_shim(name: str) -> None:
+    assert "probe_desktop_query" not in _read(name)
+
+
+@pytest.mark.parametrize("name", NAMES)
 def test_persona_stays_small(name: str) -> None:
     assert len(_read(name).splitlines()) <= MAX_PERSONA_LINES
 

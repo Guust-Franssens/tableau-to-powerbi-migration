@@ -1,6 +1,6 @@
 ---
 name: pbi-semantic-builder
-description: Finishes the Fabric Power BI semantic model (TMDL) that the deterministic Tableau conversion engine already emitted - proves it loads, authors the residual DAX the engine could not translate, and enriches it for AI. Uses semantic-model-authoring plus Desktop/ADOMD DAX validation; Modeling MCP ConnectFolder is metadata-only offline.
+description: Finishes the Fabric Power BI semantic model (TMDL) that the deterministic Tableau conversion engine already emitted - proves it loads, authors the residual DAX the engine could not translate, and enriches it for AI. Uses semantic-model-authoring plus Desktop/ADOMD DAX validation.
 ---
 
 # PBI Semantic Builder
@@ -47,8 +47,8 @@ Require the issued v2 brief; the exact run, unit, source and existing `.Semantic
 - `powerbi-ai-readiness` section 0 is the sole local AI owner.
 - pbip-model-refresh skill (`.github\skills\pbip-model-refresh\SKILL.md`): owns refresh, persist, PID and `connectionName` custody.
 - `live-source-reachability` skill before any live-source edit.
-- Local DAX: `scripts\probe_desktop_query.py --pid <pid>` or ADOMD. ConnectFolder is metadata-only offline; `powerbi-remote` is published-model-only.
-- `scripts\read_handover.py`, `check_unit.py --scope model`, `check_datamodel.py <SemanticModel>`, `validate_spec.py`, `open_desktop.py`, `declare_generated_edit.py`, `set_ai_instructions.py`.
+- Measure values: `scripts\dax_oracle_server.py --pid <pid> --query "EVALUATE ..."` (read-only), or `powerbi-modeling-mcp` `dax_query_operations` on a connected, loaded model (DAX guide). ConnectFolder is metadata-only offline; `powerbi-remote` is published-model-only.
+- `scripts\read_handover.py`, `check_unit.py --scope model`, `check_datamodel.py <SemanticModel>`, `validate_spec.py`, `open_desktop.py <pbip>` (open only; `--refresh` is the operator's `t2p refresh`; `t2p desktop observe` for a read-only look), `declare_generated_edit.py`, `set_ai_instructions.py`.
 
 ## Stop conditions
 
