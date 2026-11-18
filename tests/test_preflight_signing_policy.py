@@ -18,8 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 ORIGINS = {
     "AGENTS.md": (("-Update", "-CheckUpstream"),),
     ".github/copilot-instructions.md": (("-Update", "-CheckUpstream"),),
-    "README.md": ((), ()),
-    "docs/operator-runbook.md": (("-Update", "-CheckUpstream"),),
+    "docs/operator-runbook.md": ((), ("-Update", "-CheckUpstream")),
     "docs/start-with-one-workbook.md": (("-Update",),),
     "scripts/README.md": (("-Update", "-CheckUpstream"),),
     ".github/agents/tableau-migrator.agent.md": ((),),

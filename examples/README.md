@@ -35,6 +35,29 @@ original dashboards belongs to their respective Tableau Public authors; follow e
 > Screenshots are committed under `examples/<slug>/reference/` (`tableau-*` = source reference,
 > `powerbi-*` = the Power BI Desktop render). The [showcase](../docs/showcase/README.md) features the render-verified pairs.
 
+## Try an example
+
+Start with `examples/eea-urban-adaptation/`. You can open its generated PBIP project in Power BI
+Desktop to inspect the model/report structure without live data. To refresh with data, download
+the original workbook from its source link above and follow the
+[manual guide's parse/extract workflow](../docs/start-with-one-workbook.md).
+Set the `DataFolder` Power Query parameter (Transform data → Manage Parameters) to your local
+`examples/eea-urban-adaptation/data/` folder. It ships with a placeholder because M parameters
+cannot be relative to the project file; [`set_data_folder.py`](../scripts/set_data_folder.py)
+can set it for you.
+
+To avoid downloading every example, use a blobless sparse clone and select one:
+
+```powershell
+git clone --filter=blob:none --sparse https://github.com/Guust-Franssens/tableau-to-powerbi-migration.git
+cd tableau-to-powerbi-migration
+git sparse-checkout set .github .vscode docs scripts tests migrations
+git sparse-checkout add examples/eea-urban-adaptation
+```
+
+Then continue with [operator setup](../docs/operator-runbook.md#start-here), starting at `uv venv`
+in that checkout rather than cloning again.
+
 ## Agent evidence files
 
 These nested Markdown files carry example-specific dispositions, relationships, AI instructions, or report plans. Use this table after choosing an example above.

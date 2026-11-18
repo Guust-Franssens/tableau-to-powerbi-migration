@@ -273,7 +273,7 @@ a single pass does.
   `fast-fashion-impact` all produce a semantic model and report, but their Power BI Desktop render
   verification is still pending, so they are marked built-but-not-yet-render-verified.
   (`wind-energy-utilization` IS render-verified - its committed before/after pair is
-  `docs/showcase/assets/wind-energy-utilization-1.png` - and the README lists it as such.)
+  `docs/showcase/assets/wind-energy-utilization-1.png`, also listed in the [showcase](showcase/README.md#nl-wind-energy-utilization).)
 - **Extract-based data sources with no live upstream** migrate structurally, but real row data requires
   the separate `.hyper` extraction step (or repointing to a true upstream if one exists behind the
   extract).

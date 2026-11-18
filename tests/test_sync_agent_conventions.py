@@ -378,7 +378,7 @@ def test_no_near_cap_warning_when_nothing_is_in_the_band(tmp_path: Path, caplog)
 AGENTS_MD = REPO_ROOT / "AGENTS.md"
 AGENT_OPS_MD = REPO_ROOT / "docs" / "agent-operations.md"
 OPERATOR_RUNBOOK_MD = REPO_ROOT / "docs" / "operator-runbook.md"
-README_MD = REPO_ROOT / "README.md"
+MIGRATION_PHASES_MD = REPO_ROOT / "docs" / "migration-phases.md"
 CONTRIBUTING_MD = REPO_ROOT / "CONTRIBUTING.md"
 DRY_RUN_OPERATOR_MD = REPO_ROOT / ".github" / "agents" / "dry-run-operator.agent.md"
 ORACLE_SCRIPT = REPO_ROOT / "scripts" / "capture_tableau_oracle.py"
@@ -487,12 +487,12 @@ ROOT_CONTRACTS: dict[str, tuple[Path, tuple[str, ...]]] = {
             "Nested `packages/<batch>/<Unit>/` layouts remain readable for compatibility",
         ),
     ),
-    "flat-package-layout-readme": (
-        README_MD,
+    "flat-package-layout-phases": (
+        MIGRATION_PHASES_MD,
         (
-            "├── packages/<Unit>/",
-            "**2. Package for the agent** → `_runs/<NNN>-<slug>/packages/<Unit>/`",
-            "`packages/<batch>/<Unit>/` remains supported for compatibility, not as the default",
+            "`--out` directly targets `_runs/<NNN>-<slug>/packages`",
+            "(flat layout, creating `packages/<Unit>/`)",
+            "Optional nested batch folders (`packages/<batch>/<Unit>/`) remain supported for compatibility.",
         ),
     ),
     # Run 409 (#479): a repo-local run whose bundle path already overshoots Desktop's UTF-16
@@ -547,8 +547,8 @@ ROOT_CONTRACTS: dict[str, tuple[Path, tuple[str, ...]]] = {
 
 OBSOLETE_PACKAGE_DEFAULTS: tuple[tuple[Path, str], ...] = (
     (OPERATOR_RUNBOOK_MD, "one subdirectory per packaging batch"),
-    (README_MD, "├── packages/<batch>/<Unit>/"),
-    (README_MD, "**2. Package for the agent** → `_runs/<NNN>-<slug>/packages/<batch>/<Unit>/`"),
+    (MIGRATION_PHASES_MD, "├── packages/<batch>/<Unit>/"),
+    (MIGRATION_PHASES_MD, r"--out _runs\<NNN>-<slug>\packages\<batch>"),
 )
 
 #: The stage-1 command run 409 was executed with: an unconditional in-repo `allocate_run()`, which

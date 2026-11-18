@@ -143,12 +143,12 @@ Python tooling uses [`uv`](https://github.com/astral-sh/uv) (never bare `pip`/`v
 
 ```bash
 uv venv
-uv sync                      # install parser + tooling deps from pyproject.toml
+uv sync --all-extras          # install parser, extraction and tooling dependencies
 ```
 
 Run contributor commands from this checkout. This default editable development environment is for
 direct `python -B scripts\t2p.py` calls, not the regular-installed operator contract in the
-[Quickstart](README.md#quickstart). `uv run` can automatically resync back to editable; `--no-sync`
+[operator setup](docs/operator-runbook.md#start-here). `uv run` can automatically resync back to editable; `--no-sync`
 only suppresses syncing and does **not** select a previously chosen environment from another cwd.
 For operator commands use that environment's absolute `t2p` executable/Python, or activate it first.
 Use `uv sync --all-extras --no-editable` in the selected checkout for its operator `.venv`.
@@ -196,10 +196,14 @@ No cache producer, profile exemption, real user setting or causal/global-zero-wr
 After editing any `.py`/`.ipynb`, run the ritual on the changed file(s) before opening a PR:
 
 ```bash
-ruff format <path>           # format
-ruff check <path> --fix      # lint + autofix
-pylint <path>                # must meet fail-under = 10 (config in pyproject.toml)
+uv run ruff format <path>           # format
+uv run ruff check <path> --fix      # lint + autofix
+uv run pylint <path>                # must meet fail-under = 10 (config in pyproject.toml)
 ```
+
+Use `uv run` so these commands see the project's dependencies: `uv sync` populates `.venv`
+but does not activate the parent shell. The full gate list lives in
+[CI](.github/workflows/checks.yml); the local commands here are not the whole workflow.
 
 - Python 3.11+, PEP 604 unions (`int | None`, not `Optional[int]`), `pathlib`, f-strings, `logging`,
   `argparse`. Every script in `scripts/` starts with a `purpose:` / `usage:` header docstring.
@@ -218,12 +222,12 @@ promoted to a global skill location) — splitting it across `scripts/` and `tes
 "just copy it" claim untrue. Same conventions apply inside the bundle (`purpose:`/`usage:` headers,
 10.00/10 pylint), and the same commands, with the extra paths:
 ```bash
-ruff format --check conftest.py scripts tests .github/skills
-ruff check conftest.py scripts tests .github/skills
-pylint scripts                                          # one invocation PER bundle, never combined:
-pylint .github/skills/pbip-model-refresh/scripts        # a shim and its bundled script share a
-pylint .github/skills/powerbi-ai-readiness/scripts      # module name, so a combined run resolves
-pylint conftest.py                                      # the import to the shim (false E0611)
+uv run ruff format --check conftest.py scripts tests .github/skills
+uv run ruff check conftest.py scripts tests .github/skills
+uv run pylint scripts                                          # one invocation PER bundle, never combined:
+uv run pylint .github/skills/pbip-model-refresh/scripts        # a shim and its bundled script share a
+uv run pylint .github/skills/powerbi-ai-readiness/scripts      # module name, so a combined run resolves
+uv run pylint conftest.py                                      # the import to the shim (false E0611)
 ```
 
 **A bundle need not ship code at all.** `powerbi-report-gotchas` and `powerbi-semantic-model-gotchas`

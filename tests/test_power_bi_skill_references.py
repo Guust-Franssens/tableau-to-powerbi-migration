@@ -105,7 +105,7 @@ def test_current_modes_and_approval_stop() -> None:
     """Existing repair is direct; greenfield cannot silently become a build."""
     builder = " ".join(_persona(PERSONAS[0]).replace("**", "").split())
     validator = " ".join(_persona(PERSONAS[1]).replace("**", "").split())
-    for text in (builder, validator, _text("README.md")):
+    for text in (builder, validator, _text("docs/operator-runbook.md")):
         assert "powerbi-report-cli" in text
     assert "existing → `authoring`" in builder, "existing-report authoring"
     assert "missing page → `design` then `authoring`" in builder, "missing-page design then authoring"
