@@ -562,6 +562,10 @@ def test_doctor_child_cannot_create_pycache(monkeypatch, tmp_path, capsys):
         ["desktop", "observe", "--pid", "7", "model.pbip"],
         ["desktop", "observe", "model.pbip", "--process-start", "5"],
         ["desktop", "observe", "model.pbip", "other.pbip"],
+        ["check", "--scope", "model"],
+        ["check", "package", "--scope", "report"],
+        ["check", "package", "--scope", "integration"],
+        ["check", "package", "--scope", "model", "--repair"],
     ],
 )
 def test_closed_surface_and_safe_syntax(argv, capsys):
@@ -817,7 +821,7 @@ def test_status_rejects_relative_without_scan(capsys):
     assert result["run_location"] is None
 
 
-@pytest.mark.parametrize("command", ["doctor", "start", "assess", "status", "refresh", "desktop"])
+@pytest.mark.parametrize("command", ["doctor", "start", "assess", "status", "refresh", "desktop", "check"])
 def test_explicit_branch_reaches_owner(monkeypatch, capsys, command):
     calls = []
 
@@ -834,10 +838,365 @@ def test_explicit_branch_reaches_owner(monkeypatch, capsys, command):
         "status": ["--run", "relative"],
         "refresh": ["model.pbip"],
         "desktop": ["observe", "--pid", "7"],
+        "check": ["package", "--scope", "model"],
     }
     t2p.main([command, *arguments[command], "--json"])
     _json(capsys)
     assert calls == [command], "explicit command branch must reach its owning operation"
+
+
+def _model_result(code: int) -> dict:
+    status = {0: "AUTOMATED_CHECKS_PASS", 1: "FINDINGS", 2: "NOT_CHECKED", 4: "PRECONDITION_FAILED"}[code]
+    return {
+        "version": 1,
+        "scope": "model",
+        "target": "synthetic package",
+        "exit_code": code,
+        "status": status,
+        "omitted_checks": ["pbir-valid"],
+        "exemptions": {"path": None, "accepted": 0, "invalid": 0},
+        "checks": [
+            {
+                "id": "ai-instructions",
+                "status": "PASS" if code == 0 else status,
+                "native_status": "OK" if code == 0 else "SKIPPED",
+                "native_exit": code,
+                "detail": "synthetic evidence retained",
+                "next_action": "owner-owned action",
+            }
+        ],
+        "brownfield": {},
+    }
+
+
+@pytest.mark.parametrize("code", [0, 1, 2, 4, 64])
+def test_model_check_transports_native_result_and_lexical_path(monkeypatch, tmp_path, capfd, code):
+    import check_unit
+
+    toolkit, package = tmp_path / "toolkit", tmp_path / "package"
+    package.mkdir()
+    (package / "nested").mkdir()
+    lexical_target = package / "nested" / ".."
+    (package / "pinned").write_bytes(b"do not change")
+    monkeypatch.setattr(t2p, "ROOT", toolkit)
+    monkeypatch.setattr(check_unit, "REPO_ROOT", toolkit)
+    monkeypatch.chdir(tmp_path)
+    before = _snapshot(package)
+    outputs = []
+    native = _model_result(code) if code != 64 else None
+
+    def child(argv, **kwargs):
+        assert argv[:4] == [sys.executable, "-B", str(toolkit / "scripts" / "check_unit.py"), str(lexical_target)]
+        assert argv[4:7] == ["--scope", "model", "--json"] and argv[8:] == ["--quiet"]
+        assert kwargs == {"check": False}
+        output = Path(argv[7])
+        assert not output.is_relative_to(package) and output.parent.is_dir()
+        outputs.append(output)
+        if native is not None:
+            output.write_text(json.dumps(native), encoding="utf-8")
+        os.write(1, b"private owner stdout\n")
+        os.write(2, b"private owner stderr\n")
+        return subprocess.CompletedProcess(argv, code)
+
+    monkeypatch.setattr(t2p.subprocess, "run", child)
+    assert t2p.main(["check", str(Path("package") / "nested" / ".."), "--scope", "model", "--json"]) == code
+    result, captured = _json(capfd)
+    assert result["checks"] == [] and result["authority"] == "check_unit.py"
+    assert result["delegated_exit_code"] == code
+    assert result["status"] == {0: "ok", 1: "findings", 2: "cannot_establish"}.get(code, "error")
+    assert result.get("unit_check") == native
+    assert "private owner stdout" in captured.err and "private owner stderr" in captured.err
+    assert "private owner" not in captured.out
+    assert len(outputs) == 1 and not outputs[0].parent.exists()
+    assert outputs[0].parent.parent.is_dir()
+    assert _snapshot(package) == before
+    assert "data_persistence" in result["proof_boundary"]["not_established"]
+    assert any("not START_READY" in item for item in result["limitations"])
+    if code == 64:
+        assert result["status"] == "error" and "owner_result_unavailable" in result["limitations"]
+
+
+def test_check_defaults_to_all_and_renders_native_layers(monkeypatch, tmp_path, capfd):
+    import check_unit
+
+    monkeypatch.setattr(check_unit, "REPO_ROOT", tmp_path / "toolkit")
+    native = {
+        **_model_result(1),
+        "scope": "all",
+        "omitted_checks": [],
+        "checks": [
+            {"id": "ai-instructions", "status": "PASS", "native_status": "OK", "detail": "model evidence"},
+            {"id": "pbir-valid", "status": "FINDINGS", "native_status": "FAILED", "detail": "report evidence"},
+            {
+                "id": "field-bindings",
+                "status": "PASS",
+                "native_status": "OK",
+                "detail": "integration evidence",
+            },
+            {
+                "id": "finalized",
+                "status": "NOT_CHECKED",
+                "native_status": "RECEIPT",
+                "detail": "receipt required",
+            },
+        ],
+    }
+    seen = []
+
+    def child(argv, **_kwargs):
+        seen.append(argv)
+        output = Path(argv[argv.index("--json") + 1])
+        output.write_text(json.dumps(native), encoding="utf-8")
+        return subprocess.CompletedProcess(argv, 1)
+
+    monkeypatch.setattr(t2p.subprocess, "run", child)
+    assert t2p.main(["check", str(tmp_path / "package")]) == 1
+    output = capfd.readouterr()
+    assert "MODEL SECTION: PASS" in output.out
+    assert "REPORT SECTION: FINDINGS" in output.out
+    assert "INTEGRATION SECTION: PASS" in output.out
+    assert "COMPLETION SECTION: NOT_CHECKED" in output.out
+    assert "All-layer automated checks" in output.out
+    assert seen[0][seen[0].index("--scope") + 1] == "all"
+    assert t2p.main(["check", str(tmp_path / "package"), "--json"]) == 1
+    result, captured = _json(capfd)
+    assert captured.err == ""
+    assert result["unit_check"] == native
+    assert result["limitations"] == [t2p.ALL_CHECK_DISCLAIMER]
+
+
+@pytest.mark.parametrize(
+    "damage", ["missing", "malformed", "unreadable", "encoding", "empty", "no-checks", "exit", "scope", "status", "row"]
+)
+@pytest.mark.parametrize("code", [0, 7])
+def test_model_check_unavailable_result_never_returns_empty_success(monkeypatch, tmp_path, capfd, damage, code):
+    import check_unit
+
+    monkeypatch.setattr(check_unit, "REPO_ROOT", tmp_path / "toolkit")
+    paths = []
+
+    def child(argv, **_kwargs):
+        output = Path(argv[argv.index("--json") + 1])
+        paths.append(output)
+        native = _model_result(0)
+        if damage == "missing":
+            pass
+        elif damage == "unreadable":
+            output.mkdir()
+        elif damage in {"malformed", "encoding"}:
+            output.write_bytes(b"{" if damage == "malformed" else b"\xff")
+        else:
+            if damage == "empty":
+                native = {}
+            elif damage == "no-checks":
+                native["checks"] = []
+            elif damage == "exit":
+                native["exit_code"] = 2
+            elif damage == "scope":
+                native["scope"] = "all"
+            elif damage == "status":
+                native["status"] = "COMPLETE"
+            elif damage == "row":
+                native["checks"][0]["status"] = "NOT_CHECKED"
+            output.write_text(json.dumps(native), encoding="utf-8")
+        return subprocess.CompletedProcess(argv, code)
+
+    monkeypatch.setattr(t2p.subprocess, "run", child)
+    assert t2p.main(["check", str(tmp_path / "package"), "--scope", "model", "--json"]) == (code or 1)
+    result, _ = _json(capfd)
+    assert result["status"] == "error" and result["delegated_exit_code"] == code
+    assert "owner_result_unavailable" in result["limitations"] and "unit_check" not in result
+    assert len(paths) == 1 and not paths[0].parent.exists()
+
+
+def test_model_check_launch_failure_cleans_private_output(monkeypatch, tmp_path, capfd):
+    import check_unit
+
+    monkeypatch.setattr(check_unit, "REPO_ROOT", tmp_path / "toolkit")
+    paths = []
+
+    def child(argv, **_kwargs):
+        paths.append(Path(argv[argv.index("--json") + 1]))
+        raise OSError("synthetic launch failure")
+
+    monkeypatch.setattr(t2p.subprocess, "run", child)
+    assert t2p.main(["check", str(tmp_path / "package"), "--scope", "model"]) == 1
+    captured = capfd.readouterr()
+    assert "result unavailable" in captured.out and "no successful check was established" in captured.out
+    assert "SUMMARY:" not in captured.out
+    assert len(paths) == 1 and not paths[0].parent.exists()
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "clean",
+        "descriptions",
+        "categorical",
+        "ai-missing",
+        "qna-disabled",
+        "culture-unlinked",
+        "stub",
+        "stub-exempted",
+        "stub-invalid",
+    ],
+)
+def test_model_check_real_owner_preserves_model_evidence(tmp_path, capfd, damage):
+    from test_check_unit import _freshen_clean_fixture_cache
+    import check_unit
+
+    package = tmp_path / "package"
+    shutil.copytree(REPO_ROOT / "tests" / "fixtures" / "check-unit-clean-integration", package)
+    model = package / "pbip" / "Book" / "Book.SemanticModel"
+    table = model / "definition" / "tables" / "Sales.tmdl"
+    if damage == "descriptions":
+        table.write_text(
+            "\n".join(line for line in table.read_text().splitlines() if not line.strip().startswith("///")),
+            encoding="utf-8",
+        )
+    elif damage == "categorical":
+        with table.open("a", encoding="utf-8") as output:
+            output.write("\n\t/// Sales region.\n\tcolumn Region\n\t\tdataType: string\n\t\tsummarizeBy: none\n")
+    elif damage == "ai-missing":
+        (model / "definition" / "cultures" / "en-US.tmdl").unlink()
+    elif damage == "qna-disabled":
+        (model / "definition.pbism").write_text('{"settings":{"qnaEnabled":false}}', encoding="utf-8")
+    elif damage == "culture-unlinked":
+        path = model / "definition" / "model.tmdl"
+        path.write_text(path.read_text().replace("ref cultureInfo en-US", ""), encoding="utf-8")
+    elif damage.startswith("stub"):
+        table.write_text(table.read_text().replace("SUM(Sales[Amount])", "BLANK()"), encoding="utf-8")
+        if damage != "stub":
+            (package / "unit-check-exemptions.json").write_text(
+                json.dumps(
+                    {
+                        "exemptions": [
+                            {
+                                "check": "stub-measures",
+                                "item": "measure:Sales[Total Revenue]",
+                                "reason": "synthetic accepted limitation",
+                                "decided_by": "reviewer" if damage == "stub-exempted" else "",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+    _freshen_clean_fixture_cache(package)
+    before = _snapshot(package)
+    expected = 2 if damage in {"clean", "stub-exempted", "culture-unlinked"} else 1
+    assert t2p.main(["check", str(package), "--scope", "model", "--json"]) == expected
+    result, captured = _json(capfd)
+    assert captured.err == ""
+    native = result["unit_check"]
+    assert native["exit_code"] == result["delegated_exit_code"] == expected
+    checks = {row["id"]: row for row in native["checks"]}
+    assert checks["connection-fidelity"]["native_status"] == "SKIPPED"
+    assert checks["connection-fidelity"]["status"] == "NOT_CHECKED", "fixture cannot establish connection attribution"
+    assert checks["cache-freshness"]["verification"] == "PARTIAL"
+    assert checks["cache-freshness"]["models"][0]["status"] == "FRESH_BY_MTIME"
+    counts = checks["ai-descriptions"]["models"][0]["counts"]
+    assert counts == {
+        kind: {
+            "total": 2 if damage == "categorical" and kind == "column" else 1,
+            "described": 0 if damage == "descriptions" else 2 if damage == "categorical" and kind == "column" else 1,
+        }
+        for kind in ("table", "column", "measure")
+    }
+    if damage == "categorical":
+        assert checks["ai-descriptions"]["models"][0]["categorical_gaps"] == ["Sales[Region]"]
+    if damage in {"ai-missing", "qna-disabled"}:
+        assert checks["ai-instructions"]["status"] == "FINDINGS"
+    if damage == "culture-unlinked":
+        assert "ref cultureInfo" not in (model / "definition" / "model.tmdl").read_text()
+        assert checks["ai-instructions"]["status"] == "PASS", "native owner does not yet test culture linkage"
+    if damage.startswith("stub"):
+        stub_check = checks["stub-measures"]
+        assert stub_check["native_status"] == "STUBS"
+        stub = stub_check["stubs"][0]
+        assert stub["exempted"] == (damage == "stub-exempted")
+        assert stub["canonical"] == "measure:Sales[Total Revenue]"
+        assert bool(stub["matched_exemptions"]) == (damage == "stub-exempted")
+    human = check_unit.render(native)
+    assert "PARTIAL: cache presence/mtime only" in human
+    assert "table: " in human and "column: " in human and "measure: " in human
+    diagnostics = checks["ai-instructions"]["models"][0]
+    assert diagnostics["stdout"] or diagnostics["stderr"]
+    assert all(not diagnostics[key] or diagnostics[key] in human for key in ("stdout", "stderr"))
+    assert _snapshot(package) == before
+    if damage == "clean":
+        assert t2p.main(["check", str(package), "--scope", "model"]) == expected
+        output = capfd.readouterr()
+        assert output.out.startswith(human) and output.err == ""
+        assert t2p.MODEL_CHECK_DISCLAIMER in output.out
+        assert _snapshot(package) == before
+
+
+@pytest.mark.parametrize("target_kind", ["missing", "empty-model", "external"])
+def test_model_check_real_unknown_and_external_states(tmp_path, capfd, target_kind):
+    target = tmp_path / "missing"
+    if target_kind == "empty-model":
+        target = tmp_path / "Empty.SemanticModel"
+        target.mkdir()
+    elif target_kind == "external":
+        target = REPO_ROOT / "tests" / "fixtures" / "shared-datasource" / "external-resolves" / "workbooks" / "sales-wb"
+    expected = {"missing": 64, "empty-model": 1, "external": 2}[target_kind]
+    assert t2p.main(["check", str(target), "--scope", "model", "--json"]) == expected
+    result, captured = _json(capfd)
+    assert result["delegated_exit_code"] == expected
+    if target_kind == "missing":
+        assert "unit_check" not in result and "not a directory" in captured.err
+    else:
+        checks = {row["id"]: row for row in result["unit_check"]["checks"]}
+        assert checks["ai-descriptions"]["status"] == "NOT_CHECKED"
+        if target_kind == "external":
+            assert checks["ai-descriptions"]["verification"] == "EXTERNAL"
+        else:
+            assert checks["ai-descriptions"]["native_status"] == "SKIPPED"
+
+
+def test_model_check_alias_is_classified_by_native_owner(tmp_path, capfd):
+    from test_check_unit import _link_directory
+
+    package, alias = tmp_path / "package", tmp_path / "alias"
+    package.mkdir()
+    (package / "pinned").write_bytes(b"untouched destination")
+    before = _snapshot(package)
+    _link_directory(alias, package)
+    try:
+        assert t2p.main(["check", str(alias), "--scope", "model", "--json"]) == 2
+        result, captured = _json(capfd)
+        native = result["unit_check"]
+        assert native["target"] == "unclassified-target"
+        assert native["stopped_after"] == "package-boundary"
+        assert [row["id"] for row in native["checks"]] == ["package-boundary"]
+        assert native["checks"][0]["code"] == "target_root_reparse"
+        assert result["delegated_exit_code"] == 2 and result["status"] == "cannot_establish"
+        assert captured.err == ""
+        assert _snapshot(package) == before
+    finally:
+        if os.name == "nt":
+            alias.rmdir()
+        else:
+            alias.unlink()
+
+
+def test_model_check_containing_target_refuses_before_real_delegation(tmp_path, monkeypatch, capfd):
+    import check_unit
+
+    toolkit = tmp_path / "toolkit"
+    (toolkit / "scripts").mkdir(parents=True)
+    (toolkit / "pinned").write_bytes(b"untouched target")
+    monkeypatch.setattr(check_unit, "REPO_ROOT", toolkit)
+    before = _snapshot(toolkit)
+    entries = set(toolkit.rglob("*"))
+    code = t2p.main(["check", str(toolkit / "scripts" / ".."), "--scope", "model", "--json"])
+    assert set(toolkit.rglob("*")) == entries, "refusal must not create even empty scratch directories"
+    assert _snapshot(toolkit) == before
+    result, _ = _json(capfd)
+    assert code == 1 and result["status"] == "error"
+    assert result["delegated_exit_code"] is None and "unit_check" not in result
+    assert "owner_result_unavailable" in result["limitations"]
 
 
 def _fake_refresh_owner(root: Path, code: int) -> None:
@@ -2000,7 +2359,7 @@ def test_offline_help_output_journey(monkeypatch, tmp_path, capsys):
         t2p.main(["--help"])
     assert help_result.value.code == 0
     help_text = capsys.readouterr().out
-    assert "{doctor,start,assess,status,units,refresh,desktop}" in help_text
+    assert "{doctor,start,assess,status,units,refresh,desktop,check}" in help_text
     assert t2p.main(["doctor", "--json"]) == 0
     doctor_result, _ = _json(capsys)
     assert doctor_result["status"] == "READY_TO_ATTEMPT"

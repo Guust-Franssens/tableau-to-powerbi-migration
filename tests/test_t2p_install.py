@@ -53,6 +53,8 @@ SYNTAX = [
     ["doctor", "--show-values"],
     ["status"],
     ["status", "--run", "relative", "--repair"],
+    ["check", "package", "--scope", "report"],
+    ["check", "--scope", "model"],
 ]
 IMPORT_BLOCKER = {
     "id": "python_lxml",
@@ -601,30 +603,30 @@ def _source_module() -> ModuleType:
 
 def _assert_closed_help(stdout: bytes) -> None:
     choices = re.findall(rb"\{([^{}\r\n]+)\}", stdout)
-    assert choices == [b"doctor,start,assess,status,units,refresh,desktop"] * 2, (
+    assert choices == [b"doctor,start,assess,status,units,refresh,desktop,check"] * 2, (
         "closed help verb assertion: usage and positional choices must be exactly "
-        "doctor/start/assess/status/units/refresh/desktop"
+        "doctor/start/assess/status/units/refresh/desktop/check"
     )
 
 
 def test_source_closed_help_oracle_distinguishes_prose_and_verbs() -> None:
     """The finite command choices, not the word 'next' in prose, close the surface."""
     literal = (
-        b"usage: t2p [-h] {doctor,start,assess,status,units,refresh,desktop} ...\n"
-        b"positional arguments:\n  {doctor,start,assess,status,units,refresh,desktop}\n"
+        b"usage: t2p [-h] {doctor,start,assess,status,units,refresh,desktop,check} ...\n"
+        b"positional arguments:\n  {doctor,start,assess,status,units,refresh,desktop,check}\n"
         b"    status  Read-only inventory; no next action or readiness.\n"
     )
     _assert_closed_help(literal)
     _assert_closed_help(_source_module().build_parser("t2p").format_help().encode("ascii"))
     _assert_closed_help(literal.replace(b"no next action", b"no continuation"))
     for choices in (
-        b"doctor,start,assess,status,units,refresh,desktop,next",
-        b"doctor,start,assess,status,units,refresh",
+        b"doctor,start,assess,status,units,refresh,desktop,check,next",
+        b"doctor,start,assess,status,units,refresh,desktop",
         b"doctor,start,assess,next",
         b"doctor,start,status,units,refresh,desktop",
     ):
         with pytest.raises(AssertionError, match="closed help verb assertion"):
-            _assert_closed_help(literal.replace(b"doctor,start,assess,status,units,refresh,desktop", choices, 1))
+            _assert_closed_help(literal.replace(b"doctor,start,assess,status,units,refresh,desktop,check", choices, 1))
     with pytest.raises(AssertionError, match="closed help verb assertion"):
         _assert_closed_help(b"doctor start status; no next action\n")
 
@@ -702,7 +704,7 @@ def test_source_qualified_installation_guidance(capsys) -> None:
         assert "Do not switch checkouts/environments to pass." in text
 
 
-@pytest.mark.parametrize("argv", [[], ["doctor"], ["start"], ["assess"], ["status"]])
+@pytest.mark.parametrize("argv", [[], ["doctor"], ["start"], ["assess"], ["status"], ["check"]])
 def test_source_root_independent_help(argv: list[str], monkeypatch, capsys) -> None:
     """Offline source parsing controls; no installation is simulated."""
     module = _source_module()
@@ -823,7 +825,7 @@ def test_installed_help_and_syntax_before_binding(
         lab.toolkit.rename(moved)
     try:
         _write_state(lab)
-        for argv in ([], ["doctor"], ["start"], ["assess"], ["status"]):
+        for argv in ([], ["doctor"], ["start"], ["assess"], ["status"], ["check"]):
             env = {**lab.env, "PYTHONIOENCODING": "cp1252"}
             child = _invoke(lab, *argv, "--help", module=module, env=env)
             assert child.returncode == 0 and child.stderr == b""
@@ -840,7 +842,9 @@ def test_installed_help_and_syntax_before_binding(
                 flags.update({b"--runs-parent", b"--session-id"})
             if argv == ["status"]:
                 flags.add(b"--run")
-            assert set(re.findall(rb"--[\w-]+", child.stdout)) == flags, "the installed surface is exactly three verbs"
+            if not argv or argv == ["check"]:
+                flags.add(b"--scope")
+            assert set(re.findall(rb"--[\w-]+", child.stdout)) == flags, "the installed flags are closed"
             if not unavailable:
                 direct = _invoke(lab, *argv, "--help", direct=True, env=env)
                 assert direct.returncode == 0 and direct.stderr == b""

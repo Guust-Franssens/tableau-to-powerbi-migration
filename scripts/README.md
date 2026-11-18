@@ -1289,6 +1289,7 @@ t2p start --project <exact-name|LUID> [--env <path>] [--runs-parent <path>] [--s
 t2p status --run <absolute-local-run> [--json]
 t2p units {list | show <id> | find [--name <text>] [--luid <luid>]} [--runs-parent <path>] [--json]
 t2p refresh <pbip-or-folder> [--canaries <table> ...] [--no-save] [--json]
+t2p check <explicit-package-path> [--scope model] [--json]
 t2p desktop observe {--pid <pid> [--process-start <token>] | <pbip-or-folder>} [--json]
 t2p desktop collect {--pid <pid> --process-start <token> | <pbip-or-folder>} --out <private-file>
 ```
@@ -1327,6 +1328,7 @@ python -B scripts/t2p.py start --project <exact-name|LUID> [--env <path>] [--run
 python -B scripts/t2p.py status --run <absolute-local-run> [--json]
 python -B scripts/t2p.py units {list | show <id> | find [--name <text>] [--luid <luid>]} [--runs-parent <path>] [--json]
 python -B scripts/t2p.py refresh <pbip-or-folder> [--canaries <table> ...] [--no-save] [--json]
+python -B scripts/t2p.py check <explicit-package-path> [--scope model] [--json]
 python -B scripts/t2p.py desktop observe {--pid <pid> [--process-start <token>] | <pbip-or-folder>} [--json]
 ```
 
@@ -1476,6 +1478,46 @@ process-start token at once and prints `OPEN_DESKTOP: the .pbip is open in Deskt
 or an unreadable start token gives exit 2 with nothing observed or collected; give the PID instead. A file
 chosen through File > Open that failed to load is not found this way.
 
+### Layered unit checks (`t2p check`, #876)
+
+`t2p check <explicit-package-path> [--scope {all,model}] [--json]` delegates to `check_unit.py`.
+The path may be relative; its lexical alias is preserved for the owner's namespace admission.
+The default is `--scope all`: human output separates native MODEL, REPORT, INTEGRATION and
+COMPLETION sections. `--scope model` retains the original model-agent route and exits after its
+scoped automated checks. There is no unit-ID lookup or separate report/integration expansion.
+No repair, refresh, Desktop launch, receipt finalization or package write is performed.
+
+✅ The native owner reports table/column/measure description counts, categorical-domain gaps,
+strict AI instructions/culture/Q&A diagnostics, model structure/bindings/relationships, and stubs.
+⚠️ The current AI owner checks the default culture file but does not detect a missing
+`ref cultureInfo` in `model.tmdl`; its PASS does not establish culture linkage.
+Each detected stub retains its canonical identity and exempted flag; matched validated exemptions
+retain `item`, `reason` and `decided_by`. Native `STUBS` remains visible even when specific exemptions
+allow the selected check to pass. Invalid or ambiguous acknowledgements do not clear findings.
+External models stay deferred to their owning unit, not automatically followed and rechecked.
+
+Human output reuses native check details, grouped by owner layer for all-scope output. A layer PASS
+does not imply another layer passed or completion was established. The completion section is
+deliberately NOT_CHECKED without caller-pinned final-receipt evidence; this facade never supplies
+that receipt. JSON adds the **unmodified** native result as `unit_check`
+inside `t2p/v1`, not inside the configuration-only `checks[]`. Native statuses, evidence, reasons,
+omitted checks and `delegated_exit_code` survive. Native exits remain 0 (scoped automated pass),
+1 (findings), 2 (not checked), 4 (precondition failed), or 64 (missing ordinary directory).
+Missing, unreadable or incoherent owner JSON cannot produce success: a native nonzero exit is
+retained; native zero with unavailable results becomes facade exit 1. Child diagnostics go to stderr.
+Output is private, not sanitized for publication.
+
+✅ Both the owner and facade use unique invocation directories under the ignored toolkit
+`_scratch\check-unit`. Cleanup removes only that invocation's directory and keeps the shared parent,
+so overlapping same-target checks cannot delete each other's results. Targets containing that scratch
+location are refused rather than written into. Cleanup errors remain explicit failures.
+
+⚠️ **Model-only checks are not START_READY, visual/numeric fidelity, validated data persistence/cold
+reopen or Phase-2 COMPLETE.** Cache evidence is explicitly **PARTIAL**: presence/mtime does not prove
+loaded data or correctness. Description/instruction presence is not semantic quality, absence of
+detected stubs is not DAX correctness, and exemptions are accepted limitations, not repairs.
+`NOT_CHECKED`, `SKIPPED`, `ERROR` and `INCOMPLETE` are not silently upgraded to PASS or non-applicability.
+
 JSON stdout is one `t2p/v1` envelope, also for syntax/launch/interrupt failures. Common fields:
 `command`, `status`, `exit_code`, `authority`, `delegated_exit_code`, `stages`, `checks`, `evidence`,
 `artifacts`, `run_location`, `runs_root`, `path_report`, `limitations`, `proof_boundary`.
@@ -1496,7 +1538,8 @@ require a new version. General statuses are `ok|findings|cannot_establish|error|
 doctor uses `READY_TO_ATTEMPT|BLOCKED_CONFIG|CANNOT_ESTABLISH`.
 
 Only these explicit verbs exist (`doctor`, `start`, `assess`, `status`, read-only `units`, operator
-`refresh`, read-only `desktop observe`): no datasource/site/server selectors (`refresh` alone takes a local `.pbip` file or folder),
-`next`, router, state DB, credential, build, package, validation, promotion, deployment or dispatch command.
+`refresh`, read-only `desktop observe`, model-only `check`): no datasource/site/server selectors
+(`refresh` takes a local `.pbip` file or folder; `check` takes an explicit package path),
+`next`, router, state DB, credential, build, package, completion certification, promotion, deployment or dispatch command.
 Synthetic tests validate mechanics, not blind-run benefit. Installation adds the bounded onboarding
 form only; live blind run 2 remains deferred as an independent same-project/same-oracle acceptance step.
