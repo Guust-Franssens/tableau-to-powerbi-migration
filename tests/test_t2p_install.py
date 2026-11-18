@@ -677,7 +677,7 @@ def test_source_unavailable_preflight_environment_guidance(native: int, installe
 def test_source_readme_fallback_environment_context() -> None:
     """The absolute-executable journey must not imply activation of its parent shell."""
     text = (REPO_ROOT / "docs" / "operator-runbook.md").read_text(encoding="utf-8")
-    fallback = text.split("Session-start preflight remains separate", 1)[1].split("### Start one approved", 1)[0]
+    fallback = text.split("#### Doctor fallback\n", 1)[1].split("\n#### Preflight cannot start\n", 1)[0]
     assert "**activate the same selected environment**" in fallback
     assert "`(Get-Command python).Source` points to its selected Python" in fallback
     assert "does **not** activate the parent shell; preflight uses `python` from PATH" in fallback

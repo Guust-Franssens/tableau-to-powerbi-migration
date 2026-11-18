@@ -15,10 +15,7 @@ same pipeline with steps 1–4 skipped.
 
 ## Start here
 
-### Install and check the selected toolkit
-
-From a Windows PowerShell terminal, clone and install **this toolkit**, not a folder of Tableau
-inputs or migration outputs. For a smaller checkout, see the [sparse example route](../examples/README.md#try-an-example).
+Install this toolkit in Windows PowerShell ([prerequisites](#11-tooling)):
 
 ```powershell
 git clone https://github.com/Guust-Franssens/tableau-to-powerbi-migration.git
@@ -31,88 +28,27 @@ $t2p = Join-Path $toolkit '.venv\Scripts\t2p.exe'
 & $t2p doctor
 ```
 
-Keep using that environment's absolute executable, its absolute Python with `-B -m t2p`, or `t2p`
-after activating it. Default `uv sync`/`uv run` can reinstall editably; retain `--no-editable` for
-operator setup. The [installation reference](../scripts/README.md#narrow-t2ppy-pilot-refs-749--773)
-owns compatibility forms, path qualification, binding and reinstall limits.
+Resolve doctor blockers before continuing.
 
-Python installation does not install Desktop, Copilot, plugins, MCP servers, Node or native drivers.
-Resolve doctor's manual hints using [§1.1 Tooling](#11-tooling). Doctor runs plain preflight without
-updates or Tableau login. `READY_TO_ATTEMPT` establishes dependency presence, not authentication,
-source reachability, path safety, START_READY or completion.
-
-Session-start preflight remains separate under [AGENTS.md](../AGENTS.md). If doctor cannot establish
-the plain preflight cause, first **activate the same selected environment** in that private terminal
-and confirm `(Get-Command python).Source` points to its selected Python. Invoking the absolute
-`t2p.exe` above does **not** activate the parent shell; preflight uses `python` from PATH.
-Then, from the selected toolkit checkout, run the existing manual fallback:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\preflight.ps1
-```
-
-**Only after an actual unsigned/ExecutionPolicy startup refusal**, follow
-[preflight cannot start](#preflight-cannot-start).
-If recovery is allowed, retry the **exact originating command and arguments** (plain preflight);
-no policy pre-check.
-
-### Choose your input
-
-- **One local `.twb`/`.twbx` and screenshots, without Tableau Server/Cloud:** continue with the
-  [repository-manual single-workbook guide](start-with-one-workbook.md), not the live `start` command below.
-- **Local folders, `.tds`/`.tdsx`, or site-wide expert operations:** use this runbook's
-  [manual pipeline](#2-the-happy-path). These are not additional `t2p start` selectors.
-- **An approved live Tableau project:** use the project-specific sequence below.
-
-### Start one approved live project, then dispatch
-
-Use the approved exact project and real session attribution:
+For a local workbook, use the [single-workbook guide](start-with-one-workbook.md).
+For folders, datasources or whole-site expert operations, use the [manual pipeline](#2-the-happy-path).
+For an **approved live project**:
 
 ```powershell
 & $t2p start --project '<exact-name-or-LUID>' --session-id '<real-session-UUID>'
-# Use the absolute run printed by start; never discover or guess "latest".
 & $t2p status --run '<absolute-run>'
 ```
 
-Assessment stays site-wide, initial path scope is unknown until harvest, and `start` exit 0 is
-**capture-only**. It does not dispatch agents or finish a migration. After successful capture,
-continue through [AGENTS.md: Starting a migration](../AGENTS.md#starting-a-migration--the-dispatchers-job):
-one intake, an issued private v2 brief per unit, then task-tool `tableau-migrator` dispatch using
-the existing bundle/working paths. Final package-cohort **START_READY / 0** is required before
-builders or validators start. Independent Tableau comparison/sign-off is still required.
-`status` is a read-only local operator view, not readiness or completion evidence; its output can
-contain customer names and paths and is not publication-safe.
+Use the absolute run printed by `start`; assessment is site-wide and exit 0 means capture only.
+After successful capture, continue with the [agent handoff](../AGENTS.md#starting-a-migration--the-dispatchers-job):
+private briefs, START_READY / 0 before builders or validators, and independent Tableau sign-off.
+Keep status output private. Doctor checks tooling, not source access or migration readiness.
 
----
+[Installation details](../scripts/README.md#narrow-t2ppy-pilot-refs-749--773) ·
+[Doctor troubleshooting](#doctor-fallback).
 
-**Evidence convention used throughout:**
-
-| marker | means |
-|---|---|
-| ✅ **verified** | read out of the code, or reproduced against a local artifact, while writing this |
-| ⚠️ **reported** | measured in a previous run and recorded elsewhere; not re-checked here |
-| ❌ **not proven** | we do *not* have evidence for this — do not claim it to a customer |
-
-A ✅ is a promise that costs more than it looks: a *wrong* ✅ is worse than no marker, because it
-stops the reader checking. One was wrong in the first edition (§1.3a claimed a key was in
-`.env.example` that has never been there) and it broke the very first step for a cold operator. If
-you edit this file, re-read the code — do not carry a marker forward.
-
-**Where the numbers come from — read this before quoting one to a customer.** Every reference
-number below comes from **one** 38-workbook Tableau site:
-
-| what | when | engine | note |
-|---|---|---|---|
-| survey/assess/harvest/convert timings, `bound=23/38`, the union trap, `pbip/`=39 | 2026-08-12 | 2.126.0 | the *reference bundle* referred to throughout |
-| deploy rate, 76 planned / 74 created, 36/36 report bindings, `PBI_DESKTOP_PATH`, the wrong-tenant 404 | 2026-08-13 | 2.126.0 | a cold-start operator run against the **same** site |
-| re-checks marked ✅ in this edition | 2026-08-13 | 2.126.0 | code at `master` @ `181324a` |
-
-One site is one shape. It is also a **structural blind spot**: this document's numbers were measured
-on the site it was written against, so re-running that site can never catch a number that has gone
-stale — which is exactly how a 2.4×-optimistic deploy estimate survived until an operator with a
-stopwatch ran it. **The next cold run should use a different estate.** Treat every count and duration
-here as an order of magnitude, and re-measure on the customer's estate (`--dry-run` for counts, the
-deploy journal for rate) before quoting one.
+Historical counts and timings describe the toolkit's reference runs, not your environment.
+Re-measure on the target estate before using them for planning.
 
 ---
 
@@ -333,6 +269,23 @@ repo's reusable bundles, **not** the upstream Power BI plugin.
    versions again. Plugin backup restoration and exact previous CLI installs are rollback
    candidates, **not a tested guarantee**. Never roll back merely for an above-known-good WARN.
 
+#### Doctor fallback
+
+Session-start preflight remains separate under [AGENTS.md](../AGENTS.md). If doctor cannot establish
+the plain preflight cause, first **activate the same selected environment** in that private terminal
+and confirm `(Get-Command python).Source` points to its selected Python. Invoking the absolute
+`t2p.exe` above does **not** activate the parent shell; preflight uses `python` from PATH.
+Then, from the selected toolkit checkout, run the existing manual fallback:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\preflight.ps1
+```
+
+**Only after an actual unsigned/ExecutionPolicy startup refusal**, follow
+[preflight cannot start](#preflight-cannot-start).
+If recovery is allowed, retry the **exact originating command and arguments** (plain preflight);
+no policy pre-check.
+
 #### Preflight cannot start
 
 **Reactive, manual recovery only — not a pre-check.** First try the exact command in the document
@@ -448,7 +401,7 @@ command and arguments once**, from the verified repository root:
 - **Session start** (`AGENTS.md`, `.github/copilot-instructions.md`, this runbook or the session-start
   example in `scripts/README.md`): retain `-Update -CheckUpstream`.
 - **Migration personas** (`tableau-migrator`, `dry-run-operator`), a migration-start call or the
-  Start here manual fallback: return to **plain preflight**, with neither update flag.
+  Doctor fallback: return to **plain preflight**, with neither update flag.
 - **Single-workbook setup** (`docs/start-with-one-workbook.md`): retain its `-Update`.
 
 These are the defaults, not replacement commands: preserve any original `-Tenant`, `-Subscription`
