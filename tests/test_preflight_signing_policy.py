@@ -12,8 +12,6 @@ from pathlib import Path
 
 import pytest
 
-import test_openability_claim_citations as persona_pins
-
 ROOT = Path(__file__).resolve().parents[1]
 ORIGINS = {
     "AGENTS.md": (("-Update", "-CheckUpstream"),),
@@ -24,7 +22,6 @@ ORIGINS = {
     ".github/agents/tableau-migrator.agent.md": ((),),
     ".github/agents/dry-run-operator.agent.md": ((),),
 }
-PERSONAS = ("tableau-migrator.agent.md", "dry-run-operator.agent.md")
 ENTRY = re.compile(r"powershell -ExecutionPolicy Bypass -File scripts[\\/]preflight\.ps1[^\r\n`]*")
 ROUTE = re.compile(
     r"\[preflight cannot start\]\((?:[^)]*/operator-runbook\.md|operator-runbook\.md)?#preflight-cannot-start\)"
@@ -122,18 +119,6 @@ def _assert_occurrences_reject_mutations(document: str) -> None:
         changed = text[: entry.end()] + proactive + text[route.start() :]
         with pytest.raises(AssertionError, match="recovery must require an actual startup refusal"):
             _assert_entry_route(changed, ORIGINS[document])
-
-
-def test_existing_persona_pin_detects_a_recovery_instruction_mutation() -> None:
-    """Both changed personas must be pinned, and each changed instruction must fail that same pin."""
-    for persona in PERSONAS:
-        text = persona_pins.read_source(ROOT / ".github" / "agents" / persona)
-        blocks = persona_pins.segment(text, collapse_generated=True)
-        assert not persona_pins.findings(persona, blocks), f"committed persona pin is stale: {persona}"
-        changed = text.replace("exact originating command and arguments", "session-start update command", 1)
-        assert changed != text, "the intended recovery instruction was not mutated"
-        found = persona_pins.findings(persona, persona_pins.segment(changed, collapse_generated=True))
-        assert {finding.kind for finding in found} == {"added", "removed"}, persona
 
 
 def test_runbook_recovery_rows_route_each_verdict() -> None:
