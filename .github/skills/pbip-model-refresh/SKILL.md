@@ -354,8 +354,7 @@ tenant always opens behind a credential dialog.
 **Name one canary table per distinct live source** with `--canaries`. A model-level `DATA_OK` needs
 *every* named canary to return rows. With **no** table named, only the first queryable table is
 probed and the verdict is **downgraded** to `TABLE_OK '<table>'`: a static parameter/CSV table can
-return rows while a live source never loaded. This mirrors the `powerbi-semantic-model-gotchas`
-rule: *prove a REAL read per live source*.
+return rows while a live source never loaded. *Prove a REAL read per live source*.
 
 ## Verdicts
 

@@ -35,7 +35,7 @@ weight — his report hands them over pre-diagnosed.
 
 | persona | now | target | verdict |
 |---|---|---|---|
-| `pbi-report-builder` | 29,478 | 11–13 k | **Biggest single win** — ~10 k is author-from-scratch mapping + a CLI catalogue that belongs in the `powerbi-report-gotchas` skill it already invokes |
+| `pbi-report-builder` | 29,478 | 11–13 k | **Biggest single win** — ~10 k was author-from-scratch mapping + a CLI catalogue, then routed to a former local knowledge bundle |
 | `pbi-semantic-builder` | 29,525 | 10–12 k | Build-from-zero workflow (−2,328) and the spec→model mental model (−1,396) are **purely dead** — he builds all of it |
 | `tableau-migrator` | 29,277 | 9–11 k *(Sol)* / ~24 k *(Opus)* | ⚠️ **the two redesigns genuinely disagree** — see below |
 | `pbi-migration-validator` | 17,202 | 12–14 k | The only persona that **gains** a job |
@@ -452,9 +452,7 @@ for (measured on `_runs/estate-2.339.0-20260829`). The strongest offline signal 
 `check_unit.py --scope model` (which runs the `data-model` check) — but **that is a parser-level
 structural gate, necessary and not
 sufficient**: duplicate measure names deserialize cleanly there and Desktop still refuses to open the
-`.pbip`. Only a cold Desktop open settles it. Full breakdown, including which of the `checks`
-omissions are vacuous and which are genuine:
-`.github/skills/powerbi-semantic-model-gotchas/SKILL.md` §8.
+`.pbip`. Only a cold Desktop open settles it.
 
 **Kept / added — each verified absent upstream:**
 

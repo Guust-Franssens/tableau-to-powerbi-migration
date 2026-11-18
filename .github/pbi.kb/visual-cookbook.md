@@ -110,9 +110,6 @@ Rules:
   reading the error count. (The deterministic engine currently emits `2.10.0`, which 404s, so its
   output is schema-skipped too — upstream's to fix, but it means a clean engine `validate` is weaker
   than it looks.)
-- Same finding, stated for authoring rather than copying, in
-  `.github/skills/powerbi-report-gotchas/SKILL.md` (§1 "Validation-invisible rendering bugs", and its
-  header note that `2.9.0` is the newest published).
 
 ## Precedence — CLI for current truth, cookbook for proven shapes, MS Learn for the mapping
 

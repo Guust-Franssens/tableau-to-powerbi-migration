@@ -188,5 +188,4 @@ is a **hard** `validate` error rather than a silent render bug. Measured against
 | `columnChart` + `dataPoint.fillTransparency` | 0 |
 
 ⚠️ The reverse does **not** hold: `validate` is blind to a *missing* property. A `lineChart` carrying
-`dataPoint.defaultColor` with no `lineStyles.strokeColor` exits **0**, as does either alone. See
-`powerbi-report-gotchas` §3 (type-flip property sets) and §8 (the `Automatic` mark rule).
+`dataPoint.defaultColor` with no `lineStyles.strokeColor` exits **0**, as does either alone.

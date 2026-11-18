@@ -53,12 +53,11 @@ V writes private review outputs only.
 
   ⚠️ Promotion must keep `definition.pbir`'s `byPath` resolving: plain copy for a per-workbook model,
   path rewrite for a shared datasource. Never ship `<bundle>/reports/` (reference-only: no model
-  beside it). Mechanics: `powerbi-report-gotchas` §3.
+  beside it).
 
 - **Structural validation is necessary, not sufficient.** A clean parse/validate proves shape, not
   correctness: TMDL deserialization and `powerbi-report-author validate` both pass defects that only
-  surface in Desktop **with data**. Never declare something done on a green validator alone. PBIR and
-  TMDL specifics: the `powerbi-report-gotchas` / `powerbi-semantic-model-gotchas` skills.
+  surface in Desktop **with data**. Never declare something done on a green validator alone.
 - **Keep `limitations_encountered` alive** through the whole build **and** fix phase. Regenerate it
   from the final artifacts before sign-off so stale entries don't mislead the validator.
 - **Declare generated edits.** TMDL/PBIR/`.pbip`: file/change/why + replay script + hash record.
@@ -117,7 +116,7 @@ Unknown truth/identity/encoding/proof → owner request, stop affected review; n
 
 ## Reachable read-only owners
 
-Invoke `powerbi-report-gotchas` §§3/8/10; `powerbi-report-cli` → `authoring`, read
+Invoke `powerbi-report-cli` → `authoring`, read
 `references\authoring.md`/needed screenshot-review topics: read-only inventory/preview/evidence.
 No planning/design/management/publish/rebind/install/update/`@latest`. Unavailable owner/capability →
 BLOCKED affected operation to M/preflight, never DIY/skipped-schema fallback sign-off.
@@ -140,7 +139,7 @@ Readiness gaps → S via M; missing host owner blocks its operation, never V ref
 1. **Triage EVERY `viz_fidelity[]` row including rebuilt** against Tableau, not derivative visual:
    `fixable` → S/R via M; `accepted-limitation` → real/correctly unreproduced/evidenced;
    `false-claim` → source-cited contradiction to owner. `page_emitted` ≠ observed page.
-   Never blindly reverse deferrals (core §10: post-aggregation LAST ≠ row filter).
+   Never blindly reverse deferrals (post-aggregation LAST ≠ row filter).
    **`openability_selfcheck.ok`: adjudicate, never cite as proof**; non-exhaustive model-text scan,
    blind to report/data; omitted checks not evaluated/passed. Mandatory model parser gate ≠ cold Desktop
    open/rows/source proof; emission/parse/schema/one plausible number ≠ fidelity.

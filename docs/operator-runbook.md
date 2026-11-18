@@ -173,7 +173,7 @@ The current CLI floors/known-good matrix are `$cliFloor` / `$cliKnownGood` in `p
 the plugin policy is `$pluginPolicy`. These are correctness floors, not suggestions. Historically,
 older report validators green-lit reports missing
 `reportVersionAtImport`, which is required inside each `themeCollection` entry and forbidden at
-the top level. The `powerbi-report-gotchas` skill holds the mutation evidence and valid shape.
+the top level.
 `-CheckUpstream` compares installed npm bridges, the engine's `VERSION`, and the Power BI plugin
 with upstream; it neither upgrades nor fails the run. The plugin uses the GitHub-native
 `.github/plugin/marketplace.json` catalog. Missing, ambiguous, malformed or prerelease upstream

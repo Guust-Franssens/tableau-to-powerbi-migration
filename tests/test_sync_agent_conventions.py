@@ -1067,7 +1067,7 @@ def test_report_source_replay_and_render_contract() -> None:
         "`measure_names_values_pivot` binds real `pivoted_field_ids` directly",
         "Verify actual Tableau table/matrix projections, no inactive `Values` siblings",
         "Set/verify effective first-open slicer/parameter defaults, never infer from offered items",
-        "Sample every percentage/scaled field via real-model DAX and check `formatString` (core §8)",
+        "Sample every percentage/scaled field via real-model DAX and check `formatString`",
         "Unknown encoding → **HUMAN STOP**, human configuration/actual `visual.json`",
         "**`azureMap` >1 `Column` projection in `Category` is blocking** grain loss",
         "review actual renders **WITH DATA**",

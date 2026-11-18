@@ -112,12 +112,11 @@ Generation: [agent architecture](docs/agent-architecture.md). Shared conventions
 
   ⚠️ Promotion must keep `definition.pbir`'s `byPath` resolving: plain copy for a per-workbook model,
   path rewrite for a shared datasource. Never ship `<bundle>/reports/` (reference-only: no model
-  beside it). Mechanics: `powerbi-report-gotchas` §3.
+  beside it).
 
 - **Structural validation is necessary, not sufficient.** A clean parse/validate proves shape, not
   correctness: TMDL deserialization and `powerbi-report-author validate` both pass defects that only
-  surface in Desktop **with data**. Never declare something done on a green validator alone. PBIR and
-  TMDL specifics: the `powerbi-report-gotchas` / `powerbi-semantic-model-gotchas` skills.
+  surface in Desktop **with data**. Never declare something done on a green validator alone.
 - **Keep `limitations_encountered` alive** through the whole build **and** fix phase. Regenerate it
   from the final artifacts before sign-off so stale entries don't mislead the validator.
 - **Declare generated edits.** TMDL/PBIR/`.pbip`: file/change/why + replay script + hash record.
