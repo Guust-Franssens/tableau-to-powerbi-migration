@@ -52,12 +52,14 @@ must be private run scratch and the output is never public. It also enters Windo
   `--collect <target> --out <private-file>`.
 - No script can run at all (not a refusal): the method is in
   `.github/skills/pbip-model-refresh/scripts/_desktop_details.py`, so you may write your own. The dialog
-  body is an embedded MSHTML document (window class `Internet Explorer_Server`). Through its DOM
-  (IDispatch, no mouse or keyboard) call `click` on the `span` whose class is `js-copyDetails`, which fills
-  the clipboard synchronously. Read `CF_UNICODETEXT` in one `OpenClipboard` session and keep it only if the
-  clipboard sequence number changed, the clipboard owner is that Desktop's PID and its process-start token
-  is unchanged. Same limits: click only that link, keep the text private, never answer or dismiss the
-  dialog. A refusal (exit 2) is final; do not reimplement around it.
+  body is an embedded MSHTML document (window class `Internet Explorer_Server`). Only after an observed
+  blocking dialog of that PID, and only if exactly one such control exists, call `click` through its DOM
+  (IDispatch, no mouse or keyboard) on the `span` whose class is `js-copyDetails`; it fills the clipboard
+  synchronously. Run that native part in a child you can kill (the toolkit allows 30 s). Read
+  `CF_UNICODETEXT` in one `OpenClipboard` session and keep it only if the clipboard sequence number
+  changed, the clipboard owner is that Desktop's PID and its process-start token is unchanged. Same
+  limits: click only that link, keep the text private, never answer or dismiss the dialog. A refusal
+  (exit 2) is final; do not reimplement around it.
 - Bridge stuck at `NO_BRIDGE` or `not_connected`: do not wait; see the `NO_BRIDGE` warning in the
   `pbip-model-refresh` skill.
 - Cleanup is PID-scoped: close only a Desktop you opened, by its literal PID, never by name.
