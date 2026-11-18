@@ -31,7 +31,7 @@ orchestration-specific.
 | Every agent | `AGENTS.md` conventions block, then re-run the conventions sync (CI flags drift) |
 | Live-source reachability / credential stops | `.github/skills/live-source-reachability/SKILL.md` or `docs/data-source-credentials.md` |
 | Refresh / cache or AI readiness | `.github/skills/pbip-model-refresh/SKILL.md` / `.github/skills/powerbi-ai-readiness/SKILL.md` |
-| Orchestration or cross-agent process | `.github/agents/tableau-migrator.agent.md` `## Gotchas` |
+| Orchestration or cross-agent process | `.github/agents/tableau-migrator.agent.md` |
 | Tableau formula → DAX | `docs/tableau-dax-translation-guide.md` |
 | A visual encoding that renders | `.github/pbi.kb/visual-cookbook.md` + `.github/pbi.kb/visuals/` |
 | Parser/tooling behaviour | the script itself plus a regression test |

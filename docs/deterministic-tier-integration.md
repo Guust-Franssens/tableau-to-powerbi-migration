@@ -98,7 +98,7 @@ probe receipt stamps `elapsed_sec`.
 So: each phase stamps a small record (`phase`, `workbook`, `elapsed`, `outcome`, artifacts touched)
 and `run_estate.py` aggregates. Two consequences beyond the ask:
 
-- **It makes step 12 falsifiable.** The retrospective today asks *"what did we learn"* — prose, which
+- **It makes step 12 falsifiable (historical: step 12 was retired in #733).** The retrospective today asks *"what did we learn"* — prose, which
   this repo has repeatedly had to retract. It becomes *"where did the time actually go"*.
 - **It supplies Phase E's denominator** — *oracle-verified correct measures per agent-visible
   instruction byte*. The numerator still needs F1.
