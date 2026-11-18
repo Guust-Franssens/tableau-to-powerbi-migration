@@ -95,8 +95,7 @@ def _emit_data_verdict(
         print(
             f"  note   : single-table probe of '{only}' only - NOT a model-level DATA_OK. A static "
             "parameter/CSV table can return rows while a live source never loaded. Pass "
-            "--canaries <one per live source> to certify every source "
-            "(this mirrors the powerbi-semantic-model-gotchas rule: prove a REAL read per live source)."
+            "--canaries <one per live source> to certify every source."
         )
         return 0
     print(f"REFRESH: DATA_OK{suffix}")

@@ -37,8 +37,7 @@ Why each guard exists (all of these are measured failures, not hypotheses)
   can never contradict a manifest that does declare one).
 * **`byPath` is verified against the filesystem, not a schema.** `powerbi-report-author validate`
   returns `errorCount: 0` for a `.Report` whose `datasetReference.byPath.path` names a
-  `.SemanticModel` that exists nowhere: shape, not target
-  (`.github/skills/powerbi-report-gotchas/SKILL.md` §3). A wrong one opens as a report with NO
+  `.SemanticModel` that exists nowhere: shape, not target. A wrong one opens as a report with NO
   MODEL. The target must be a real model, so "some directory holding a `definition/`" is not enough.
 * **Content, not existence — and not a FILE COUNT either.** On a 46-asset estate a report folder
   that had passed a sign-off held only Desktop-local settings. Every PBIR document is parsed, at

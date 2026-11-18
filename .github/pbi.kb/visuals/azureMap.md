@@ -61,7 +61,7 @@ separate judgement, and none of the three target mappings has been render-compar
 | --- | --- | --- | --- |
 | `mapsource='Tableau'`, no `map-style` override | `grayscale_light` | ⚠️ inferred | **Source ✅:** `book_6-1-Maps`, 6 worksheets share this config, 3 have reference thumbnails, all light grey. **Target ⚠️:** renders light grey, but never placed beside a Tableau thumbnail and judged a match |
 | `map-style='tableau-z-black'` | `night` | ⚠️ inferred | **Target ✅** renders as a dark basemap (verified 2026-08-10, Dark Map page). **Equivalence ⚠️** — no side-by-side against Tableau's dark style |
-| `mapsource='Satellite'` | `satellite` | ⚠️ inferred | **Target ✅** renders satellite imagery (verified 2026-08-10, Mapbox page). **Equivalence ⚠️** — not compared. The `powerbi-report-gotchas` skill (§5, Maps) likewise records this as structural only |
+| `mapsource='Satellite'` | `satellite` | ⚠️ inferred | **Target ✅** renders satellite imagery (verified 2026-08-10, Mapbox page). **Equivalence ⚠️** — not compared. |
 
 To promote a row to ✅, capture the Tableau reference render and the Power BI render of the **same
 worksheet**, compare them, and record the worksheet, date and Desktop/CLI version here. Note what

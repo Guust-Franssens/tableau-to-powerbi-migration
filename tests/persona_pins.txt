@@ -27,9 +27,9 @@ eb27287345be286c89b90b89fd60d9fc200a1d4f94498f9582c1cd056d0b3877  A bundle may c
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 d0191f7ef88f7eaba5fe7a5df29b0eac97379ef5de8bed569b5007d333f6663a  ~~ **The two report passes can diverge by design, so neither
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-7a4fc25c60da284e7c33e3318bc43e5e815848b16b6688f5fe35876fc9671396  ~~ Promotion must keep `definition.pbir`'s `byPath` resolvin
+647eab8662160e3aeffc60db13e57acfa95ac44e6428d8068a3b2c113abf12d1  ~~ Promotion must keep `definition.pbir`'s `byPath` resolvin
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-a51a9a32298b5250de40db3bdc108c3f305d7b8bc25e0ea2408f633dc60ac0be  - **Structural validation is necessary, not sufficient.** A
+9a593b768358202b96a5e1943c274d6edd5135679a10ab3fc7707de286a12684  - **Structural validation is necessary, not sufficient.** A
 cb21982d44fa42c19b0fe01857edf4b6e47ffa38e08f82e25874db1e9b5add68  - **Keep `limitations_encountered` alive** through the whole
 35c45012ca2fca732fd8d5484db7af47ffc3d8854c3b21b84e2b00ce2b749bfa  - **Declare generated edits.** TMDL/PBIR/`.pbip`: file/chang
 7f84d9b33171068ee1749ce30a7c292044f1a842a04b837371a1f8da52c7c5e7  - **Surface complexity mismatches proactively.** If the pars
@@ -103,11 +103,11 @@ b9c17c5644f5676e7fa461f454e655b428643c74e7a41d99c81be86c7a61021a  Require curren
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 64ef8b89c4f9f3b842d698c59d4974fa02ebf771cb3a2cdd7d1c128d0613d994  ## Reachable read-only owners
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-dc827e79047b24e080b2be094b510cb04f9d30108f995403cd50e6b9f3fbc4c0  Invoke `powerbi-report-gotchas` ~~3/8/10; `powerbi-report-cl
+f72f6ee6d6329b548cbb305bc572c0be96d0a5974d1114a8b32c669b5c4f5a63  Invoke `powerbi-report-cli` ~ `authoring`, read `references\
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 bd4a85861c7662cba45984bcc3599c9c0691150542a7db241cc1d2cfbfa24299  ## Independent phases
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-d87d3497b8ca33ead0f821135c3920453f62a34b1005cda1553b054892849214  1. **Triage EVERY `viz_fidelity[]` row including rebuilt** a
+ea9bc17a961e19335408a67289f9fe61dfe5b2e66f8f22da0b4823342a07f3a8  1. **Triage EVERY `viz_fidelity[]` row including rebuilt** a
 9702668d727743a06db547c27afe4c0c039f98dfd0d14bb29785cd9482d09b8d  2. **Inventory:** dashboard zones define their sheets; inclu
 0f1b4741ac9cbc5e0a7e937a5f0ea4785bc26aa5717969da6ec9526d9cff59bb  3. **Whole gestalt AND all figures:** actual shipped renders
 b7d7c006034e40c9035a16d630eca5731ef2b19e23341743ee5fef750f527bb0  4. **Fresh final:** re-adjudicate triage/builders/current `l
@@ -121,7 +121,7 @@ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 b9a154e7c4427a52dec7035ba33e466a89452ab8222061fb5f3da340f00d734a  Existing schemas, immutable history/evidence; inventory firs
 
 [pbi-report-builder.agent.md]
-29df9b184e7b0e3f5b19ca6c6855787efaec86eb84b1db10ebb8f1306e6588cb  --- name: pbi-report-builder description: Repairs and finish
+690c958d6f0846bfcbc3c82a16738f1072dd29207580c7dcafcca76e2a58d585  --- name: pbi-report-builder description: Repairs and finish
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 1619a2419072ad672acb549b02d8fbc9aafa6c1be51168b3266f68b4fd9dd4fa  # PBI Report Builder ~ Subagent
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
@@ -137,9 +137,9 @@ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 56fb731c42d3ea34bfef4c32e926dc82419d12f744a04d666e5830d2cdcf7a14  ## Procedure owners
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-4c6240fb982ae347293e5e009a950e6a3a57b2a3a201adfeda416e53ac0ed256  - Before loading an upstream procedure or authoring PBIR, ac
+2c7550e4ca4f0daf62ddc7dbb8b0221d156e8f50ef48509196dc67b2c186b764  - Load **`powerbi-report-cli` once** by intent, not flags: e
 d00e8eacc30c010fb36e7210228b74d77ef1166541ada703dfc3ef487a12dbf4  - Genuine greenfield ~ `planning`: persist/lock `_brief/repo
-e5acab4377ba7d1c740ef9e5040ce34c64bedea083f1b688e39787ae0db9b65e  - Use installed `powerbi-report-author` vocabulary, not reme
+7cb78ef3a6a3501c5dcc0d486b86f5a92ee864956e5b36f565ad44bb7e502d8e  - Use installed `powerbi-report-author` vocabulary, not reme
 9548052b9ce0b4d01c5e51ecba3ec6efd090a1bbd848145fb87cf3ef9eebea9f  - Read-only DAX: PID-scoped `scripts\probe_desktop_query.py`
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 bdd0ce3c39397697ce79b83f3678c5598bd73d6c1a3380b2cff186e77f0c5642  ## Warm-model and host barrier
@@ -151,31 +151,21 @@ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 215719e090c9e3085d4c740e5a393634bad646a6d59b5a1637ad02a74b0849c5  ## Repair decisions
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 deed3c0727279070d20de050f4a08669ad1ed062057dd5240d1b07df476d5e62  1. **Whole-page gestalt first, then EVERY commissioned visua
-c5cedfc7d10744136532ff4258f8ba662c6df97d57b4f784dcc00f998783003f  2. Use validator **fixable / accepted limitation / false-cla
+444ed3774f103dc335224ebf8c33e6925b628bf42c67e8920120efeef4ee8a20  2. Use validator **fixable / accepted limitation / false-cla
 964d4cdadaf21bb3dbcab29d0abcd92baa81b7a88e4fd464a0eb4b3b94d079e6  3. Use `scripts\check_unit.py` integration/`field-bindings`:
-beeb5294c1bee563927f8ad3db36a229c3e4ee7edf551e0a066704be59721497  4. Preserve source mark/shelf nesting, partition/address gra
-be956623b936b054083892e350b46a467a47bdb97d612aeee6e201393701b7d8  5. Verify actual Tableau table/matrix projections, no inacti
-1b43166ce3391e636da3b106454e008683260a9e9375ce756a5dd1da56801090  6. Prefer formatting/layout over type/well changes; source i
+49eba2d187708d073f1ec83204ebee12770c658414a568dc19104f67a9517bdf  4. Preserve source mark/shelf nesting, partition/address gra
+312790a3f417de0f962bc96ec8f54d8e60d5a41315b7bdbdc466b6e546df0ded  5. Verify actual Tableau table/matrix projections, no inacti
+6a362f8940b3c7ad7f97f5f1e90e3ae31a73aa25bdbb906c35181bb24c33c0bd  6. Prefer formatting/layout over type/well changes; source i
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 98a5847f37ec3d0c16cb598a8b44852a320af0c4bc0ccc0b316594e08f242cf9  ## Replay, evidence and handoff
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-023d0f37ce55e18b1119bd1d5da85eb4128c8aec5621ea439260078fd02c7765  PBIR edits need semantic-targeted, scoped, idempotent `_buil
+f15ccc99a8138a84cf1882bce5ae7bc38411f52a512699f49e0cf6ec07f9be80  PBIR edits need semantic-targeted, scoped, idempotent `_buil
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 d898af09f693a695129bc97ef3c10b73f07912b8cf25237f0fb03e889935aa02  Every batch: `powerbi-report-author validate`, `scripts\chec
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 f424a3a71a69ce058a287f115be1a4ca946f0f7eeeb0814a0bfc50a144b1cc49  Keep `limitations_encountered` current (`stage: "report_buil
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 b6b35f02e0cde87fbb098396fde2ebb44cc33b7d82e173a84948ba42d3386245  ## Gotchas
-e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-0b1076d11b85ec6a5d72421c018a70ba4e33fac9da7d07989e8b37d88c563f6e  <!-- BEGIN:generated-skill-index:powerbi-report-gotchas -->
-08a89f039c1e6b340b29b315fef89d741c15be522b1e862fdd63602598f62ebf  **Generated skill section index.** Do not hand-edit this tab
-e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-f4c9cce5a311a73e3022fcaa6d44aa2a7f646e7a0254e7c2e7a96b11289daade  | ~ | Skill section |
-4199ba454d6d3ae83657120c2bb6bd674eefc0dd7d3cd4cc844171dc6725135b  |---|---|
-71432756e8595c9fd21d395d0121783ba99c9bedc276342250a9d2b5acc40306  | 3 | PBIR mechanics |
-17d5f4f508c89c276caad8301c3b1b002739773178d1cd917c05169cda9bcda7  | 8 | Reading the source spec |
-903d3cb7202f757fd9aea987b1a80053057029c68264972af79f682c97e10c87  | 10 | Reading the report-side handover queue |
-c7986a87d9cbac530d8c98e9320c76e4aa4573151028d7e8da41a6fbfcaabe9f  <!-- END:generated-skill-index:powerbi-report-gotchas -->
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 41dee8568d1eaa14058a644a7ad2ab59faf68a86d4d3010f9785142746af437f  Craft learnings go to the procedure owner, not this persona.
 
@@ -192,21 +182,9 @@ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 aadc463528a49520e75dad4e776acc6b578d0ed71c08c6cf7ad62e46864b2e90  Require the current issued v2 brief; exact run/unit/source,
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-01c2ab8e78a70d932d15b01647fedfda16887b290b17700c4e124c2d6018e44a  Before loading an upstream procedure or authoring TMDL, acqu
+92f0cd5d322ffee1e39dc2dc2b9259b9479f12ddebc532f832872de54a2b1dcd  Read `docs\migration-spec.md` and relevant `docs\tableau-dax
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 e3f56bb5919e24caaece1969fa85e2c1720f475deeffbcfc80ce627d7ab0b1e1  **Load `powerbi-authoring:semantic-model-authoring`** for ex
-e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-66344c1a6714fcf3abe4b7816753a13a8953c32e927932691f03c5e6dbcf086f  <!-- BEGIN:generated-skill-index:powerbi-semantic-model-gotc
-2acee66244f39ffaeb2c22587e4be793f380d90db62f15d28894a1fef5309a40  **Generated skill section index.** Do not hand-edit this tab
-e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-f4c9cce5a311a73e3022fcaa6d44aa2a7f646e7a0254e7c2e7a96b11289daade  | ~ | Skill section |
-4199ba454d6d3ae83657120c2bb6bd674eefc0dd7d3cd4cc844171dc6725135b  |---|---|
-114d50a82cc1951a5f282e15348f7636e9aa67d6bde84892a850305dbfa592f6  | 1 | Translating source fields |
-1cd5aa4e41c9bdaf3b20ff9479808fb0b56e726f639973e4a96879ee2d39bced  | 2 | TMDL hand-authoring pitfalls |
-bf0e53655ef6111567d91398335feec7610cfaa2f10893343b3f6c4433c567c3  | 3 | MCP / Desktop operational gotchas |
-7a0a5787b09729a87a8fbf21dce9a4f47a1656b6e5f300ee4137944c70ef0dc0  | 4 | Model integrity, table calcs, cross-agent hand-offs, a
-1c20aea8e8f4252061a125ce9061babe3f9756d048033f873488738085bae040  | 8 | Reading the handover queue |
-cc5e2fe3dc022889c6b52d8b9725ba1f13abfe22ab5128f4fc560ae6beec0372  <!-- END:generated-skill-index:powerbi-semantic-model-gotcha
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 f348b11afc412c04d56c365d74e17a4a7d2fd07ad65ea3fa06e9ff76603a8448  ## Model-only decisions
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
@@ -288,7 +266,7 @@ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 3ed70457e26cc85d255bc72c773979f5be710e046e64f94974f40415d0f594e5  Require builders' gates + independent V: all dashboards fait
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-d24e1d0c6295c09f1e18fd030e9c5c48b63c3c0e61e2623ef5355b30c2fa368e  Promote only matching-H checked bytes via `scripts\promote_u
+3944281a2b19d865f1a81f025522811bc65e689c6b22f72729813272f51021ef  Promote only matching-H checked bytes via `scripts\promote_u
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 0ab3c7bbb28f7a468e87b147c0a55b6c0a41a366b745b8ad93276656d27c7932  ## Supervision and closeout
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)

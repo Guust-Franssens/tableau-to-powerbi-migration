@@ -230,8 +230,7 @@ uv run pylint .github/skills/powerbi-ai-readiness/scripts      # module name, so
 uv run pylint conftest.py                                      # the import to the shim (false E0611)
 ```
 
-**A bundle need not ship code at all.** `powerbi-report-gotchas` and `powerbi-semantic-model-gotchas`
-are pure knowledge — `SKILL.md` only, no `scripts/`, so nothing to lint or gate. The rule is
+**A bundle need not ship code at all.** The rule is
 conditional: *if* a bundle ships `scripts/`, it must ship the `tests/` that travel with them
 (`tests/test_skills.py` and `tests/test_build_plugin.py` both enforce this shape rather than demanding
 code unconditionally).
@@ -240,9 +239,8 @@ code unconditionally).
 
 All five personas must stay under the **22,000-char project target** and the **30,000-char hard cap**.
 `sync_agent_conventions.py --check` **fails the build** on a hard-cap overage
-(use `--allow-over-cap` only for a deliberate, temporary overage). PBIR/visual/Desktop
-learnings belong in `powerbi-report-gotchas`, and TMDL/DAX/MCP learnings in
-`powerbi-semantic-model-gotchas`. The orchestrator's step-12 retrospective has the full routing table.
+(use `--allow-over-cap` only for a deliberate, temporary overage).
+The orchestrator's step-12 retrospective has the full routing table.
 Rationale and the residual risk this accepts:
 [`docs/agent-architecture.md`](docs/agent-architecture.md) §5.
 

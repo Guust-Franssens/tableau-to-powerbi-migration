@@ -93,7 +93,7 @@ def test_single_install_found_by_bundle_content(tmp_path: Path) -> None:
 def test_multiple_installs_fail_loudly_and_name_both_paths(tmp_path: Path) -> None:
     """Two installed copies are a shadowing hazard; discovery must not pick one silently."""
     first = _make_plugin(tmp_path, "collection-a", "plugin-a", skills=(SHIPPED_SKILLS[0],))
-    second = _make_plugin(tmp_path, "collection-b", "plugin-b", skills=(SHIPPED_SKILLS[1],))
+    second = _make_plugin(tmp_path, "collection-b", "plugin-b", skills=(SHIPPED_SKILLS[0],))
 
     result = discover_skill_plugin(installed_plugins_root=tmp_path, env={})
 

@@ -167,8 +167,6 @@ wrong output field". A fresh-session rerun separated the two; §6.2 has the outc
 | `.github/pbi.kb/visual-cookbook.md` (10k) | External; referenced at point of use | Same |
 | `.github/skills/pbip-model-refresh/` (SKILL.md + `scripts/` + `tests/`) | Repo-local **skill bundle**, also published as a plugin | **Yes, two ways.** §6.1 measured a subagent invoking a repo-local skill **by name** and getting the body back, so `use the pbip-model-refresh skill` works; reading `.github/skills/pbip-model-refresh/SKILL.md` by path also works. Either is discretionary — the agent must choose to do it |
 | `.github/skills/powerbi-ai-readiness/` (SKILL.md + `scripts/` + `tests/`) | Repo-local **skill bundle**, also published as a plugin | Same. It absorbed `docs/ai-instructions-authoring-guide.md` (now a stub) and that persona's ~7.3 KB "Prep the model for AI" section — two copies of one recipe that had already diverged (§8), now one |
-| `.github/skills/powerbi-report-gotchas/` (SKILL.md only) | Repo-local **skill bundle**, also published | Same. Holds `pbi-report-builder`'s former inline Gotchas; the persona invokes it at step 0, gates on it in its DoD, and keeps a section index |
-| `.github/skills/powerbi-semantic-model-gotchas/` (SKILL.md only) | Repo-local **skill bundle**, also published | Same, for `pbi-semantic-builder` |
 | Per-agent Gotchas | `tableau-migrator` and `pbi-migration-validator` keep theirs inline; the two builders' moved into the bundles above (2026-07-31) | Inline = yes; bundled = only if invoked |
 
 An **explicit instruction to read a file** is a normal tool call and does reach a subagent — this is
@@ -270,18 +268,17 @@ them alone: a gotcha the agent stops seeing is a defect it silently repeats. Two
    by name and get the body back. That is a real mechanism with a real tool call, not a hope that the
    agent reads a reference folder.
 
-So the content moved into `powerbi-report-gotchas` and `powerbi-semantic-model-gotchas`, with three
-mitigations that are the actual price of the move:
+At that time the content moved into two former local knowledge bundles, with three
+mitigations (all retired with those bundles in #881):
 
-- the persona invokes the bundle as **step 0** of its skill chain,
-- it is a **Definition of Done item** ("the skill was read this session"),
-- the persona keeps a **section index** — a table of what each `§` covers — so the agent can *see
-  what it is missing* and know when it needs it. Without the index this would be a plain violation.
+- the persona invoked the bundle as **step 0** of its skill chain,
+- it was a **Definition of Done item** ("the skill was read this session"),
+- the persona kept a **section index** — a table of what each `§` covered — so the agent could *see
+  what it was missing* and know when it needed it.
 
-⚠️ **Residual risk, stated plainly:** an agent that skips the invocation still loses the knowledge, and
-nothing mechanically fails. The index and the DoD item make that *visible*, not *impossible*. If a
-future migration shows an agent repeating a gotcha it never read, the mitigation was insufficient —
-record it here rather than quietly reverting.
+⚠️ **Historical evidence ceiling:** an agent that skipped the invocation lost the knowledge, and
+nothing mechanically failed. The index and the DoD item made that *visible*, not *impossible*.
+Their retirement supplies no new runtime-delivery or compliance proof.
 
 **The rule itself is unchanged** for everything else: anything whose absence is silent and harmful
 stays inline unless it moves somewhere the agent can *actively reach and be told to reach*. A hook
@@ -366,8 +363,8 @@ convention edit into a red build. New craft learnings still belong in the skill 
    **plugin copy wins**. Measured twice: `powerbi-ai-readiness` resolved to
    `.copilot\installed-plugins\` with the cwd inside this repo and the repo copy present; and after
    v0.2.0 made all four bundles exist in both places, a subagent counted **exactly one** entry per name
-   (`powerbi-ai-readiness = 1`, `pbip-model-refresh = 1`, `powerbi-report-gotchas = 1`,
-   `powerbi-semantic-model-gotchas = 1`). The registry total moved **92 → 94**, i.e. **+2 for the two
+   (`powerbi-ai-readiness = 1`, `pbip-model-refresh = 1`, and one each for the two former local
+   knowledge bundles). The registry total moved **92 → 94**, i.e. **+2 for the two
    new bundles, not +4** — independent corroboration that de-duplication is by name, not a coincidence
    of counting. Entries carry a `<location>plugin</location>`-style marker, so the winning source is
    visible in the registry itself.
@@ -375,8 +372,8 @@ convention edit into a red build. New craft learnings still belong in the skill 
    So there is no "installed twice" hazard and no ambiguity about which copy runs. The real hazard is
    the opposite one: because the plugin is a downstream *snapshot*, a repo-side edit that is never
    re-published is served stale and **silently** — the single registry entry points at the plugin,
-   which is exactly the copy you did not edit. All four pairs hash identical today
-   (`preflight.ps1`: `4 bundle(s) in sync`); that script hashes every shipped bundle and fails on
+   which is exactly the copy you did not edit. All four pairs hashed identical at the time
+   (`preflight.ps1`: `4 bundle(s) in sync`, at that time); that script hashes every shipped bundle and fails on
    **either** shape: `STALE in plugin` (edited but not published) or `NOT INSTALLED` (published but
    not re-installed).
 
@@ -392,7 +389,7 @@ convention edit into a red build. New craft learnings still belong in the skill 
    were extracted from the personas. Note `copilot plugin install` fails with `Access is denied`
    while a Copilot session is running, so installs are a **between-sessions** step.)
 
-   ⚠️ **Every transcript in this section is quoted verbatim as measured, so it carries the plugin's
+   ⚠️ **Retained transcripts in this section are quoted verbatim as measured, so they carry the plugin's
    FORMER identity:** `powerbi-migration-skills@powerbi-migration-collection` from repo
    `Guust-Franssens/powerbi-migration-skills`. As of v0.3.0 the published plugin is
    **`powerbi-playbook@powerbi-playbook-collection`** from `Guust-Franssens/powerbi-playbook` — the
@@ -403,12 +400,9 @@ convention edit into a red build. New craft learnings still belong in the skill 
 
    **The full loop is proven repeatable, not a one-off (2026-08-01).** After v0.2.0 was published and
    installed between sessions, a `pbi-report-builder` subagent in a fresh process invoked **both** new
-   bundles by name and got `SUCCESS`, each resolving to the plugin:
-
-   ```
-   Base directory for this skill: C:\Users\<user>\.copilot\installed-plugins\
-       powerbi-migration-collection\powerbi-migration-skills\skills\powerbi-report-gotchas
-   ```
+   former local knowledge bundles by name and got `SUCCESS`, each resolving to the plugin.
+   The retired bundle's path excerpt is omitted; this remains a historical observation, not a
+   current invocation instruction.
 
    So `build_plugin.py` → marketplace repo → `plugin install` → invoke-by-name in a subagent works
    end to end, for a bundle that ships **no scripts at all**. Note the probe ran with the cwd *inside*

@@ -7,8 +7,7 @@ purpose: build an installable GitHub Copilot CLI marketplace from this repo's sk
 
          The marketplace is published to a SEPARATE, thin repo on purpose: `/plugin marketplace add`
          clones the whole repository, and this one carries ~108 MB of history plus ~62 MB of tracked
-         files. AI readiness is portable; the two compact Tableau-migration cores require their
-         named host-repository owners and separately installed upstream procedure skills.
+         files. AI readiness is portable.
 
 usage:   python scripts/build_plugin.py --out dist/marketplace
          python scripts/build_plugin.py --out dist/marketplace --check   # verify only, exit 1 on drift
@@ -32,30 +31,18 @@ PLUGIN_NAME = "powerbi-playbook"
 VERSION = "0.3.2"
 PUBLISH_REPO = "https://github.com/Guust-Franssens/powerbi-playbook"
 
-# Ship the portable AI policy and two compact Tableau-migration host contracts. Host tooling is not
-# bundled. `sentinel-probe` remains a diagnostic, not a published skill.
+# Ship the portable AI policy. Host tooling is not bundled.
+# `sentinel-probe` remains a diagnostic, not a published skill.
 #
 # `pbip-model-refresh` is HELD BACK at v0.3.0. Its persist path validates `cache.abf` as a CFBF/OLE2
 # container, which the format is not — measured against three real caches in `examples/`, the check
 # rejects every one, so AMO persistence cannot succeed. Four review rounds of hardening around that
 # wrong premise added a lock and a commit-detection fingerprint that introduced two further ways to
 # leave a project unopenable. It ships again once the persist path is simplified (see the tracking
-# issue), not before: a bundle whose headline feature cannot work is worse than an absent one,
-# because the gotcha bundles' cross-references at least fail loudly.
-SHIPPED_SKILLS = (
-    "powerbi-ai-readiness",
-    "powerbi-report-gotchas",
-    "powerbi-semantic-model-gotchas",
-)
+# issue), not before: a bundle whose headline feature cannot work is worse than an absent one.
+SHIPPED_SKILLS = ("powerbi-ai-readiness",)
 
-PLUGIN_DESCRIPTION = (
-    "Power BI AI readiness plus compact Tableau-migration report/model contracts. The AI skill "
-    "owns descriptions, categorical domains, CustomInstructions and qnaEnabled. The migration "
-    "cores preserve source intent, shipped-model binding, layer handoffs and evidence limits; "
-    "they are not generic or greenfield authoring guides. General procedures require separately "
-    "installed upstream skills; migration tooling, refresh/persistence and live-source proof "
-    "require the host repository and are not bundled. Missing owners block affected operations."
-)
+PLUGIN_DESCRIPTION = "Power BI AI readiness: descriptions, categorical domains, CustomInstructions and qnaEnabled."
 
 KEYWORDS = [
     "powerbi",
@@ -72,16 +59,9 @@ KEYWORDS = [
 
 README = """# Power BI Playbook
 
-Skills for **GitHub Copilot CLI** and **Claude Code**: portable Power BI AI-readiness policy and
-two compact **Tableau-migration host contracts**, not generic PBIR/TMDL encyclopedias.
+Portable Power BI AI-readiness policy for **GitHub Copilot CLI** and **Claude Code**.
 
-The AI skill can be used with an existing Power BI model regardless of source tool. The report and
-semantic cores preserve Tableau source intent, shipped-artifact identity and evidence-bounded
-handoffs; they are **not greenfield authoring guides**. General procedures belong to separately
-installed upstream `powerbi-report-cli` and `semantic-model-authoring`, in the selected mode/topic.
-The host repository supplies migration scripts/docs, refresh/persistence, live-source proof and
-declarations; those operations are **not bundled**. Missing required owners block only their affected
-operation, never permission to improvise. Optional pinned history is evidence, not a procedure.
+The AI skill can be used with an existing Power BI model regardless of source tool.
 
 ## Install
 
@@ -95,8 +75,6 @@ operation, never permission to improvise. Optional pinned history is evidence, n
 | Skill | Use it for |
 |---|---|
 | `powerbi-ai-readiness` | Descriptions, enumerated categorical domains, model-level AI instructions (`CustomInstructions`), and the `qnaEnabled` switch that silently voids all of it |
-| `powerbi-report-gotchas` | Tableau-migration report core: source grain/defaults, shipped-model binding, replay/declaration and layer handoff; requires host owners |
-| `powerbi-semantic-model-gotchas` | Tableau-migration semantic core: source calculations, request roles, visual grain, current-model proof and handoff; requires host owners |
 
 ## Why a plugin and not a repo-local skill
 
@@ -124,9 +102,7 @@ its audience cannot install, with nothing in the build output to show for it.
 
 Generated from [{source_repo}]({source_repo_url}) by `scripts/build_plugin.py`.
 The AI bundle carries its own scripts/tests; CI copies code-bearing bundles into an isolated
-directory and runs their tests with the source repo unimportable. The two migration cores are
-knowledge-only `SKILL.md` files: copying them does **not** copy their host-repository dependencies.
-Resolve the owners named by the selected core before its dependent operation. Static checks do not
+directory and runs their tests with the source repo unimportable. Static checks do not
 prove fresh-role resolution, live data, render fidelity or durable cold reopen.
 
 Do not edit these files here; edit them in the source repo and re-publish.
@@ -149,9 +125,7 @@ def marketplace_manifest() -> dict:
     return {
         "name": MARKETPLACE_NAME,
         "metadata": {
-            "description": (
-                "Power BI AI readiness and compact Tableau-migration host contracts for Copilot CLI/Claude Code"
-            ),
+            "description": ("Power BI AI readiness for Copilot CLI/Claude Code"),
             "version": VERSION,
         },
         "owner": {"name": "Guust Franssens"},

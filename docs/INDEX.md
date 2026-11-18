@@ -12,8 +12,7 @@ Map of maps for agent-facing knowledge. Start here, then open the matching index
 3. `python scripts/read_handover.py <bundle> --workbook <name>` — residual work queue and engine-block reason.
 4. Live database sources: run the `live-source-reachability` skill **before builders start**. It delegates to `pbip-model-refresh`'s existing automatic-source procedure on the shipped working copy with named canaries; any sign-in or other dialog is a human stop. START_READY can admit `live_unproven`; a live unit reaches COMPLETE only with `check_unit`'s same-run PASS `data-evidence` row and independent fidelity sign-off.
 5. Load the right skill before acting: `live-source-reachability` for live-source proof and
-   credential stops, `powerbi-semantic-model-gotchas` for TMDL/DAX,
-   `powerbi-report-gotchas` for PBIR/visuals, `pbip-model-refresh` for cache/refresh, and
+   credential stops, `pbip-model-refresh` for cache/refresh, and
    `powerbi-ai-readiness` for Copilot/Q&A metadata.
 6. `python scripts/promote_unit.py --package <package> --slug <slug> --receipt-sha256 <H>` — **the last hop** from the checked package, forwarding identical caller H to the public all-scope checker and preserving its result/disclosures. A stored token is observation, never future authority. `--force` conflicts with H before effects; force alone prints/records exactly **PROMOTED unchecked; Phase-2 COMPLETE was not established.** Content, resolved containment, external-data, host-path, model-reference and transaction guards remain non-forceable. Shared/report-free shipment mechanics do not become COMPLETE-supported classes. Exits: 0 promoted / 1 gate refusal / 2 CANNOT_ASSESS / 3 content refusal / 4 promotion failure / 5 external-data refusal / 6 host-path refusal / 64 usage. [Phase-3 mechanics](migration-phases.md#phase-3--ship); promotion is not deployment, durable persistence or receiving-machine proof.
 
@@ -31,8 +30,6 @@ orchestration-specific.
 |---|---|
 | Every agent | `AGENTS.md` conventions block, then re-run the conventions sync (CI flags drift) |
 | Live-source reachability / credential stops | `.github/skills/live-source-reachability/SKILL.md` or `docs/data-source-credentials.md` |
-| PBIR / visual / Desktop craft | `.github/skills/powerbi-report-gotchas/SKILL.md` |
-| TMDL / DAX / modeling craft | `.github/skills/powerbi-semantic-model-gotchas/SKILL.md` |
 | Refresh / cache or AI readiness | `.github/skills/pbip-model-refresh/SKILL.md` / `.github/skills/powerbi-ai-readiness/SKILL.md` |
 | Orchestration or cross-agent process | `.github/agents/tableau-migrator.agent.md` `## Gotchas` |
 | Tableau formula → DAX | `docs/tableau-dax-translation-guide.md` |
@@ -81,7 +78,6 @@ Eligible files: tracked Markdown knowledge/navigation files, `.github/pbi.kb/**/
 | Find migration guidance | [`docs/data-source-credentials.md`](../docs/data-source-credentials.md) | Tableau/database/warehouse credentials. |
 | Find migration guidance | [`docs/deterministic-tier-integration.md`](../docs/deterministic-tier-integration.md) | Engine and handoff integration. |
 | Review Desktop observer consolidation | [`docs/desktop-observer-simplification.md`](desktop-observer-simplification.md) | Architecture census, observer alternatives and unverified deletion hypotheses; preserves real-row proof (Refs #741). |
-| Review gotcha deduplication | [`docs/gotcha-dedup-plan.md`](gotcha-dedup-plan.md) | Bounded upstream/local claim dispositions, safety preservation, release/role-canary gates and ownership sequencing; plan only (Refs #732). |
 | Find migration guidance | [`docs/dry-run-findings-2026-08-11.md`](../docs/dry-run-findings-2026-08-11.md) | Durable F00x dry-run findings. |
 | Find migration guidance | [`docs/engine-gap-harvest.md`](../docs/engine-gap-harvest.md) | Attribute and classify the `reports/` vs `pbip/` delta into engine-gap evidence — provenance delegated to the `--tamper` gate's own adjudicator. |
 | Find migration guidance | [`docs/migration-phases.md`](../docs/migration-phases.md) | The three-phase pipeline shape: what each phase produces, where it lands, which gate guards each hop, the `_runs/<NNN>-<slug>` identity rule (never renamed/renumbered; one run per pipeline run, **not** per workbook), and the known gaps. |
@@ -227,8 +223,6 @@ Base: ``
 .github/skills/live-source-reachability/SKILL.md
 .github/skills/pbip-model-refresh/SKILL.md
 .github/skills/powerbi-ai-readiness/SKILL.md
-.github/skills/powerbi-report-gotchas/SKILL.md
-.github/skills/powerbi-semantic-model-gotchas/SKILL.md
 ```
 <!-- Narrow CLI pilot is opt-in; direct-script guidance remains authoritative. -->
 

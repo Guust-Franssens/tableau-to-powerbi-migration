@@ -174,9 +174,6 @@ are headings that do reach an agent as instruction text.
 specific blocks by hash so the failure message can stay *specific* for the case issue #312 is about,
 and so this coverage can never go quiet by deletion. Nothing about pass/fail depends on reading it.
 
-The compact skill is checked at its current queue heading and engine-claim boundary. Historical
-incident wording is not required default context; the whole-persona and adversarial pins below
-remain unchanged in power.
 """
 
 from __future__ import annotations
@@ -199,10 +196,6 @@ AGENTS_DIR = REPO / ".github" / "agents"
 PIN_FILE = Path(__file__).with_name("persona_pins.txt")
 PIN_PATH = PIN_FILE.relative_to(REPO).as_posix()
 UPDATE_COMMAND = "python tests/test_openability_claim_citations.py --update"
-
-# The compact queue/engine-claim owner, not a mandatory incident archive.
-GOTCHAS_SKILL = ".github/skills/powerbi-semantic-model-gotchas/SKILL.md"
-GOTCHAS_HEADING = "## 8. Reading the handover queue"
 
 # The generated region. Collapsed in each persona, pinned once under this key.
 SYNC_BEGIN = "<!-- BEGIN:shared-conventions -->"
@@ -610,7 +603,7 @@ REQUIRED: tuple[tuple[str, str, str], ...] = (
     (
         "pbi-migration-validator.agent.md",
         # #733 retains the engine-claim ceiling in triage, not the obsolete incident/count paragraph.
-        "d87d3497b8ca33ead0f821135c3920453f62a34b1005cda1553b054892849214",
+        "ea9bc17a961e19335408a67289f9fe61dfe5b2e66f8f22da0b4823342a07f3a8",
         "the validator's rule that `openability_selfcheck.ok` is adjudicated, never cited",
     ),
     (
@@ -658,8 +651,7 @@ def _fix_instructions(key: str) -> str:
         "bytes, and the pinned blocks are proven to rebuild the file, so nothing -- indentation, a "
         "tab, a blank line, a re-wrap -- is normalized away. Nothing is classified as being 'about' "
         "anything either: three earlier versions of this test tried that and each lost to a rendering "
-        "or a synonym it had not listed (see this file's docstring for pin history, and "
-        f"{GOTCHAS_SKILL} section 8 for the current engine-claim boundary). "
+        "or a synonym it had not listed (see this file's docstring for pin history). "
         "So an added or reworded instruction fails here by construction, and clearing it is a "
         "deliberate act.\n\n"
         f"TO FIX -- if you changed this on purpose:\n\n    {UPDATE_COMMAND}\n\n"
@@ -756,7 +748,7 @@ def test_segmentation_is_lossless(persona: Path, collapse: bool) -> None:
     )
 
 
-@pytest.mark.parametrize("source", [*personas(), REPO / GOTCHAS_SKILL, PIN_FILE], ids=lambda p: p.name)
+@pytest.mark.parametrize("source", [*personas(), PIN_FILE], ids=lambda p: p.name)
 def test_the_only_normalization_is_crlf_to_lf(source: Path) -> None:
     """The read half of losslessness, asserted as an INVERSE against the bytes on disk.
 
@@ -901,55 +893,6 @@ def test_a_block_this_pin_exists_for_is_still_present(name: str, sha: str, label
         "If the removal is deliberate, drop its entry from REQUIRED in the same commit; do not let "
         f"the `{FIELD}` coverage go quiet."
     )
-
-
-def test_the_compact_skill_preserves_the_engine_claim_boundary() -> None:
-    """Pin the current obligation, not deleted incident prose or a phantom historical heading."""
-    text = read_source(REPO / GOTCHAS_SKILL)
-    assert GOTCHAS_HEADING in text, (
-        f"{GOTCHAS_SKILL} lost the compact queue heading: {GOTCHAS_HEADING}. "
-        "Repoint the persona and its obligation together; do not add a phantom heading."
-    )
-    queue = text.split(GOTCHAS_HEADING, 1)[1]
-    for boundary, rule in (
-        ("original requests", "Repair from `requests[]` with formula/role/target table"),
-        ("separate denominators", "requests, measure stubs and calculated-column stubs as distinct denominators"),
-        (
-            "engine claim",
-            "`openability_selfcheck.ok` is the engine's claim, not an observed Desktop open or source match",
-        ),
-        ("independent handoff", "hand the exact shipped model/evidence to the independent validator"),
-    ):
-        assert rule in queue, f"compact queue lost {boundary}"
-
-
-@pytest.mark.parametrize(
-    ("before", "after", "diagnostic"),
-    [
-        (GOTCHAS_HEADING, "## 9. Historical full breakdown", "lost the compact queue heading"),
-        ("Repair from `requests[]`", "Repair from `needs_review[]`", "compact queue lost original requests"),
-        (
-            "not an observed Desktop open or source match",
-            "proof of verified openability",
-            "compact queue lost engine claim",
-        ),
-    ],
-)
-def test_compact_queue_reversals_hit_the_current_obligation(
-    monkeypatch: pytest.MonkeyPatch, before: str, after: str, diagnostic: str
-) -> None:
-    """These must fail the contract itself, not an unrelated persona pin or import guard."""
-    target = REPO / GOTCHAS_SKILL
-    original_read = read_source
-    source = original_read(target)
-    assert source.count(before) == 1
-    monkeypatch.setattr(
-        sys.modules[__name__],
-        "read_source",
-        lambda path: source.replace(before, after) if path == target else original_read(path),
-    )
-    with pytest.raises(AssertionError, match=diagnostic):
-        test_the_compact_skill_preserves_the_engine_claim_boundary()
 
 
 # ---------------------------------------------------------------------------------------------
@@ -1409,19 +1352,19 @@ def test_moving_a_pinned_block_fails() -> None:
     comparison caught that, so the fixture stopped proving order-sensitivity at all and the mutation
     aimed at it went MISSED.
     """
-    key = "pbi-semantic-builder.agent.md"
-    text = read_source(AGENTS_DIR / key)
+    key = SHARED_KEY
+    text = shared_region(_validator_text())
     lines = _lines(text)
-    first = next(index for index, line in enumerate(lines) if line.startswith("| 1 | Translating source fields |"))
-    assert lines[first + 1].startswith("| 2 | TMDL hand-authoring pitfalls |"), "fixture expects sibling rows"
+    first = next(index for index, line in enumerate(lines) if line.startswith("  | pristine baseline |"))
+    assert lines[first + 1].startswith("  | working copy |"), "fixture expects sibling rows"
     swapped_lines = [*lines[:first], lines[first + 1], lines[first], *lines[first + 2 :]]
-    swapped = "\n".join(swapped_lines) + "\n"
+    swapped = "\n".join(swapped_lines)
     assert swapped != text, "fixture did not swap"
-    before = [block.sha for block in segment(text, collapse_generated=True)]
-    after = [block.sha for block in segment(swapped, collapse_generated=True)]
+    before = [block.sha for block in segment(text)]
+    after = [block.sha for block in segment(swapped)]
     assert sorted(before) == sorted(after), "the swap must change ORDER ONLY, or this proves nothing"
     assert before != after, "BYPASS: the order change was invisible"
-    assert findings(key, segment(swapped, collapse_generated=True))
+    assert findings(key, segment(swapped))
 
 
 def test_deleting_a_block_is_reported_as_removed() -> None:

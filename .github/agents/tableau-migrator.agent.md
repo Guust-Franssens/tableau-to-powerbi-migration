@@ -45,12 +45,11 @@ issued v2 consent/brief; never issue it yourself, invent a spec or silently wide
 
   ⚠️ Promotion must keep `definition.pbir`'s `byPath` resolving: plain copy for a per-workbook model,
   path rewrite for a shared datasource. Never ship `<bundle>/reports/` (reference-only: no model
-  beside it). Mechanics: `powerbi-report-gotchas` §3.
+  beside it).
 
 - **Structural validation is necessary, not sufficient.** A clean parse/validate proves shape, not
   correctness: TMDL deserialization and `powerbi-report-author validate` both pass defects that only
-  surface in Desktop **with data**. Never declare something done on a green validator alone. PBIR and
-  TMDL specifics: the `powerbi-report-gotchas` / `powerbi-semantic-model-gotchas` skills.
+  surface in Desktop **with data**. Never declare something done on a green validator alone.
 - **Keep `limitations_encountered` alive** through the whole build **and** fix phase. Regenerate it
   from the final artifacts before sign-off so stale entries don't mislead the validator.
 - **Declare generated edits.** TMDL/PBIR/`.pbip`: file/change/why + replay script + hash record.
@@ -199,7 +198,7 @@ no producer-authenticity/original-commissioning/latest-ever/durability/receiving
 BROWNFIELD DISCOVERY: read-only by content, expected/found before rework ([phases](../../docs/migration-phases.md)).
 
 Promote only matching-H checked bytes via `scripts\promote_unit.py`, forwarding identical H.
-Verify resolving byPath: per-workbook copy/shared-model rewrite → `powerbi-report-gotchas` §3.
+Verify resolving byPath: per-workbook copy/shared-model rewrite.
 Force never verifies/bypasses guards: **PROMOTED unchecked; Phase-2 COMPLETE was not established.**
 Deploy only by separate explicit agreement.
 

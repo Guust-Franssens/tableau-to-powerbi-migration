@@ -131,8 +131,7 @@ stale bundle copy. `shipped_tree_divergence` is disclosure, not fidelity proof: 
 legitimately diverge from the baseline and still be broken in the shipped visual, so the validator
 must inspect the package or promoted destination and treat divergence as a finding. Compare the
 baseline/working pair with `git diff --no-index --stat`, never PowerShell's `diff` (which is an
-alias for `Compare-Object` and compares the two path *strings*). Source:
-[`.github/skills/powerbi-report-gotchas/SKILL.md` §3](../.github/skills/powerbi-report-gotchas/SKILL.md).
+alias for `Compare-Object` and compares the two path *strings*).
 
 **2. `semantic_models/` is NOT a per-workbook guarantee.** ✅ Measured on run 408: **18 model
 baselines for 62 `pbip/` units**. That tree is keyed by *model*, not by workbook, and is emitted for
@@ -462,7 +461,7 @@ does not identify the edited side**: ✅ measured, a deletion-only edit *inside 
 `1 file changed, 9 deletions(-)` — no extra insertions on the edited side at all; a replacement
 yields equal insertions and deletions; and both trees may have been edited. To establish which side
 is authoritative, use the **full diff** (drop `--stat`), the `_build/generated-edit-declarations/`
-records where they exist ([`powerbi-report-gotchas` §3](../.github/skills/powerbi-report-gotchas/SKILL.md)),
+records where they exist,
 `check_migration_progress.py --tamper` (which now names an edited package by file), and your own
 knowledge of where the agent was told to work. **If a diff says the BUNDLE was edited after
 packaging, stop and do not promote** — that work is not in the canonical tree and promoting would
@@ -480,8 +479,7 @@ PowerShell alias for `Compare-Object` and compares the two path *strings*.
 
 ### The `byPath` mechanics (still correct, and still necessary)
 
-Source: [`.github/skills/powerbi-report-gotchas/SKILL.md` §3](../.github/skills/powerbi-report-gotchas/SKILL.md)
-(🟢 verified 2026-08-11). These apply whichever source location you promote from.
+🟢 Verified 2026-08-11. These apply whichever source location you promote from.
 
 **Model per workbook — plain copy, but copy the CONTENTS.** The promoted unit folder already holds
 `<Name>.Report/` and `<Name>.SemanticModel/` as **siblings**, with `"path": "../<Name>.SemanticModel"`,

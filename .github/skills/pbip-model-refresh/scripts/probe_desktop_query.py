@@ -839,7 +839,7 @@ def probe(port: int, tables: list[str] | None, emit=print) -> int:
     model-level ``PREFLIGHT: DATA_OK``. With NO table named, only the first queryable table is
     probed and the verdict is ``PREFLIGHT: TABLE_OK '<table>'`` - a single arbitrary table is not a
     model-level guarantee, because a static parameter/CSV table can return rows while a live source
-    never loaded (see the powerbi-semantic-model-gotchas rule: prove a REAL read per live source).
+    never loaded.
     """
     adomd_connection = _load_adomd(port)
     conn = adomd_connection(f"Data Source=localhost:{port}")
