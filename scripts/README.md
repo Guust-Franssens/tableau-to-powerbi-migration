@@ -1291,7 +1291,7 @@ rebuild the artifact after editing its source.
 
 This opt-in pilot does not replace direct scripts, dispatcher guidance or gates. The frozen
 [pilot plan](../docs/t2p-pilot-plan.md) supersedes the earlier consensus's path timing and exit names.
-The [Quickstart](../README.md#quickstart) installs only this existing facade as module `t2p`
+The [operator setup](../docs/operator-runbook.md#start-here) installs only this existing facade as module `t2p`
 (`t2p:console_main`), using a **regular local-directory** pip/uv install. Its standard installer
 metadata binds the selected environment to one physical toolkit checkout; backend scripts/assets
 are not packaged or selected from caller cwd. Use that environment's absolute generated `t2p.exe`
@@ -1310,7 +1310,20 @@ t2p desktop collect {--pid <pid> --process-start <token> | <pbip-or-folder>} --o
 
 `uv sync --all-extras --no-editable` is the operator setup in the selected checkout. No-sync alone
 does not select an environment from another project, and default uv sync/run can restore editable
-mode. Ordinary pip requires pip already available in the selected environment; no bootstrapper.
+mode. The directory being installed is the toolkit checkout, not Tableau inputs or migration outputs.
+For an already selected environment, regular local-directory compatibility forms are:
+
+```powershell
+uv pip install --python '<absolute-selected-python>' '<absolute-toolkit>'
+# Ordinary pip is available only if that selected environment already has it:
+& '<absolute-selected-python>' -m pip install '<absolute-toolkit>'
+# Existing extras may be selected, e.g. '<absolute-toolkit>[server]'.
+& '<absolute-selected-python>' -B -m t2p --help
+```
+
+No pip bootstrapper or external-tool installer is added. Normal Python resolution installs the
+declared dependencies/requested extras; [runbook tooling](../docs/operator-runbook.md#11-tooling)
+owns Desktop, Copilot, plugins, MCP servers, Node and native drivers.
 Required qualification covers canonical regular uv-sync and ordinary pip on plain/spaced **and**
 combined Unicode/#/% paths. Selected-environment uv-pip retains plain/spaced compatibility;
 **only its raw native combined-punctuation cell is explicitly deferred**, not all uv punctuation forms.

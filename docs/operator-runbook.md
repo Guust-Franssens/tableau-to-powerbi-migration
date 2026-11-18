@@ -13,34 +13,42 @@ same pipeline with steps 1–4 skipped.
 > (destination, scope, autonomy). If you paste a real value into a file that git can see, you have
 > made a mistake; see [§7 Public-repo hygiene](#7-public-repo-hygiene).
 
-**Evidence convention used throughout:**
+## Start here
 
-| marker | means |
-|---|---|
-| ✅ **verified** | read out of the code, or reproduced against a local artifact, while writing this |
-| ⚠️ **reported** | measured in a previous run and recorded elsewhere; not re-checked here |
-| ❌ **not proven** | we do *not* have evidence for this — do not claim it to a customer |
+Install this toolkit in Windows PowerShell ([prerequisites](#11-tooling)):
 
-A ✅ is a promise that costs more than it looks: a *wrong* ✅ is worse than no marker, because it
-stops the reader checking. One was wrong in the first edition (§1.3a claimed a key was in
-`.env.example` that has never been there) and it broke the very first step for a cold operator. If
-you edit this file, re-read the code — do not carry a marker forward.
+```powershell
+git clone https://github.com/Guust-Franssens/tableau-to-powerbi-migration.git
+cd tableau-to-powerbi-migration
+uv venv
+uv sync --all-extras --no-editable
 
-**Where the numbers come from — read this before quoting one to a customer.** Every reference
-number below comes from **one** 38-workbook Tableau site:
+$toolkit = (Get-Location).Path
+$t2p = Join-Path $toolkit '.venv\Scripts\t2p.exe'
+& $t2p doctor
+```
 
-| what | when | engine | note |
-|---|---|---|---|
-| survey/assess/harvest/convert timings, `bound=23/38`, the union trap, `pbip/`=39 | 2026-08-12 | 2.126.0 | the *reference bundle* referred to throughout |
-| deploy rate, 76 planned / 74 created, 36/36 report bindings, `PBI_DESKTOP_PATH`, the wrong-tenant 404 | 2026-08-13 | 2.126.0 | a cold-start operator run against the **same** site |
-| re-checks marked ✅ in this edition | 2026-08-13 | 2.126.0 | code at `master` @ `181324a` |
+Resolve doctor blockers before continuing.
 
-One site is one shape. It is also a **structural blind spot**: this document's numbers were measured
-on the site it was written against, so re-running that site can never catch a number that has gone
-stale — which is exactly how a 2.4×-optimistic deploy estimate survived until an operator with a
-stopwatch ran it. **The next cold run should use a different estate.** Treat every count and duration
-here as an order of magnitude, and re-measure on the customer's estate (`--dry-run` for counts, the
-deploy journal for rate) before quoting one.
+For a local workbook, use the [single-workbook guide](start-with-one-workbook.md).
+For folders, datasources or whole-site expert operations, use the [manual pipeline](#2-the-happy-path).
+For an **approved live project**:
+
+```powershell
+& $t2p start --project '<exact-name-or-LUID>' --session-id '<real-session-UUID>'
+& $t2p status --run '<absolute-run>'
+```
+
+Use the absolute run printed by `start`; assessment is site-wide and exit 0 means capture only.
+After successful capture, continue with the [agent handoff](../AGENTS.md#starting-a-migration--the-dispatchers-job):
+private briefs, START_READY / 0 before builders or validators, and independent Tableau sign-off.
+Keep status output private. Doctor checks tooling, not source access or migration readiness.
+
+[Installation details](../scripts/README.md#narrow-t2ppy-pilot-refs-749--773) ·
+[Doctor troubleshooting](#doctor-fallback).
+
+Historical counts and timings describe the toolkit's reference runs, not your environment.
+Re-measure on the target estate before using them for planning.
 
 ---
 
@@ -261,6 +269,23 @@ repo's reusable bundles, **not** the upstream Power BI plugin.
    versions again. Plugin backup restoration and exact previous CLI installs are rollback
    candidates, **not a tested guarantee**. Never roll back merely for an above-known-good WARN.
 
+#### Doctor fallback
+
+Session-start preflight remains separate under [AGENTS.md](../AGENTS.md). If doctor cannot establish
+the plain preflight cause, first **activate the same selected environment** in that private terminal
+and confirm `(Get-Command python).Source` points to its selected Python. Invoking the absolute
+`t2p.exe` above does **not** activate the parent shell; preflight uses `python` from PATH.
+Then, from the selected toolkit checkout, run the existing manual fallback:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\preflight.ps1
+```
+
+**Only after an actual unsigned/ExecutionPolicy startup refusal**, follow
+[preflight cannot start](#preflight-cannot-start).
+If recovery is allowed, retry the **exact originating command and arguments** (plain preflight);
+no policy pre-check.
+
 #### Preflight cannot start
 
 **Reactive, manual recovery only — not a pre-check.** First try the exact command in the document
@@ -376,7 +401,7 @@ command and arguments once**, from the verified repository root:
 - **Session start** (`AGENTS.md`, `.github/copilot-instructions.md`, this runbook or the session-start
   example in `scripts/README.md`): retain `-Update -CheckUpstream`.
 - **Migration personas** (`tableau-migrator`, `dry-run-operator`), a migration-start call or the
-  README quickstart: return to **plain preflight**, with neither update flag.
+  Doctor fallback: return to **plain preflight**, with neither update flag.
 - **Single-workbook setup** (`docs/start-with-one-workbook.md`): retain its `-Update`.
 
 These are the defaults, not replacement commands: preserve any original `-Tenant`, `-Subscription`
@@ -557,10 +582,9 @@ licensed identity suffices ✅ verified from the module's own comment.
 ### 1.4 Power BI Desktop
 
 **Steps 1–6 never open Desktop** ✅ verified (`run_estate.py`: *"never opens Power BI Desktop"*).
-Everything in this section is for the per-workbook agent phase and for visual verification — but two
-of its prerequisites are checked *early*, so do them the day before.
-
-**Two prerequisites, and preflight can only see one of them.**
+Prepare Desktop for the per-workbook agent phase and visual verification. Preflight checks
+installation; the privacy and native-query choices below require informed human decisions,
+not mandatory setting changes.
 
 **a. Desktop and its bundled client: preflight checks both, and nothing needs pinning.** Open a model
 with `python scripts/open_desktop.py <pbip>`. It looks Desktop up live at every launch (a valid
@@ -568,12 +592,29 @@ with `python scripts/open_desktop.py <pbip>`. It looks Desktop up live at every 
 bridge and fits the frame; `--check` starts nothing and prints which exe it would use. Leave
 `PBI_DESKTOP_PATH` unset unless you need a specific install. A Desktop auto-update needs no re-pin.
 
-**b. Privacy Levels — preflight cannot check this at all**, and states so honestly rather than
-asserting a check it cannot perform (Desktop is MSIX; the setting lives in the package's private
-`settings.dat`, which needs `SeRestorePrivilege` and is locked while Desktop runs) ✅ verified from
-`preflight.ps1`'s own comment. Set it by hand, once: **Options → Global → Privacy → "Always ignore
-Privacy Level settings"**. Without it, any multi-source model raises a modal *before the model
-loads*, which no automation can dismiss and which looks exactly like a hang.
+**b. Privacy isolation is a human choice.** Desktop's **Options → Global → Privacy** includes
+**"Always ignore Privacy Level settings"**. Preflight cannot inspect this setting, and agents must
+not disable it automatically. Keeping isolation on can raise a multi-source security dialog
+*before the model loads*; that is a human stop, not permission to bypass the dialog.
+
+Ignoring privacy levels lets Power Query combine sources without isolating them. Refresh executes
+the **real working artifact**, not an isolated probe, so there is no probe-based protection against
+cross-source disclosure. Leave isolation on whenever the sources require it and have a human
+resolve the dialog without weakening that policy.
+
+**c. Native-query approval is a separate human choice.** Tableau custom SQL can produce a
+`Value.NativeQuery(...)` partition. Desktop may ask permission to execute it under the user's
+database credentials. **Options → Global → Security → "Require user approval for new native
+database queries"** controls this safeguard. Disabling it is not a toolkit prerequisite.
+Consider the risk before changing it, particularly on an analyst's laptop.
+
+Approval is keyed to the exact query text and is user- and machine-scoped; changed SQL or another
+recipient can require fresh approval. The prompt is Desktop-specific, not a Service/gateway/XMLA
+refresh prompt. Neither `EnableFolding` nor an alternative `Sql.Database(..., [Query=...])` removes
+the approval requirement. See [Microsoft's native-query guidance](https://learn.microsoft.com/en-us/power-query/native-database-query).
+Any setting change belongs to a human in the Desktop UI, never registry workarounds or automated
+prompt dismissal. Neither privacy isolation nor native-query approval must be disabled to use
+this toolkit; resulting dialogs remain human stops.
 
 Concurrent Desktop instances are **fine** — the Bridge addresses one by `--pid` natively. What is
 *not* fine is an unnamed lookup with several running: that is a coin flip, and it is a deliberate
