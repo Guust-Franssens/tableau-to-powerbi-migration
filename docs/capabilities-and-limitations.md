@@ -116,35 +116,35 @@ a single pass does.
 ## Known limitations and honest gaps
 
 - **Tableau Sets do not translate at all, in any form** (measured on canonical engine **2.339.0**,
-  2026-09-01; ✅ re-**measured** on **2.356.0**, 2026-09-03 — still true). Every set form we could find
-  is dropped and then **the visual is emitted anyway, without the filter** — so the output renders
-  confidently over an unfiltered superset. ⚠️ **What HAS changed is the disclosure, and it now splits
-  by reference shape** — since engine **2.349.0** (upstream `ca4d672e`, *"a Tableau SET named as a
+  2026-09-01; **re-measured** on **2.356.0**, 2026-09-03, with the same result). Every set form we could find
+  is dropped and then **the visual is emitted anyway, without the filter**, so the output renders
+  over an unfiltered superset. **Disclosure has changed and now varies by reference shape**
+  since engine **2.349.0** (upstream `ca4d672e`, *"a Tableau SET named as a
   filter column stops vanishing silently"*). Upstream
-  [#185](https://github.com/Yarbrdab000/tableau-fabric-skills/issues/185) is still **OPEN**, but an
+  [#185](https://github.com/Yarbrdab000/tableau-fabric-skills/issues/185) is still **open**, but an
   open issue is not evidence that nothing changed; only running the engine settles it. Measured on
   two workbooks differing only in how the set is referenced:
-  - a filter naming the **set column directly** now gets a set-specific warning — *"FILTER DROPPED:
+  - a filter naming the **set column directly** now gets a set-specific warning: *"FILTER DROPPED:
     Tableau set `<name>` ... renders over an UNFILTERED SUPERSET -- it will look complete and show
-    MORE rows than Tableau"* — landing in `remediation_worklist.items[]` as `category:
+    MORE rows than Tableau"*, recorded in `remediation_worklist.items[]` as `category:
     dropped_filter`, `severity: high`, with a remediation naming the Power BI forms to rebuild it as.
     `twb_to_pbir`'s own warning additionally carries a machine-readable `dropped_set_filter` record
-    (`set`, `caption`, `kind`, `level`, `datasource`, `detail`). ⚠️ That key does **not** survive into
+    (`set`, `caption`, `kind`, `level`, `datasource`, `detail`). That key does **not** survive into
     the estate `report.json` (0 occurrences bundle-wide), so gate on `category == "dropped_filter"`
     there, not on the marker.
-  - a filter reaching the set through an **`InOut` column-instance** — Tableau's own authoring shape,
-    and what our committed fixture uses — still falls through to the generic `could not resolve field
+  - a filter reaching the set through an **`InOut` column-instance**, Tableau's own authoring shape
+    and the form used by our committed fixture, still falls through to the generic `could not resolve field
     '<name>' (skipped)`, `category: field_binding`: indistinguishable from a mistyped column, and
     naming none of the consequence.
 
   Confirmed on a real Tableau training sample (`Section 08 - Organizing
   Data`) for four distinct forms: a manual/lasso set, a **condition** set (`SUM([Score]) > 400`), a
   **top-N rank** set, and a **combined** set (`intersection` of two set references). A set used as a
-  `<color>` encoding is dropped just as silently — the emitted `scatterChart` lost its In/Out series
+  `<color>` encoding is dropped just as silently; the emitted `scatterChart` lost its In/Out series
   split entirely. Reproduction fixture: `tests/fixtures/issue-185-set-filter.twb`; filed upstream as
   [`Yarbrdab000/tableau-fabric-skills#185`](https://github.com/Yarbrdab000/tableau-fabric-skills/issues/185).
-  ⚠️ **Sets are hard to find with a naive grep, and this project produced THREE wrong counts in a row
-  before getting it right.** There is no `class='set'` attribute (count: 0). Naming the set literally
+  **Set discovery requires the correct source markers.** Three earlier counts in this project were
+  incorrect. There is no `class='set'` attribute (count: 0). Naming the set literally
   (`[Set 1]`) finds only sets a user never renamed (count: 4 workbooks). The correct marker is the
   authoring attribute on the group: **`user:ui-builder='filter-group'`** (condition / top-N sets) or
   **`'lasso-group'`** (manual sets). `.twbx` are ZIP archives and must be extracted, or a `.twb`-only
@@ -159,25 +159,25 @@ a single pass does.
   set kinds: top-n 32 | membership 27 | condition 13
   ```
 
-  ⚠️ **Set kind matters when reporting a defect:** "sets are dropped" and "top-N sets are dropped" are
-  different claims. All three kinds are dropped, verified on three unrelated workbooks — but a count of
+  **Set kind matters when reporting a defect:** "sets are dropped" and "top-N sets are dropped" are
+  different claims. All three kinds are dropped, verified on three unrelated workbooks, but a count of
   set *markers* is not a count of *defects*: `Airline Alliance` carries 10 markers and only 2 warn,
   because only sets actually referenced by a view are ever resolved.
 - **A zero is not a measurement unless you state the positive control that proves the predicate can
   see what it is looking for.** Four false zeros were produced here in one day: the `class='set'` sweep
   above; a `[Set N]` sweep that undercounted 12 workbooks as 4; a shell function-scope bug that
   silently returned an empty array; and a `Conditional.Cases` search that returned 0 against the
-  engine and was used to infer the engine cannot emit conditional fills — it emits **13 of them** into
+  engine and was used to infer the engine cannot emit conditional fills; it emits **13 of them** into
   a public workbook, because `Conditional.Cases` is *path notation in prose* and the serialized form is
   nested keys `{"Conditional": {"Cases": [...]}}`. Every count in this repo should name its positive
   control beside it, and a corpus too simple to exhibit the effect is a control failure too: our first
   "0 visuals under 20px tall" was measured on single-zone workbooks, and a real multi-zone dashboard
-  produced **14 in its `pbip/` tree** (9 in `reports/`), the smallest at **12.56px**. ⚠️ **Name the
-  tree with any bundle count** — `reports/` and `pbip/` hold different visual populations, so a count
+  produced **14 in its `pbip/` tree** (9 in `reports/`), the smallest at **12.56px**. **Name the
+  tree with any bundle count:** `reports/` and `pbip/` hold different visual populations, so a count
   without its tree is not reproducible.
-- **The PBIR height floor covers `slicer` and `textbox` only, so sub-renderable CHART visuals carry no
+- **The PBIR height floor covers `slicer` and `textbox` only, so sub-renderable chart visuals carry no
   height diagnostic at all.** Measured on engine 2.339.0 against the public `Airline Alliance Activity
-  Dashboard _ #VOTD.twbx`, **in the `pbip/` tree** (⚠️ the tree is part of the measurement — the
+  Dashboard _ #VOTD.twbx`, **in the `pbip/` tree** (the tree is part of the measurement: the
   pristine `reports/` tree holds 95 positioned visuals and 9 under 20px, because `image` visuals are
   `pbip/`-only):
 
@@ -193,60 +193,60 @@ a single pass does.
          PBIR_TEXTBOX_HEIGHT_BELOW_FLOOR      (4 warnings)
   ```
 
-  So of the 14 sub-20px visuals, the **4 textboxes DO get a height diagnostic** and the **5 charts
-  (12.56px, plus four at 14.0px) get none** — there is no chart-height rule. "Validate passed" does not
+  So of the 14 sub-20px visuals, the **4 textboxes get a height diagnostic** and the **5 charts
+  (12.56px, plus four at 14.0px) get none**; there is no chart-height rule. "Validate passed" does not
   mean "the visuals can be seen", but the gap is specifically *chart* visuals, not visuals in general.
   This is the concrete, named instance of the general rule that structural validation is necessary but
   not sufficient. Reported upstream on
   [#186](https://github.com/Yarbrdab000/tableau-fabric-skills/issues/186).
 
-  ⚠️ **The counts above are OUR measurement at engine 2.339.0 and have NOT been re-measured since; an
+  **Measurement scope:** the counts above are our measurement at engine 2.339.0 and have not been re-measured since. An
   earlier version of this bullet said "still OPEN as of 2026-09-03, so this chart-height gap still
   reproduces", which is exactly the issue-state inference this document exists to remove (issue #486,
-  our tracker #494).** Issue state establishes nothing in either direction. What the evidence actually
+  our tracker #494). Issue state establishes nothing in either direction. What the evidence actually
   supports, split by claim:
 
-  - ✅ **The validator half is re-measured, 2026-09-04, and holds.** `powerbi-report-author` 0.1.4's
-    shipped `dist/` contains exactly two height-floor rule codes — `PBIR_SLICER_HEIGHT_BELOW_FLOOR`
-    and `PBIR_TEXTBOX_HEIGHT_BELOW_FLOOR` — and no chart equivalent. This is a property of the
+  - **Remeasured, 2026-09-04: the validator finding holds.** `powerbi-report-author` 0.1.4's
+    shipped `dist/` contains exactly two height-floor rule codes, `PBIR_SLICER_HEIGHT_BELOW_FLOOR`
+    and `PBIR_TEXTBOX_HEIGHT_BELOW_FLOOR`, and no chart equivalent. This is a property of the
     *validator*, so it is unaffected by any engine version.
-  - ⚠️ **The population counts are ours at 2.339.0 and are NOT current at 2.356.0.** Treat the
-    numbers as a worked example, not as today's estate. ❌ They cannot be refreshed from this repo:
+  - **Historical measurement: the population counts are ours at 2.339.0, not current at 2.356.0.** Treat the
+    numbers as a worked example, not as today's estate. They cannot be refreshed from this repo:
     the source `Airline Alliance Activity Dashboard _ #VOTD.twbx` is a public `#VOTD` workbook that is
     **not committed here** (only its built output under `examples/airline-alliance-activity/` is), so
     re-measuring the population needs the workbook re-downloaded first.
-  - ❌ **It does not reproduce in the maintainer's corpus.** His 2026-09-03 sweep of 312 `visual.json`
+  - **Not reproduced in the maintainer's corpus.** His 2026-09-03 sweep of 312 `visual.json`
     across 34 workbooks at engine **2.355.0** reports *"Neither reproduces in our 34-workbook
-    corpus"* — 2 sub-20px visuals, none near 12px. He kept #186 open because **code inspection**
+    corpus"*: 2 sub-20px visuals, none near 12px. He kept #186 open because **code inspection**
     confirmed the structural gap (every size floor in the emit path is type-based, the only
     content-aware sizer is text, and `geometry_defects.floor` at ≤41px is not a blocking gate) while
-    his corpus could not exercise the reported shape — not because he reproduced it.
+    his corpus could not exercise the reported shape, not because he reproduced it.
 
   Related to [#180](https://github.com/Yarbrdab000/tableau-fabric-skills/issues/180).
 
-  ⚠️ **The "#180 slicers *regressed*" framing is RETRACTED — the engine is not wrong here, and the
-  correction matters because it changes who you report the next instance to.** #180 was closed
+  **Correction: the "#180 slicers *regressed*" framing is retracted.** The engine is not wrong here,
+  and the correction changes who should receive the next report. #180 was closed
   COMPLETED on 2026-09-02 with the maintainer's verdict that *"this was not a regression, and my
   attempt to fix it was the actual defect. The engine is correct; the validator rule cannot see what
   the engine emits."* The 57px floor was lowered deliberately in **2.295.0** and is render-verified;
   a 76px re-clamp shipped in 2.342.0 and was reverted in 2.344.0 after the probe justifying it was
   found to search for `fontSize` when the emitted property is `textSize`.
 
-  **But do not read that as "the heights went away" — they did not.** Re-measured by us on
+  **The measured heights remain.** Re-measured by us on
   2026-09-03 against a fresh 48-workbook Tableau Cloud estate on canonical engine **2.353.0**,
   pristine `pbip/`: of 168 slicers, `100px` x79, **`57px` x78**, **`62px` x6**, `95px` x2, and one
-  each at 50/87/71 — **86 of 168 (51%) below the documented 80px floor**, and
+  each at 50/87/71: **86 of 168 (51%) below the documented 80px floor**, and
   `PBIR_SLICER_HEIGHT_BELOW_FLOOR` is still the single most common `powerbi-report-author` 0.1.4
-  failure code across the bundle (8 of 62 reports, including stock Superstore x16). ⚠️ We have **not**
-  established whether that is the same emission path or a second one reaching the same heights — the
+  failure code across the bundle (8 of 62 reports, including stock Superstore x16). We have **not**
+  established whether that is the same emission path or a second one reaching the same heights; the
   bimodal 100/57 split within one estate suggests two paths. So the *validator will still fail your
   bundle*; what is retracted is only the claim that the engine regressed.
 - **An explicit `mark class='Bar'` supports strictly fewer shelf layouts than `mark class='Automatic'`**
-  (engine 2.339.0). ⚠️ **Partly re-measured 2026-09-03 at engine 2.356.0 (issue #486).** The **`bar`
-  half is confirmed** — the committed `issue-424-d-explicit-bar-mark` fixture still emits
+  (engine 2.339.0). **Partly re-measured 2026-09-03 at engine 2.356.0 (issue #486).** The **`bar`
+  half is confirmed**: the committed `issue-424-d-explicit-bar-mark` fixture still emits
   `columnChart` across
   [#184](https://github.com/Yarbrdab000/tableau-fabric-skills/issues/184)'s fix, and upstream kept the
-  explicit-`bar` carve-out with its own test — so the *direction* of this claim (Bar is narrower)
+  explicit-`bar` carve-out with its own test, so the *direction* of this claim (Bar is narrower)
   holds. What **changed** is the `automatic` branch it is compared against: `_has_continuous_date` was
   replaced by `_has_date_dimension` in 2.351.0, so an Automatic mark over a *discrete* date now
   reaches the **line** path rather than the column one. Re-measure before quoting the fallback
@@ -254,7 +254,7 @@ a single pass does.
   `twb_to_pbir.py::_visual_type` accepts `bar` for exactly two layouts
   (dimension-on-cols + measure-on-rows, or dimension-on-rows + measure-on-cols); `automatic` reaches
   five further fallbacks (scatter, matrix, table, column, continuous-date line). So changing a mark
-  from Automatic to Bar in Tableau — cosmetic there — can silently cost the whole visual here
+  from Automatic to Bar in Tableau (a cosmetic change there) can silently cost the whole visual here
   (`mark class 'Bar' / shelf layout not supported -> no visual emitted`, `zone left empty`). A raw
   count of `Bar` marks proves nothing: they are common and mostly work. Controlled A/B fixture:
   `tests/fixtures/issue-185-bar-shelf-layout.twb`.
@@ -272,7 +272,7 @@ a single pass does.
   `broadway-stage-to-screen` (IronViz), `spiraling-satellites` (custom spiral geometry) and
   `fast-fashion-impact` all produce a semantic model and report, but their Power BI Desktop render
   verification is still pending, so they are marked built-but-not-yet-render-verified.
-  (`wind-energy-utilization` IS render-verified - its committed before/after pair is
+  (`wind-energy-utilization` is render-verified; its committed before/after pair is
   `docs/showcase/assets/wind-energy-utilization-1.png`, also listed in the [showcase](showcase/README.md#nl-wind-energy-utilization).)
 - **Extract-based data sources with no live upstream** migrate structurally, but real row data requires
   the separate `.hyper` extraction step (or repointing to a true upstream if one exists behind the

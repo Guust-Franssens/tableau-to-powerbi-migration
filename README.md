@@ -8,6 +8,10 @@ GitHub Copilot agents help build, repair and compare the result with Tableau.
 > or Tableau product, nor sponsored, endorsed or maintained by them. Contributors
 > act in a personal capacity.
 
+![The Price of Prosperity: Tableau (left) and Power BI (right)](docs/showcase/assets/price-of-prosperity-1.png)
+
+*The Price of Prosperity: Tableau (left), Power BI (right). [Source and details](docs/showcase/README.md#the-price-of-prosperity).*
+
 ## Get started
 
 **[Set up the toolkit and start a migration](docs/operator-runbook.md#start-here).**
