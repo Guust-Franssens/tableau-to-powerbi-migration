@@ -43,6 +43,11 @@ MODEL_CHECK_DISCLAIMER = (
     "cold reopen or Phase-2 COMPLETE. Presence/coverage is not semantic quality or DAX correctness. "
     "Exemptions are accepted limitations, not repairs."
 )
+ALL_CHECK_DISCLAIMER = (
+    "All-layer automated checks: model, report, integration and completion evidence are reported separately. "
+    "A layer PASS is not migration completion. The completion section remains NOT_CHECKED without a "
+    "caller-pinned final receipt, and this t2p command cannot establish Phase-2 COMPLETE."
+)
 ENVELOPE_SCHEMA = {
     "type": "object",
     "required": [
@@ -169,7 +174,7 @@ def build_parser(prog: str = "python -B scripts/t2p.py") -> argparse.ArgumentPar
         allow_abbrev=False,
         description=(
             "Narrow pilot: diagnostic doctor, assessment-only survey, live project start, read-only status, "
-            "read-only unit lookup, local .pbip refresh, Desktop observation, dialog details and model checks. "
+            "read-only unit lookup, local .pbip refresh, Desktop observation, dialog details and unit checks. "
             "Without a command, help prints to stderr and exits 2; use --help for stdout or --json for a "
             "structured syntax-error response."
         ),
@@ -180,6 +185,7 @@ def build_parser(prog: str = "python -B scripts/t2p.py") -> argparse.ArgumentPar
             f"  {prog} units list --help\n"
             f"  {prog} refresh --help\n"
             f"  {prog} desktop --help\n"
+            f"  {prog} check C:\\private\\package\n"
             f"  {prog} check C:\\private\\package --scope model"
         ),
         formatter_class=ExamplesHelpFormatter,
@@ -196,7 +202,7 @@ def build_parser(prog: str = "python -B scripts/t2p.py") -> argparse.ArgumentPar
             "desktop",
             "Look at one running Power BI Desktop, or copy its open dialog's details; nothing is started or closed.",
         ),
-        ("check", "Read-only model completeness through check_unit.py; not readiness or completion certification."),
+        ("check", "Read-only layered unit checks through check_unit.py; not readiness or completion certification."),
     ):
         child = commands.add_parser(command, help=help_text, description=help_text, allow_abbrev=False)
         if command == "units":
@@ -216,11 +222,20 @@ def build_parser(prog: str = "python -B scripts/t2p.py") -> argparse.ArgumentPar
         child.add_argument("--json", action="store_true", help="one t2p/v1 JSON envelope on stdout")
         if command == "check":
             child.add_argument("path", type=Path, help="explicit package path, relative or absolute; not a unit ID")
-            child.add_argument("--scope", required=True, choices=["model"], help="model-only automated checks")
+            child.add_argument(
+                "--scope",
+                choices=["all", "model"],
+                default="all",
+                help="all-layer sectioned checks (default), or model-only automated checks",
+            )
             child.epilog = (
                 "Examples:\n"
+                f"  {child.prog} C:\\private\\package\n"
                 f"  {child.prog} C:\\private\\package --scope model\n"
-                f"  {child.prog} C:\\private\\package --scope model --json\n\n" + MODEL_CHECK_DISCLAIMER
+                f"  {child.prog} C:\\private\\package --json\n\n"
+                + ALL_CHECK_DISCLAIMER
+                + "\n\n"
+                + MODEL_CHECK_DISCLAIMER
             )
             child.formatter_class = ExamplesHelpFormatter
         if command == "refresh":
@@ -1443,7 +1458,7 @@ def desktop(args: argparse.Namespace, result: dict) -> int:
     return code
 
 
-def _unit_check_result(path: Path, code: int) -> dict | None:
+def _unit_check_result(path: Path, code: int, scope: str) -> dict | None:
     """Check transport shape/coherence only; the native owner retains all checking policy."""
     try:
         native = json.loads(path.read_text(encoding="utf-8"))
@@ -1467,7 +1482,7 @@ def _unit_check_result(path: Path, code: int) -> dict | None:
     exemptions = native["exemptions"]
     if (
         native["version"] != 1
-        or native["scope"] != "model"
+        or native["scope"] != scope
         or native["exit_code"] != code
         or not native["target"]
         or not checks
@@ -1483,18 +1498,23 @@ def _unit_check_result(path: Path, code: int) -> dict | None:
     ):
         return None
     # pylint: enable=unidiomatic-typecheck
-    expected = {0: "AUTOMATED_CHECKS_PASS", 1: "FINDINGS", 2: "NOT_CHECKED", 4: "PRECONDITION_FAILED"}
+    expected = {
+        0: "COMPLETE" if scope == "all" else "AUTOMATED_CHECKS_PASS",
+        1: "FINDINGS",
+        2: "NOT_CHECKED",
+        4: "PRECONDITION_FAILED",
+    }
     if native.get("status") != expected.get(code) or (code == 0 and any(row["status"] != "PASS" for row in checks)):
         return None
     return native
 
 
 def check(args: argparse.Namespace, result: dict) -> int:
-    """Delegate model checks and private scratch ownership without resolving the caller's target."""
+    """Delegate unit checks and private scratch ownership without resolving the caller's target."""
     import check_unit  # pylint: disable=import-outside-toplevel
 
     result["authority"] = "check_unit.py"
-    result["limitations"].append(MODEL_CHECK_DISCLAIMER)
+    result["limitations"].append(ALL_CHECK_DISCLAIMER if args.scope == "all" else MODEL_CHECK_DISCLAIMER)
     result["proof_boundary"]["not_established"] += [
         "semantic_quality",
         "DAX_correctness",
@@ -1513,7 +1533,7 @@ def check(args: argparse.Namespace, result: dict) -> int:
             str(ROOT / "scripts" / "check_unit.py"),
             str(target),
             "--scope",
-            "model",
+            args.scope,
             "--json",
             str(output),
             "--quiet",
@@ -1521,7 +1541,7 @@ def check(args: argparse.Namespace, result: dict) -> int:
         with _native_to_stderr():
             code = subprocess.run(command, check=False).returncode
         result["delegated_exit_code"] = code
-        native = _unit_check_result(output, code)
+        native = _unit_check_result(output, code, args.scope)
     finally:
         check_unit._remove_json_dir(output_dir)  # pylint: disable=protected-access
     if native is None:
@@ -1536,14 +1556,17 @@ def _check_human(result: dict) -> None:
     if "unit_check" in result:
         import check_unit  # pylint: disable=import-outside-toplevel
 
-        _print_safe(check_unit.render(result["unit_check"]))
+        native = result["unit_check"]
+        renderer = check_unit.render_layered if native["scope"] == "all" else check_unit.render
+        _print_safe(renderer(native))
     else:
         _print_safe(
-            f"MODEL CHECK: result unavailable (exit {result['exit_code']}; "
+            f"UNIT CHECK: result unavailable (exit {result['exit_code']}; "
             f"delegated exit {result['delegated_exit_code']}). "
             "Inspect private diagnostics; no successful check was established."
         )
-    _print_safe(MODEL_CHECK_DISCLAIMER)
+    scope = result.get("unit_check", {}).get("scope", "all")
+    _print_safe(ALL_CHECK_DISCLAIMER if scope == "all" else MODEL_CHECK_DISCLAIMER)
 
 
 def _delegate(args: argparse.Namespace, result: dict, *, json_mode: bool) -> int:

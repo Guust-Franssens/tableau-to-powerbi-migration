@@ -1289,7 +1289,7 @@ t2p start --project <exact-name|LUID> [--env <path>] [--runs-parent <path>] [--s
 t2p status --run <absolute-local-run> [--json]
 t2p units {list | show <id> | find [--name <text>] [--luid <luid>]} [--runs-parent <path>] [--json]
 t2p refresh <pbip-or-folder> [--canaries <table> ...] [--no-save] [--json]
-t2p check <explicit-package-path> --scope model [--json]
+t2p check <explicit-package-path> [--scope model] [--json]
 t2p desktop observe {--pid <pid> [--process-start <token>] | <pbip-or-folder>} [--json]
 t2p desktop collect {--pid <pid> --process-start <token> | <pbip-or-folder>} --out <private-file>
 ```
@@ -1328,7 +1328,7 @@ python -B scripts/t2p.py start --project <exact-name|LUID> [--env <path>] [--run
 python -B scripts/t2p.py status --run <absolute-local-run> [--json]
 python -B scripts/t2p.py units {list | show <id> | find [--name <text>] [--luid <luid>]} [--runs-parent <path>] [--json]
 python -B scripts/t2p.py refresh <pbip-or-folder> [--canaries <table> ...] [--no-save] [--json]
-python -B scripts/t2p.py check <explicit-package-path> --scope model [--json]
+python -B scripts/t2p.py check <explicit-package-path> [--scope model] [--json]
 python -B scripts/t2p.py desktop observe {--pid <pid> [--process-start <token>] | <pbip-or-folder>} [--json]
 ```
 
@@ -1478,11 +1478,13 @@ process-start token at once and prints `OPEN_DESKTOP: the .pbip is open in Deskt
 or an unreadable start token gives exit 2 with nothing observed or collected; give the PID instead. A file
 chosen through File > Open that failed to load is not found this way.
 
-### Model completeness (`t2p check`, #876)
+### Layered unit checks (`t2p check`, #876)
 
-`t2p check <explicit-package-path> --scope model [--json]` delegates to `check_unit.py`.
+`t2p check <explicit-package-path> [--scope {all,model}] [--json]` delegates to `check_unit.py`.
 The path may be relative; its lexical alias is preserved for the owner's namespace admission.
-`--scope model` is required. There is no unit-ID lookup or report/integration/all expansion.
+The default is `--scope all`: human output separates native MODEL, REPORT, INTEGRATION and
+COMPLETION sections. `--scope model` retains the original model-agent route and exits after its
+scoped automated checks. There is no unit-ID lookup or separate report/integration expansion.
 No repair, refresh, Desktop launch, receipt finalization or package write is performed.
 
 ✅ The native owner reports table/column/measure description counts, categorical-domain gaps,
@@ -1494,7 +1496,10 @@ retain `item`, `reason` and `decided_by`. Native `STUBS` remains visible even wh
 allow the selected check to pass. Invalid or ambiguous acknowledgements do not clear findings.
 External models stay deferred to their owning unit, not automatically followed and rechecked.
 
-Human output reuses the native renderer. JSON adds the **unmodified** native result as `unit_check`
+Human output reuses native check details, grouped by owner layer for all-scope output. A layer PASS
+does not imply another layer passed or completion was established. The completion section is
+deliberately NOT_CHECKED without caller-pinned final-receipt evidence; this facade never supplies
+that receipt. JSON adds the **unmodified** native result as `unit_check`
 inside `t2p/v1`, not inside the configuration-only `checks[]`. Native statuses, evidence, reasons,
 omitted checks and `delegated_exit_code` survive. Native exits remain 0 (scoped automated pass),
 1 (findings), 2 (not checked), 4 (precondition failed), or 64 (missing ordinary directory).

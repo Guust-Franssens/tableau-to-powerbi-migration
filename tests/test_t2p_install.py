@@ -53,8 +53,7 @@ SYNTAX = [
     ["doctor", "--show-values"],
     ["status"],
     ["status", "--run", "relative", "--repair"],
-    ["check", "package"],
-    ["check", "package", "--scope", "all"],
+    ["check", "package", "--scope", "report"],
     ["check", "--scope", "model"],
 ]
 IMPORT_BLOCKER = {

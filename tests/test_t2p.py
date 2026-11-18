@@ -562,9 +562,7 @@ def test_doctor_child_cannot_create_pycache(monkeypatch, tmp_path, capsys):
         ["desktop", "observe", "--pid", "7", "model.pbip"],
         ["desktop", "observe", "model.pbip", "--process-start", "5"],
         ["desktop", "observe", "model.pbip", "other.pbip"],
-        ["check", "package"],
         ["check", "--scope", "model"],
-        ["check", "package", "--scope", "all"],
         ["check", "package", "--scope", "report"],
         ["check", "package", "--scope", "integration"],
         ["check", "package", "--scope", "model", "--repair"],
@@ -916,6 +914,55 @@ def test_model_check_transports_native_result_and_lexical_path(monkeypatch, tmp_
     assert any("not START_READY" in item for item in result["limitations"])
     if code == 64:
         assert result["status"] == "error" and "owner_result_unavailable" in result["limitations"]
+
+
+def test_check_defaults_to_all_and_renders_native_layers(monkeypatch, tmp_path, capfd):
+    import check_unit
+
+    monkeypatch.setattr(check_unit, "REPO_ROOT", tmp_path / "toolkit")
+    native = {
+        **_model_result(1),
+        "scope": "all",
+        "omitted_checks": [],
+        "checks": [
+            {"id": "ai-instructions", "status": "PASS", "native_status": "OK", "detail": "model evidence"},
+            {"id": "pbir-valid", "status": "FINDINGS", "native_status": "FAILED", "detail": "report evidence"},
+            {
+                "id": "field-bindings",
+                "status": "PASS",
+                "native_status": "OK",
+                "detail": "integration evidence",
+            },
+            {
+                "id": "finalized",
+                "status": "NOT_CHECKED",
+                "native_status": "RECEIPT",
+                "detail": "receipt required",
+            },
+        ],
+    }
+    seen = []
+
+    def child(argv, **_kwargs):
+        seen.append(argv)
+        output = Path(argv[argv.index("--json") + 1])
+        output.write_text(json.dumps(native), encoding="utf-8")
+        return subprocess.CompletedProcess(argv, 1)
+
+    monkeypatch.setattr(t2p.subprocess, "run", child)
+    assert t2p.main(["check", str(tmp_path / "package")]) == 1
+    output = capfd.readouterr()
+    assert "MODEL SECTION: PASS" in output.out
+    assert "REPORT SECTION: FINDINGS" in output.out
+    assert "INTEGRATION SECTION: PASS" in output.out
+    assert "COMPLETION SECTION: NOT_CHECKED" in output.out
+    assert "All-layer automated checks" in output.out
+    assert seen[0][seen[0].index("--scope") + 1] == "all"
+    assert t2p.main(["check", str(tmp_path / "package"), "--json"]) == 1
+    result, captured = _json(capfd)
+    assert captured.err == ""
+    assert result["unit_check"] == native
+    assert result["limitations"] == [t2p.ALL_CHECK_DISCLAIMER]
 
 
 @pytest.mark.parametrize(

@@ -4190,6 +4190,55 @@ def render(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _layer_status(checks: list[dict[str, Any]]) -> str:
+    """Aggregate one rendered layer without granting a stronger native verdict."""
+    if not checks:
+        return "NOT_RUN"
+    statuses = {check["status"] for check in checks}
+    for status in (STATUS_PRECONDITION_FAILED, STATUS_FINDINGS, STATUS_NOT_CHECKED):
+        if status in statuses:
+            return status
+    return STATUS_PASS if statuses == {STATUS_PASS} else STATUS_NOT_CHECKED
+
+
+def render_layered(report: dict[str, Any]) -> str:
+    """Render all-scope checks by owner layer while retaining the native detail."""
+    lines = [f"UNIT CHECK ({report['scope']} scope): {report['status']} - {report['target']}"]
+    if report.get("stopped_after"):
+        lines.append(f"  stopped after failed precondition: {report['stopped_after']}")
+    layers = (
+        ("MODEL", MODEL_CHECK_IDS),
+        ("REPORT", REPORT_CHECK_IDS),
+        ("INTEGRATION", INTEGRATION_CHECK_IDS),
+        ("COMPLETION", ALL_ONLY_CHECK_IDS),
+    )
+    classified: set[str] = set()
+    for label, check_ids in layers:
+        checks = [check for check in report["checks"] if check["id"] in check_ids]
+        classified.update(check["id"] for check in checks)
+        lines.extend(("", f"{label} SECTION: {_layer_status(checks)}"))
+        if not checks:
+            lines.append("  NOT_RUN: the native owner produced no checks for this section.")
+            continue
+        for check in checks:
+            lines.extend(_render_check_headline(check))
+            lines.extend(_render_actionable_detail(check))
+            lines.extend(_render_model_detail(check))
+    other = [check for check in report["checks"] if check["id"] not in classified]
+    if other:
+        lines.extend(("", f"UNCLASSIFIED SECTION: {_layer_status(other)}"))
+        for check in other:
+            lines.extend(_render_check_headline(check))
+            lines.extend(_render_actionable_detail(check))
+            lines.extend(_render_model_detail(check))
+    ex = report["exemptions"]
+    if ex["accepted"] or ex["invalid"]:
+        lines.append(f"  documented why-not exemptions: {ex['accepted']} accepted, {ex['invalid']} invalid")
+    lines.append(_summary_line(report))
+    lines.extend(_render_brownfield(report))
+    return "\n".join(lines)
+
+
 def _safe_print(text: str, stream=None) -> None:
     """Print *text*, degrading only characters the stream cannot encode.
 
