@@ -56,6 +56,7 @@ PER_PERSONA = {
         "Severity is what a user would notice side by side, not data correctness",
         "Binding is not acceptance.",
         "even while `still_open`",
+        "Bind each entry in the first receipt that sees it",
         "only the human accepts it.",
     ),
     "tableau-migrator": (
@@ -69,9 +70,9 @@ PER_PERSONA = {
         "That is the only ACCEPTED list.",
         "Give V the limitations the human approved",
         "Send each open finding not on the human-approved list to its owner at least once",
-        "Append only: never change, reorder or remove any existing entry, bound or not",
+        "From then on, append only: never change, reorder or remove any existing entry, bound or not",
         "still blocks COMPLETE until #894",
-        "never rewrite a finding ID.",
+        "never rewrite a finding ID or force a cosmetic revision.",
     ),
     "dry-run-operator": (
         "stop for a human, even in autopilot",
