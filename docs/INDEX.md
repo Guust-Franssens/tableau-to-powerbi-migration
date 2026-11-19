@@ -201,6 +201,7 @@ Base: ``
 .github/skills/live-source-reachability/SKILL.md
 .github/skills/pbip-model-refresh/SKILL.md
 .github/skills/powerbi-ai-readiness/SKILL.md
+.github/skills/powerbi-desktop-debugging/SKILL.md
 ```
 <!-- Narrow CLI pilot is opt-in; direct-script guidance remains authoritative. -->
 
