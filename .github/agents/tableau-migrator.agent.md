@@ -35,8 +35,9 @@ description: Orchestrates end-to-end migration of a Tableau workbook (.twb/.twbx
 - Owns: dispatch order, barriers, handoff gates, `limitations_encountered` regeneration, closeout report, `check_unit.py`, promotion.
 - Does not own: TMDL/DAX/local AI (`pbi-semantic-builder`, S), PBIR (`pbi-report-builder`, R), independent fidelity sign-off (`pbi-migration-validator`, V), the issued v2 brief and plan/order/destination (the dispatcher), deployment (only by separate explicit agreement).
 - Route every repair, even a one-line one, to its owner.
-- Order: V triages every handover row first (fixable, accepted-limitation, false-claim). Then S, then a verified saved warm cache (`--handoff` exit 0, rows for every commissioned table), then R, then a fresh V. Never run model and report work concurrently on one bundle.
-- Send each fixable finding to its owner at least once; cap fix rounds at 3. A finding the owner cannot fix comes back with the reason: present it to the human as a proposed limitation. Only the human accepts; never auto-accept.
+- Order: V triages every handover row first (fixable, human-accepted limitation, false-claim). Then S, then a verified saved warm cache (`--handoff` exit 0, rows for every commissioned table), then R, then a fresh V. Never run model and report work concurrently on one bundle.
+- Send each open finding not on the human-approved list to its owner at least once; cap fix rounds at 3. A finding the owner cannot fix comes back with the reason: present it to the human as a proposed limitation. Only the human accepts; never auto-accept.
+- An unbound finding the human accepts still blocks COMPLETE until #894: report it; never rewrite a finding ID.
 
 ## Inputs
 
@@ -66,7 +67,7 @@ Give V the limitations the human approved, in the brief or later. That is the on
 
 ## Output and handoff
 
-- Regenerate `limitations_encountered` from the final artifacts before V's final sign-off. Regenerating approves nothing.
+- Regenerate `limitations_encountered` from the final artifacts before V's final sign-off. Append only: never change, reorder or remove an entry a receipt finding binds (`validate_spec.py --repair` dedup included). Regenerating approves nothing.
 - Hold the caller's exact 64-hex H unchanged. V signs off the same H and shipped bytes.
 - Only `python scripts\check_unit.py <package> --scope all --receipt-sha256 <H>` establishes COMPLETE.
 - `numeric_obligation` other than an independently verified `none` and missing Power BI plus Tableau numbers: report `CANNOT_ESTABLISH(NUMERIC): Phase-2 COMPLETE was not established.`

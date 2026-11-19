@@ -53,6 +53,9 @@ PER_PERSONA = {
         "Matching numbers is not enough.",
         "That is the only ACCEPTED list; never extend it.",
         "3 same numbers but a clearly different look",
+        "Severity is what a user would notice side by side, not data correctness",
+        "Binding is not acceptance.",
+        "only the human accepts it.",
     ),
     "tableau-migrator": (
         "never add `-Update`",
@@ -62,6 +65,10 @@ PER_PERSONA = {
         "retry the exact originating command and arguments",
         "Resumed Phase-2 work on an edited package does not rerun it",
         "Only the human accepts; never auto-accept.",
+        "That is the only ACCEPTED list.",
+        "to its owner at least once",
+        "Append only: never change, reorder or remove an entry a receipt finding binds",
+        "never rewrite a finding ID.",
     ),
     "dry-run-operator": (
         "stop for a human, even in autopilot",

@@ -67,10 +67,12 @@ Unknown identity or proof: stop that review and ask.
 - Triage every `viz_fidelity[]` row, including `rebuilt`, then review every page, dashboard, composite and figure with actual renders and data, the Tableau reference next to your own Power BI capture. Finish with a fresh pass against current bytes.
 - Severity is what a user would notice side by side, not data correctness:
   - MAJOR: a different number; a missing or extra visual; different structure (other columns or row levels, a flattened header hierarchy, totals or subtotals missing or moved); a different visual type or composition (table vs matrix, other series, stacking, shared vs separate axes); a different look of the data (colour bins, conditional formatting, series colours); a different arrangement (side by side vs stacked, order, scrolling or clipping where Tableau shows everything); different default filter or parameter values, or a filter acting on other visuals than in Tableau.
-  - MINOR: small cosmetics only, such as font size, spacing, a slightly different shade, decimals on an equal value or date formatting.
-  - ACCEPTED: only a finding the human-approved list covers. Bind that limitation when you first record the finding; it cannot be added later (#894). In the receipt, MAJOR is `high` and MINOR is `low`.
+  - MINOR: small cosmetics only, such as font size, spacing, a slightly different shade, decimals on an equal value, or a time part such as 00:00:00 on an otherwise equal date.
+  - ACCEPTED: only a finding the human-approved list covers. It is the receipt status `accepted_limitation` with `limitation_ref`; the finding keeps its MAJOR or MINOR severity.
+- In the receipt, MAJOR is severity `high` and MINOR is `low`.
+- If a `limitations_encountered` entry describes a new finding, bind it when you first record the finding, even while `still_open`. Binding is not acceptance. A binding cannot be added later (#894).
 - Per figure: "no discrepancy found" or a finding row: page, visual, severity, what Tableau shows, what Power BI shows, what to change, owner, evidence.
-- Per page and dashboard: yes, no or cannot-establish, and a score: 5 a user would see the same page, 3 same numbers but a clearly different look, 1 hardly recognisable.
+- Per page and dashboard: yes, no or cannot-establish, and a fidelity score from 1 to 5: 5 a user would see the same page, 3 same numbers but a clearly different look, 1 hardly recognisable.
 - A finding the owner could not fix stays open and goes back to the orchestrator; only the human accepts it.
 - Each commissioned value needs a Power BI DAX result and the Tableau number in the same context; otherwise `numeric_status: unverified`. Missing sides give `CANNOT_ESTABLISH(NUMERIC)`: Phase-2 COMPLETE was not established. A waiver needs an independently verified `numeric_obligation = "none"`.
 - Return findings and sign-off to the orchestrator; receipt-bound sign-off carries the identical H. The sole COMPLETE authority is `python scripts\check_unit.py <package> --scope all --receipt-sha256 <H>`. Never self-promote.
