@@ -26,10 +26,8 @@ Install `pythonnet`; otherwise install or repair Desktop, then rerun.
 - [**`scripts/probe_desktop_query.py`**](scripts/probe_desktop_query.py): read-only port discovery,
   table listing and one-row DAX probe.
 - `scripts/open_desktop.py`: open a `.pbip` in the installed Desktop and print its PID; with `--refresh`,
-  also refresh, Save and close it ([one step](#one-step-open-refresh-save-close-863)); with `--observe PID`,
-  one read-only observer look (exit 0 only for READY, which proves nothing else; `t2p desktop observe`);
-  with `--collect PID`, [the open dialog's Copy details text](#collect-a-dialogs-details-498) (`t2p desktop collect`).
-  Both also take [the `.pbip` or its folder instead of the PID](#target-a-desktop-by-its-pbip-874).
+  also refresh, Save and close it ([one step](#one-step-open-refresh-save-close-863)); `--observe` and
+  `--collect` are `t2p desktop observe` / `t2p desktop collect`, each taking a PID, a `.pbip` or its folder.
 - `scripts/_desktop_details.py`: shared automatic failure diagnostics and explicit collection; clicks
   Copy details and reads the clipboard in a bounded child.
 - [**`scripts/_desktop_observer.py`**](scripts/_desktop_observer.py): the sole read-only observer.
@@ -73,55 +71,7 @@ it does not extend or restart the refresh/Save deadline or retry either action.
 No dialog, unsupported dialogs, unreadable or changed identity, and collection failures are reported
 without hiding the original error. A dialog stays open for the human; nothing is approved or dismissed.
 Successful operations, `--verify-only`, `--observe` and `--check` never collect automatically.
-Existing capture API callers are unchanged. The same shared collector also remains available explicitly:
-
-```
-python scripts/open_desktop.py --collect <pid> --process-start <token> --out <private-file>
-t2p desktop collect --pid <pid> --process-start <token> --out <private-file>
-t2p desktop collect <pbip-or-folder> --out <private-file>
-```
-
-When the observer names an open dialog on that exact process, this clicks Desktop's own "Copy
-details" link through the dialog's HTML (no mouse, keyboard or focus; Desktop need not be in front), in
-a helper process killed after 30 s. It keeps the text only when the clipboard changed and is owned by
-that PID and the process-start token still matches, writes it to `--out` (UTF-8, overwritten; the
-folder must exist) and prints the title, `error_code=` (`PowerBINonFatalError_ErrorCode`, top-level or
-`InnerException<N>`, else `none`) and the first message line. Take the token from the launcher's
-`process_start=` line or `--observe`'s `process_started_at=` (not `unknown`). Given a path instead, it
-reads the token itself ([below](#target-a-desktop-by-its-pbip-874)).
-
-- Exit 0 collected; 3 no dialog (`READY`, `NO_WINDOW`, an exited process; nothing clicked); 2 refused or
-  not collected (a wrong token, `UNKNOWN`, no or several HTML panes, a hung or failed helper, a clipboard
-  not from this PID, a changed process). Minimized Desktop: exit 2 with a hint to restore its window.
-- **Privacy.** The copied text holds session and user IDs, machine paths and stack traces. It goes only
-  to `--out`, which must be private run scratch. The stdout summary is shorter, not redacted: still
-  private. Desktop's copy replaces the clipboard and enters Windows clipboard history (Win+V), and
-  Desktop writes trace-log zips when the link is clicked.
-- Nothing else is clicked; the dialog stays open for the human.
-
-### Target a Desktop by its .pbip (#874)
-
-```
-python scripts/open_desktop.py --observe <pbip-or-folder> [--json]
-python scripts/open_desktop.py --collect <pbip-or-folder> --out <private-file>
-t2p desktop observe <pbip-or-folder> [--json]
-t2p desktop collect <pbip-or-folder> --out <private-file>
-```
-
-A folder must hold exactly one `.pbip`. A value of only digits is a PID, so write `.\2024` for a
-folder named 2024. The one running Desktop that has that file open is found by the bridge's current
-file, else by its PBIDesktop.exe launch command line. The command line covers a Desktop stuck on a
-load error: the bridge then lists it without a current file. Its process-start token is read at once
-and binds the observation or collection as with a PID, after
-`OPEN_DESKTOP: the .pbip is open in Desktop PID <pid> (process_start=<token>)`.
-
-Exit 2, nothing observed or collected, with `give the PID instead`: no running Desktop has the file,
-several do, one cannot be ruled out (no current file, and an unreadable command line or a relative
-`.pbip` argument), the listing is unreadable, or the holder's start token cannot be read.
-`--process-start` with a path is a usage error (exit 2). A Desktop that failed to load a file chosen
-through File > Open is not found this way; use its PID. Measured on Desktop 2.160.579.0: with two
-Desktops open, one READY and one on an `Unable to open document` modal, each path resolved to its own
-PID, and collection by folder copied the modal's details.
+Existing capture API callers are unchanged.
 
 ### One step: open, refresh, Save, close (#863)
 
@@ -281,47 +231,7 @@ Desktop had unsaved changes silently discarded the unsaved edit. Reload does not
 changed M, partitions or sources need the default refresh. Plain `powerbi-desktop reload` is a
 different command and does **not** reread edited TMDL ([Order matters](#order-matters-do-not-refresh-before-you-finish-editing)).
 
-### One read-only Desktop observer (#741, #831)
-
-`_desktop_observer.observe(pid, expected_process_start=<held exact UTC tick string>)` returns an
-immutable `desktop.observation.v2` snapshot; `watch` owns one invocation deadline and its latches.
-Everything runs in-process through ctypes Win32 reads (`EnumWindows`, `GetWindow(GW_OWNER)`,
-`IsWindowEnabled`, `GetWindowTextW`): no helper child, no UI Automation harvest and no window image.
-PID/start/HWND/owner identities are lossless strings in JSON.
-
-**Structural rule: any blocking dialog is a human stop.** A modal disables its owner. The frame is
-found by following ownership to the unowned root; a window whose owner is enabled, or an unowned
-zero-area window, is excluded; any other visible window beside the frame blocks, and a disabled frame
-with nothing else to name blocks by itself. Where frame identity is ambiguous nothing is excluded.
-No window text decides anything, so there is no prose classifier and no length amnesty
-(#406 remains closed).
-
-The only text read is the blocking window's title, to name it for a human:
-`a Power BI Desktop dialog is open: "<title>". A human must act in Desktop.` The title is untrusted:
-control, format (bidi, zero-width) and line-separator characters are dropped, `"` becomes `'`,
-whitespace collapses, and it is capped at 80 characters. It travels as an exception attribute, is
-printed once, and is never persisted: receipts keep only the token, and the `desktop.observation.v2`
-event carries no window text. A blocker without a caption (or the disabled frame itself) is named
-`(no title)`.
-
-| Observation | Operation token | Meaning |
-|---|---|---|
-| `READY` | no refusal | Complete observation, not operation success or source proof. |
-| `HUMAN_ACTION_REQUIRED` | `DIALOG_NEEDS_HUMAN`, exit 3 | Any blocking dialog is a human stop; the message names its title (`a Power BI Desktop dialog is open: "<title>"`). Act on the prompt visible in Desktop; the remedy is **not** established either. |
-| `UNKNOWN` | `CREDENTIAL_UNKNOWN`, exit 3 | A bounded observation could not complete (timeout, minimized frame, enumeration failure, changed target); dialog state undetermined. Inspect Desktop. |
-| `NO_WINDOW` / `PROCESS_GONE` | `DESKTOP_UNREADY` / `DESKTOP_GONE` | Local Desktop state, not a warehouse or credential diagnosis. |
-
-`CREDENTIAL_MISSING`, `REFRESH_IN_PROGRESS`, `DIALOG_UNRECOGNIZED` and `DIALOG_UNREADABLE` are no
-longer produced; receipts still accept them so older runs stay readable.
-
-Queries refuse immediately. A refresh judges only identity and liveness mid-wait and refuses on a
-dialog still open after completion. An observer timeout is not a dialog diagnosis. Non-Windows
-observation is explicitly UNKNOWN, never an empty healthy state.
-
-The old standalone `probe_desktop_credential.ps1` arbiter is retired. The source repo's root shim
-accepts every legacy parameter set but always returns fixed `VERDICT: UNKNOWN`, exit 3, with no
-observation or Refresh. No `CREDENTIAL_PRESENT` remains in runtime. Use the Python refresh/query
-entry points; on a dialog, relay its title and stop.
+Desktop diagnosis is `t2p desktop observe <pbip-or-folder>` and, for a dialog's details, `t2p desktop collect <pbip-or-folder> --out <private-file>`; the sibling `powerbi-desktop-debugging` skill (copy it alongside this one) says how to read them. A dialog is a human stop (`DIALOG_NEEDS_HUMAN`, exit 3). Queries refuse at once, and a refresh refuses on a dialog still open after completion.
 
 > ⚠️ **Do not wait blindly for `NO_BRIDGE` / `not_connected`.** Field report: a machine with two
 > Desktop installs silently launched the older one, and the bridge stayed at `NO_BRIDGE` for 10+

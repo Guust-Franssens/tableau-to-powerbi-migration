@@ -84,7 +84,6 @@ RETIRED_VERDICT_TOKENS = (
     "UNREADABLE_DIALOG",
 )
 DESKTOP_VERDICT_TOKENS = LIVE_VERDICT_TOKENS + RETIRED_VERDICT_TOKENS
-AMNESTY_BLOCK_LEAD = "### One read-only Desktop observer"
 PREFLIGHT_STEP_LEAD = "3. **Local:**"
 # The canonical clean-run paragraph: `DATA_OK` is earned, and an active dialog or any authoritative
 # non-success token outranks a stale or late one. Bounded to its own paragraph so the next one cannot
@@ -450,12 +449,6 @@ def test_credential_guidance_states_only_what_the_desktop_arbiter_establishes() 
     history.
     """
     guidance = {
-        "pbip-model-refresh verdict table": _verdict_rows(PBIP_REFRESH_SKILL),
-        "pbip-model-refresh length-amnesty status": _block_from(
-            PBIP_REFRESH_SKILL,
-            AMNESTY_BLOCK_LEAD,
-            ends="> ⚠️ **Do not wait blindly",
-        ),
         "data-source-credentials verdict table": _verdict_rows(CREDENTIAL_DOC),
         "data-source-credentials preflight step": _block_from(CREDENTIAL_DOC, PREFLIGHT_STEP_LEAD, ends="4. "),
         "scripts/README arbiter row": _table_row(SCRIPTS_README, "probe_desktop_credential.ps1"),
@@ -466,10 +459,6 @@ def test_credential_guidance_states_only_what_the_desktop_arbiter_establishes() 
             assert claim not in block, f"{name} still carries the retired claim {claim!r}"
 
     for name, needle in [
-        ("pbip-model-refresh verdict table", "Act on the prompt visible in Desktop"),
-        ("pbip-model-refresh verdict table", "the remedy is **not** established either"),
-        ("pbip-model-refresh verdict table", "A bounded observation"),
-        ("pbip-model-refresh length-amnesty status", "#406 remains closed"),
         ("data-source-credentials verdict table", "does **not** establish which action"),
         ("data-source-credentials verdict table", "A bounded observation only"),
         ("data-source-credentials preflight step", "bounded observation"),
@@ -478,9 +467,9 @@ def test_credential_guidance_states_only_what_the_desktop_arbiter_establishes() 
     ]:
         assert needle in guidance[name], f"{name} no longer states {needle!r}"
 
-    # Issue #831: any blocking dialog is a human stop named by its title, and neither table may
+    # Issue #831: any blocking dialog is a human stop named by its title, and the table may not
     # bring back a retired text-classification token as a row of current guidance.
-    for name in ("pbip-model-refresh verdict table", "data-source-credentials verdict table"):
+    for name in ("data-source-credentials verdict table",):
         table = guidance[name]
         assert "any blocking dialog is a human stop" in table.lower(), f"{name} lost the structural human stop"
         assert 'dialog is open: "<title>"' in table, f"{name} no longer names the dialog title"
