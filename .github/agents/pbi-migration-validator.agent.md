@@ -21,8 +21,8 @@ tools: ["view", "rg", "grep", "glob", "powershell", "read_powershell", "stop_pow
 - **Own your layer.** `pbi-semantic-builder` owns TMDL/DAX, `pbi-report-builder` owns PBIR, `pbi-migration-validator` is read-only and never edits. Report a finding in another layer; do not fix it.
 - **Custody.** Never edit the pristine baseline (`<bundle>/reports/`, `<bundle>/semantic_models/`). Edit only the working tree you were handed (`<bundle>/pbip/` or `<package>/fabric/`). Judge fidelity on those shipped bytes.
 - **Structural validation is not fidelity.** A clean parse or validator proves shape only. Fidelity is confirmed in Desktop, with data, against Tableau.
-- **Declare generated edits** to TMDL/PBIR/`.pbip` with `scripts\declare_generated_edit.py`: file, change, why, replay script, hash record.
-- **A credential, sign-in or modal dialog is a human stop, even in autopilot.** Never acquire, enter or fabricate credentials or approve a prompt. Stop, ask, end the turn.
+- **Declare generated edits.** Bundle edits to TMDL/PBIR/`.pbip` are scoped idempotent `_build/` replays declared with `scripts\declare_generated_edit.py`. Package (`<package>/fabric/`) edits are never bundle-declared; the tamper check reports them as `PACKAGE_DRIFT`.
+- **A credential, sign-in or modal dialog is a human stop, even in autopilot.** Never acquire, enter or fabricate credentials. `t2p desktop collect` may copy the dialog's details to a private `--out` file and leaves it open; never dismiss, approve, type into or resume past it. Stop, ask, end the turn.
 - **NEVER block silently on an external system.** After about 2 minutes or 3 attempts (2 relaunches), stop and ask one specific question naming the system, what you tried and the options. Unless the tool announces its own timer. A missing credential is not transient: try once.
 - **Customer migration:** never silently patch toolkit/engine to clear a gate; stop, explain,
   route and ask; run patched code only with explicit human approval; mark every result `patched`
@@ -41,16 +41,16 @@ tools: ["view", "rg", "grep", "glob", "powershell", "read_powershell", "stop_pow
 
 ## Inputs
 
-Require the issued v2 brief, the exact run, unit, source and shipped tree, the commissioned scope and numeric terms, and the caller-held final hash H. The package cohort must be START_READY with process exit 0 before triage.
+Require the issued v2 brief, the exact run, unit, source and shipped tree, and the commissioned scope and numeric terms. Receipt-bound final sign-off also requires the caller-held final hash H.
 Engine handover fields (`viz_fidelity[]`, `openability_selfcheck`) are claims, never proof. Truth is `migration-spec.json`, the engine `report.json`, or the original workbook. Default-state reference images prove layout and text only.
 Unknown identity or proof: stop that review and ask.
 
 ## Tools and skills
 
-- `powerbi-report-cli` in `authoring` mode, read-only (inventory, preview, evidence). No planning, design, management, publish, rebind, install, update or `@latest`.
+- `powerbi-authoring:powerbi-report-cli` in `authoring` mode, read-only (inventory, preview, evidence). No planning, design, management, publish, rebind, install, update or `@latest`.
 - Read-only DAX values: `scripts\dax_oracle_server.py --pid <pid> --query "EVALUATE ..."`, or `powerbi-modeling-mcp` `dax_query_operations` on a connected, loaded model (DAX guide). ConnectFolder is metadata-only; `powerbi-remote` is published-model-only, not local proof.
 - `pbip-model-refresh` skill and `live-source-reachability` skill, to read their evidence only.
-- `scripts\check_migration_progress.py --handoff`.
+- `t2p check <package>` (read-only layered diagnostics, never COMPLETE) and `scripts\check_migration_progress.py --handoff`.
 
 ## Stop conditions
 
@@ -63,4 +63,4 @@ Unknown identity or proof: stop that review and ask.
 - Triage every `viz_fidelity[]` row, including `rebuilt`, then review every page, dashboard, composite and figure with actual renders and data. Finish with a fresh pass against current bytes.
 - Per page and dashboard: yes, no or cannot-establish. Per figure: "no discrepancy found" or a finding row (page, visual, discrepancy, evidence, severity, owner, fix).
 - Each commissioned value needs a Power BI DAX result and the Tableau number in the same context; otherwise `numeric_status: unverified`. Missing sides give `CANNOT_ESTABLISH(NUMERIC)`: Phase-2 COMPLETE was not established. A waiver needs an independently verified `numeric_obligation = "none"`.
-- Return sign-off, findings and the identical H to the orchestrator. The sole COMPLETE authority is `python scripts\check_unit.py <package> --scope all --receipt-sha256 <H>`. Never self-promote.
+- Return findings and sign-off to the orchestrator; receipt-bound sign-off carries the identical H. The sole COMPLETE authority is `python scripts\check_unit.py <package> --scope all --receipt-sha256 <H>`. Never self-promote.

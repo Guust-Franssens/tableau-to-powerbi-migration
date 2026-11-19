@@ -19,8 +19,8 @@ description: Orchestrates end-to-end migration of a Tableau workbook (.twb/.twbx
 - **Own your layer.** `pbi-semantic-builder` owns TMDL/DAX, `pbi-report-builder` owns PBIR, `pbi-migration-validator` is read-only and never edits. Report a finding in another layer; do not fix it.
 - **Custody.** Never edit the pristine baseline (`<bundle>/reports/`, `<bundle>/semantic_models/`). Edit only the working tree you were handed (`<bundle>/pbip/` or `<package>/fabric/`). Judge fidelity on those shipped bytes.
 - **Structural validation is not fidelity.** A clean parse or validator proves shape only. Fidelity is confirmed in Desktop, with data, against Tableau.
-- **Declare generated edits** to TMDL/PBIR/`.pbip` with `scripts\declare_generated_edit.py`: file, change, why, replay script, hash record.
-- **A credential, sign-in or modal dialog is a human stop, even in autopilot.** Never acquire, enter or fabricate credentials or approve a prompt. Stop, ask, end the turn.
+- **Declare generated edits.** Bundle edits to TMDL/PBIR/`.pbip` are scoped idempotent `_build/` replays declared with `scripts\declare_generated_edit.py`. Package (`<package>/fabric/`) edits are never bundle-declared; the tamper check reports them as `PACKAGE_DRIFT`.
+- **A credential, sign-in or modal dialog is a human stop, even in autopilot.** Never acquire, enter or fabricate credentials. `t2p desktop collect` may copy the dialog's details to a private `--out` file and leaves it open; never dismiss, approve, type into or resume past it. Stop, ask, end the turn.
 - **NEVER block silently on an external system.** After about 2 minutes or 3 attempts (2 relaunches), stop and ask one specific question naming the system, what you tried and the options. Unless the tool announces its own timer. A missing credential is not transient: try once.
 - **Customer migration:** never silently patch toolkit/engine to clear a gate; stop, explain,
   route and ask; run patched code only with explicit human approval; mark every result `patched`
@@ -46,15 +46,15 @@ Run `powershell -ExecutionPolicy Bypass -File scripts\preflight.ps1` first. Nonz
 If recovery is allowed, retry the **exact originating command and arguments**.
 
 Require from the dispatcher: the existing run, unit and source; the private issued v2 brief; the canonical bundle, working-tree, handover and reference paths. Anything missing or mismatched: report BLOCKED. Never write the brief, allocate a run, invent a spec, or rerun the engine over an existing bundle.
-Give each delegate the run, unit, source, working path, brief, current hash H, handover and references. V gets artifacts and findings, never builder rationale.
+Give each delegate the run, unit, source, working path, brief, handover and references, plus H once a final receipt exists. V gets artifacts and findings, never builder rationale.
 
 ## Tools and skills
 
 - Task tool only, to dispatch S, R and V. If it is unavailable, report BLOCKED; do not work inline.
-- `scripts\check_reference_readiness.py`: the current package cohort must be START_READY with process exit 0 before any triage or builder work.
+- `scripts\check_reference_readiness.py` is the initial entry gate: check once, before the first triage or builder dispatch, that the current package cohort is START_READY with process exit 0. Resumed Phase-2 work on an edited package does not rerun it; never rehash or repackage to make it pass.
 - `live-source-reachability` skill: run it before dispatching builders, through the shipped Power BI artifact.
 - `pbip-model-refresh` skill: owns refresh, persist and warm-cache custody.
-- `scripts\check_migration_progress.py --handoff`, `scripts\declare_generated_edit.py`, `scripts\check_unit.py`, `scripts\promote_unit.py`.
+- `t2p check <package>` (read-only layered diagnostics, never COMPLETE), `scripts\check_migration_progress.py --handoff`, `scripts\check_unit.py`, `scripts\promote_unit.py`.
 
 ## Stop conditions
 

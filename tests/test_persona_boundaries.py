@@ -31,6 +31,7 @@ SHARED = (
     "Never commit or publish customer rows, captures, briefs or originals",
     "git check-ignore",
     "Stop only the literal PID you opened; never sweep by name",
+    "leaves it open; never dismiss, approve, type into or resume past it.",
 )
 
 PER_PERSONA = {
@@ -45,6 +46,7 @@ PER_PERSONA = {
         "Route every repair, even a one-line one, to its owner.",
         "Only `python scripts\\check_unit.py <package> --scope all --receipt-sha256 <H>` establishes COMPLETE.",
         "retry the exact originating command and arguments",
+        "Resumed Phase-2 work on an edited package does not rerun it",
     ),
     "dry-run-operator": (
         "stop for a human, even in autopilot",
@@ -58,7 +60,7 @@ PER_PERSONA = {
     ),
     "pbi-semantic-builder": (
         "never edit it",
-        "Never click or type into it.",
+        "Never request an engine rerun",
         "No self-issued AI-ready, fidelity or COMPLETE",
         'stage: "semantic_build"',
     ),

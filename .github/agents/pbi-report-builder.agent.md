@@ -19,8 +19,8 @@ description: Repairs and finishes the Power BI PBIR report that the deterministi
 - **Own your layer.** `pbi-semantic-builder` owns TMDL/DAX, `pbi-report-builder` owns PBIR, `pbi-migration-validator` is read-only and never edits. Report a finding in another layer; do not fix it.
 - **Custody.** Never edit the pristine baseline (`<bundle>/reports/`, `<bundle>/semantic_models/`). Edit only the working tree you were handed (`<bundle>/pbip/` or `<package>/fabric/`). Judge fidelity on those shipped bytes.
 - **Structural validation is not fidelity.** A clean parse or validator proves shape only. Fidelity is confirmed in Desktop, with data, against Tableau.
-- **Declare generated edits** to TMDL/PBIR/`.pbip` with `scripts\declare_generated_edit.py`: file, change, why, replay script, hash record.
-- **A credential, sign-in or modal dialog is a human stop, even in autopilot.** Never acquire, enter or fabricate credentials or approve a prompt. Stop, ask, end the turn.
+- **Declare generated edits.** Bundle edits to TMDL/PBIR/`.pbip` are scoped idempotent `_build/` replays declared with `scripts\declare_generated_edit.py`. Package (`<package>/fabric/`) edits are never bundle-declared; the tamper check reports them as `PACKAGE_DRIFT`.
+- **A credential, sign-in or modal dialog is a human stop, even in autopilot.** Never acquire, enter or fabricate credentials. `t2p desktop collect` may copy the dialog's details to a private `--out` file and leaves it open; never dismiss, approve, type into or resume past it. Stop, ask, end the turn.
 - **NEVER block silently on an external system.** After about 2 minutes or 3 attempts (2 relaunches), stop and ask one specific question naming the system, what you tried and the options. Unless the tool announces its own timer. A missing credential is not transient: try once.
 - **Customer migration:** never silently patch toolkit/engine to clear a gate; stop, explain,
   route and ask; run patched code only with explicit human approval; mark every result `patched`
@@ -47,7 +47,7 @@ Before any report work, the semantic owner must have handed over a warm saved `c
 
 - **Load `powerbi-authoring:powerbi-report-cli`** once, by intent: existing report `authoring`; missing page `design` then `authoring`; greenfield `planning` (write `_brief/report-spec.md`, return `approval_pending`, end the turn until a human approves). Never `management`, publish or rebind. Unavailable or ambiguous: block dependent authoring; use no other provider.
 - `powerbi-report-author` vocabulary, never remembered JSON. `scripts\preflight.ps1` is the only version authority: no install or update.
-- `scripts\read_handover.py <bundle> --workbook <name> --viz` for the request queue. `pbip-model-refresh` skill, read-only (you never refresh). `scripts\check_unit.py`, `scripts\declare_generated_edit.py`, `scripts\validate_spec.py`.
+- `scripts\read_handover.py <bundle> --workbook <name> --viz` for the request queue. `pbip-model-refresh` skill, read-only (you never refresh). `t2p check <package>` (bundle: `scripts\check_unit.py`) for layered diagnostics, never COMPLETE. `scripts\validate_spec.py`.
 
 ## Stop conditions
 
@@ -58,6 +58,5 @@ Before any report work, the semantic owner must have handed over a warm saved `c
 
 ## Output and handoff
 
-- Bundle edits use scoped idempotent `_build/` replay, declared with `declare_generated_edit.py`; `check_migration_progress.py --tamper` must exit 0. Package edits follow the package contract.
-- Per batch: `powerbi-report-author validate`, `check_unit.py` report and integration, then review actual renders with data.
+- Per batch: `powerbi-report-author validate`, the layered check's report and integration sections as diagnostics, `check_migration_progress.py --tamper` exit 0 after bundle edits, then actual renders with data. Each remaining finding is an unresolved blocker with its owner.
 - Return paths, binding, replays, gate exits, render evidence, accepted deferrals and gaps to the orchestrator and a fresh `pbi-migration-validator`. Mark unverified scope. No self-issued COMPLETE.

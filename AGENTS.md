@@ -33,8 +33,8 @@ Migration-start preflight is **plain**; no tooling upgrades mid-migration.
 4. **Dispatch `@tableau-migrator` per unit via the task/subagent tool**, providers first.
    Pass existing bundle, exact run/unit, brief and working paths; no rerun into that bundle.
    The migrator prepares, then uses validator triage, model/report builders and independent sign-off.
-   Pass this barrier in its task: current package-cohort **START_READY + process exit 0** before any
-   builder/validator work ([entry authority](docs/reference-readiness.md#final-package-start_ready-562-622)).
+   Pass this initial-entry barrier in its task: current package-cohort **START_READY + process exit 0**
+   before any builder/validator work ([entry authority](docs/reference-readiness.md#final-package-start_ready-562-622)).
    Unavailable dispatch is a blocker, not permission to work inline.
 5. **Done includes independent fidelity comparison against Tableau** on the shipped working tree:
    Desktop with data; labels/layout/interactions and commissioned values, within evidence ceilings.
@@ -88,8 +88,8 @@ Generation: [agent architecture](docs/agent-architecture.md). Shared conventions
 - **Own your layer.** `pbi-semantic-builder` owns TMDL/DAX, `pbi-report-builder` owns PBIR, `pbi-migration-validator` is read-only and never edits. Report a finding in another layer; do not fix it.
 - **Custody.** Never edit the pristine baseline (`<bundle>/reports/`, `<bundle>/semantic_models/`). Edit only the working tree you were handed (`<bundle>/pbip/` or `<package>/fabric/`). Judge fidelity on those shipped bytes.
 - **Structural validation is not fidelity.** A clean parse or validator proves shape only. Fidelity is confirmed in Desktop, with data, against Tableau.
-- **Declare generated edits** to TMDL/PBIR/`.pbip` with `scripts\declare_generated_edit.py`: file, change, why, replay script, hash record.
-- **A credential, sign-in or modal dialog is a human stop, even in autopilot.** Never acquire, enter or fabricate credentials or approve a prompt. Stop, ask, end the turn.
+- **Declare generated edits.** Bundle edits to TMDL/PBIR/`.pbip` are scoped idempotent `_build/` replays declared with `scripts\declare_generated_edit.py`. Package (`<package>/fabric/`) edits are never bundle-declared; the tamper check reports them as `PACKAGE_DRIFT`.
+- **A credential, sign-in or modal dialog is a human stop, even in autopilot.** Never acquire, enter or fabricate credentials. `t2p desktop collect` may copy the dialog's details to a private `--out` file and leaves it open; never dismiss, approve, type into or resume past it. Stop, ask, end the turn.
 - **NEVER block silently on an external system.** After about 2 minutes or 3 attempts (2 relaunches), stop and ask one specific question naming the system, what you tried and the options. Unless the tool announces its own timer. A missing credential is not transient: try once.
 - **Customer migration:** never silently patch toolkit/engine to clear a gate; stop, explain,
   route and ask; run patched code only with explicit human approval; mark every result `patched`
