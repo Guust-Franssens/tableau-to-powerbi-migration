@@ -34,6 +34,12 @@ SHARED = (
     "leaves it open; never dismiss, approve, type into or resume past it.",
     "Package (`<package>/fabric/`) edits are never bundle-declared",
     "Close a Desktop you opened as soon as your step no longer needs it, unless you hand it over",
+    "Check free RAM before opening another Desktop.",
+)
+
+REFUSAL_IS_NOT_A_GAP = (
+    "A refusal, gate or dialog is not a missing capability: "
+    "never code around it, call the Desktop bridge directly, or switch routes."
 )
 
 PER_PERSONA = {
@@ -65,6 +71,9 @@ PER_PERSONA = {
         "Your own code is the last resort",
         "`powerbi-report-author` commands first",
         "--screenshot <private-dir> --all-pages",
+        "the one `preview` opens is yours, so after the final render stop the literal PID",
+        'This overrides the skill\'s "Leave Power BI Desktop open".',
+        REFUSAL_IS_NOT_A_GAP,
         "the `powerbi-desktop-debugging` skill",
     ),
     "pbi-semantic-builder": (
@@ -77,7 +86,9 @@ PER_PERSONA = {
         "Your own code is the last resort",
         "(1) `powerbi-modeling-mcp`",
         "AI instructions, which MCP cannot write",
-        "`t2p refresh` is operator-only",
+        "Any refresh without `--automatic-source-scope` (including `t2p refresh` and MCP Refresh) is operator-only",
+        "on a scope refusal, stop and ask the operator",
+        REFUSAL_IS_NOT_A_GAP,
         "the `powerbi-desktop-debugging` skill",
     ),
 }

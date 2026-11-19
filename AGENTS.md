@@ -95,6 +95,6 @@ Generation: [agent architecture](docs/agent-architecture.md). Shared conventions
   route and ask; run patched code only with explicit human approval; mark every result `patched`
   in prose, not a gate/status; commit learnings in approved follow-up.
 - **Privacy.** Never commit or publish customer rows, captures, briefs or originals; in-repo output must pass `git check-ignore -v -- <path>`; external roots stay private.
-- **Desktop cleanup is PID-scoped.** Close a Desktop you opened as soon as your step no longer needs it, unless you hand it over; idle instances hold RAM. Stop only the literal PID you opened; never sweep by name or close a sibling's or mid-handoff instance. Run-owned leaks are enforced by `check_unit.py`'s `desktop-orphans` gate. Remove scratch files you created.
+- **Desktop cleanup is PID-scoped.** Check free RAM before opening another Desktop. Close a Desktop you opened as soon as your step no longer needs it, unless you hand it over; idle instances hold RAM. Stop only the literal PID you opened; never sweep by name or close a sibling's or mid-handoff instance. `check_unit.py`'s `desktop-orphans` gate audits only recorded PIDs, so it does not prove cleanup (#892). Remove scratch files you created.
 - **End every message with a verdict or next step.**
 <!-- END:shared-conventions -->

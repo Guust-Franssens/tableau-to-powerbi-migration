@@ -26,7 +26,7 @@ description: Finishes the Fabric Power BI semantic model (TMDL) that the determi
   route and ask; run patched code only with explicit human approval; mark every result `patched`
   in prose, not a gate/status; commit learnings in approved follow-up.
 - **Privacy.** Never commit or publish customer rows, captures, briefs or originals; in-repo output must pass `git check-ignore -v -- <path>`; external roots stay private.
-- **Desktop cleanup is PID-scoped.** Close a Desktop you opened as soon as your step no longer needs it, unless you hand it over; idle instances hold RAM. Stop only the literal PID you opened; never sweep by name or close a sibling's or mid-handoff instance. Run-owned leaks are enforced by `check_unit.py`'s `desktop-orphans` gate. Remove scratch files you created.
+- **Desktop cleanup is PID-scoped.** Check free RAM before opening another Desktop. Close a Desktop you opened as soon as your step no longer needs it, unless you hand it over; idle instances hold RAM. Stop only the literal PID you opened; never sweep by name or close a sibling's or mid-handoff instance. `check_unit.py`'s `desktop-orphans` gate audits only recorded PIDs, so it does not prove cleanup (#892). Remove scratch files you created.
 - **End every message with a verdict or next step.**
 <!-- END:shared-conventions -->
 
@@ -43,11 +43,11 @@ Require the issued v2 brief; the exact run, unit, source and existing `.Semantic
 
 ## Tools and skills
 
-Reuse before you build: the tools below, in this order. Your own code is the last resort; disclose it as a toolkit gap, and never patch the toolkit or engine.
+Reuse the tools below before building your own. Your own code is the last resort; disclose it as a toolkit gap, and never patch the toolkit or engine. A refusal, gate or dialog is not a missing capability: never code around it, call the Desktop bridge directly, or switch routes.
 
 - **Load `powerbi-authoring:semantic-model-authoring`** for TMDL, DAX and parameter mechanics. Unavailable or ambiguous: block dependent authoring; use no other provider.
-- Edit order: (1) `powerbi-modeling-mcp`, following that skill's tool priority, on a package working tree; (2) AI instructions, which MCP cannot write: `powerbi-ai-readiness` section 0 (the sole local AI owner) and `set_ai_instructions.py`; (3) anything else: hand-edit the TMDL. Bundle edits stay declared `_build/` replays, so MCP does not fit them.
-- Refresh and persist: the pbip-model-refresh skill (`.github\skills\pbip-model-refresh\SKILL.md`) owns refresh, persist, PID and `connectionName` custody. Use its automatic route with `--automatic-source-scope`; `t2p refresh` is operator-only. MCP-made DAX: MCP Calculate, then `--save-only`.
+- Route each change by kind: (1) `powerbi-modeling-mcp`, following that skill's tool priority, on a package working tree; (2) AI instructions, which MCP cannot write: `powerbi-ai-readiness` section 0 (the sole local AI owner) and `set_ai_instructions.py`; (3) anything else: hand-edit the TMDL. Bundle edits stay declared `_build/` replays, so MCP does not fit them.
+- Refresh and persist: the pbip-model-refresh skill (`.github\skills\pbip-model-refresh\SKILL.md`) owns refresh, persist, PID and `connectionName` custody. Use its automatic route. Any refresh without `--automatic-source-scope` (including `t2p refresh` and MCP Refresh) is operator-only; on a scope refusal, stop and ask the operator. MCP-made DAX: MCP Calculate, then `--save-only`.
 - Errors: `t2p check <package> --scope model` (bundle: `check_unit.py --scope model`; diagnostics, never COMPLETE) and `check_datamodel.py <SemanticModel>`. A hanging or refusing Desktop: the `powerbi-desktop-debugging` skill (`t2p desktop observe`, then `collect` only if needed).
 - Measure values: `scripts\dax_oracle_server.py --pid <pid> --query "EVALUATE ..."` (read-only), or `powerbi-modeling-mcp` `dax_query_operations` on a connected, loaded model (DAX guide). ConnectFolder is metadata-only offline; `powerbi-remote` is published-model-only.
 - `live-source-reachability` skill before any live-source edit. `scripts\read_handover.py`, `validate_spec.py`, `open_desktop.py <pbip>` (open only).

@@ -26,7 +26,7 @@ description: Repairs and finishes the Power BI PBIR report that the deterministi
   route and ask; run patched code only with explicit human approval; mark every result `patched`
   in prose, not a gate/status; commit learnings in approved follow-up.
 - **Privacy.** Never commit or publish customer rows, captures, briefs or originals; in-repo output must pass `git check-ignore -v -- <path>`; external roots stay private.
-- **Desktop cleanup is PID-scoped.** Close a Desktop you opened as soon as your step no longer needs it, unless you hand it over; idle instances hold RAM. Stop only the literal PID you opened; never sweep by name or close a sibling's or mid-handoff instance. Run-owned leaks are enforced by `check_unit.py`'s `desktop-orphans` gate. Remove scratch files you created.
+- **Desktop cleanup is PID-scoped.** Check free RAM before opening another Desktop. Close a Desktop you opened as soon as your step no longer needs it, unless you hand it over; idle instances hold RAM. Stop only the literal PID you opened; never sweep by name or close a sibling's or mid-handoff instance. `check_unit.py`'s `desktop-orphans` gate audits only recorded PIDs, so it does not prove cleanup (#892). Remove scratch files you created.
 - **End every message with a verdict or next step.**
 <!-- END:shared-conventions -->
 
@@ -45,11 +45,11 @@ Before any report work, the semantic owner must have handed over a warm saved `c
 
 ## Tools and skills
 
-Reuse before you build: the tools below, in this order. Your own code is the last resort; disclose it as a toolkit gap, and never patch the toolkit or engine.
+Reuse the tools below before building your own. Your own code is the last resort; disclose it as a toolkit gap, and never patch the toolkit or engine. A refusal, gate or dialog is not a missing capability: never code around it, call the Desktop bridge directly, or switch routes.
 
 - **Load `powerbi-authoring:powerbi-report-cli`** once, by intent: existing report `authoring`; missing page `design` then `authoring`; greenfield `planning` (write `_brief/report-spec.md`, return `approval_pending`, end the turn until a human approves). Never `management`, publish or rebind. Unavailable or ambiguous: block dependent authoring; use no other provider.
 - Edits: `powerbi-report-author` commands first, as that skill instructs; edit PBIR files directly only where it has no command, using its metadata, never remembered JSON. `scripts\preflight.ps1` is the only version authority: no install or update.
-- Renders: `powerbi-report-author preview <folder> --host desktop --screenshot <private-dir> --all-pages`, per the skill's preview and screenshot-review references.
+- Renders: `powerbi-report-author preview <folder> --host desktop --screenshot <private-dir> --all-pages`, per the skill's preview and screenshot-review references. Run `t2p desktop observe <pbip>` before your first render: if no Desktop holds the `.pbip`, the one `preview` opens is yours, so after the final render stop the literal PID `observe` then reports. This overrides the skill's "Leave Power BI Desktop open". A Desktop that already held it is not yours; leave it open.
 - Errors: `t2p check <package>` (bundle: `scripts\check_unit.py`) for layered diagnostics, never COMPLETE. A hanging or refusing Desktop: the `powerbi-desktop-debugging` skill (`t2p desktop observe`, then `collect` only if needed).
 - `scripts\read_handover.py <bundle> --workbook <name> --viz` for the request queue. `pbip-model-refresh` skill, read-only (you never refresh). `scripts\validate_spec.py`.
 
@@ -58,7 +58,7 @@ Reuse before you build: the tools below, in this order. Your own code is the las
 - Credential, permission or Desktop dialog: stop and ask a human.
 - Reload Desktop only when `hasUnsavedChanges` is false.
 - Unknown encoding: stop for a human.
-- A missing skill or CLI: BLOCKED, route to preflight. A capability those tools lack: your own code only as the last resort above.
+- A missing skill or CLI: BLOCKED, route to preflight. A capability those tools lack (never a refusal): your own code only as the last resort above.
 
 ## Output and handoff
 
