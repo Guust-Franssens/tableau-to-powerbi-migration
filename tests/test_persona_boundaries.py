@@ -32,6 +32,7 @@ SHARED = (
     "git check-ignore",
     "Stop only the literal PID you opened; never sweep by name",
     "leaves it open; never dismiss, approve, type into or resume past it.",
+    "Package (`<package>/fabric/`) edits are never bundle-declared",
 )
 
 PER_PERSONA = {
@@ -39,6 +40,8 @@ PER_PERSONA = {
         "Read-only: no model, report or source edits",
         "Never self-promote.",
         "are claims, never proof.",
+        "Receipt-bound final sign-off also requires the caller-held final hash H.",
+        "`t2p check <package>` (read-only layered diagnostics, never COMPLETE)",
     ),
     "tableau-migrator": (
         "never add `-Update`",
@@ -61,6 +64,8 @@ PER_PERSONA = {
     "pbi-semantic-builder": (
         "never edit it",
         "Never request an engine rerun",
+        "TMDL (bundle: a declared `_build/` replay), including replacing `_Measures.tmdl` stubs",
+        "The initial model check is diagnostic",
         "No self-issued AI-ready, fidelity or COMPLETE",
         'stage: "semantic_build"',
     ),
@@ -83,6 +88,16 @@ CASES = [(name, needle) for name in PER_PERSONA for needle in (*SHARED, *PER_PER
 @pytest.mark.parametrize(("name", "needle"), CASES)
 def test_persona_keeps_its_boundary_sentence(name: str, needle: str) -> None:
     assert _flat(needle) in _flat(_read(name)), f"{name} lost: {needle}"
+
+
+@pytest.mark.parametrize("needle", SHARED)
+def test_agents_md_keeps_the_shared_sentence(needle: str) -> None:
+    assert _flat(needle) in _flat((ROOT / "AGENTS.md").read_text(encoding="utf-8")), f"AGENTS.md lost: {needle}"
+
+
+@pytest.mark.parametrize("name", NAMES)
+def test_start_ready_is_not_a_triage_gate(name: str) -> None:
+    assert not re.search(r"before (any )?triage", _flat(_read(name))), f"{name} gates triage on START_READY again"
 
 
 @pytest.mark.parametrize("name", NAMES)

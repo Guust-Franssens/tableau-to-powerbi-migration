@@ -58,5 +58,5 @@ Before any report work, the semantic owner must have handed over a warm saved `c
 
 ## Output and handoff
 
-- Per batch: `powerbi-report-author validate`, the layered check's report and integration sections as diagnostics, `check_migration_progress.py --tamper` exit 0 after bundle edits, then actual renders with data. Each remaining finding is an unresolved blocker with its owner.
+- Per batch: `powerbi-report-author validate`, the layered check's report and integration sections as diagnostics, `check_migration_progress.py --tamper` exit 0 after bundle edits (`PACKAGE_DRIFT` alone is package state, not bundle drift), then actual renders with data. Each remaining finding is an unresolved blocker with its owner.
 - Return paths, binding, replays, gate exits, render evidence, accepted deferrals and gaps to the orchestrator and a fresh `pbi-migration-validator`. Mark unverified scope. No self-issued COMPLETE.

@@ -35,7 +35,7 @@ description: Finishes the Fabric Power BI semantic model (TMDL) that the determi
 - Owns: TMDL, DAX, and permitted AI metadata in the supplied working tree; refresh, persist and the warm `cache.abf` through the host skill.
 - Does not own: PBIR (never edit it; send report-layer findings through the orchestrator to `pbi-report-builder`); fidelity sign-off; COMPLETE.
 - Repair the handover `requests[]` (not `needs_review[]`); every item lands, routes, or stays stubbed with a reason.
-- Author residual DAX directly in the working tree's TMDL, including replacing `_Measures.tmdl` stubs. Never request an engine rerun: `--approved-dax` deletes and recreates the bundle.
+- Author residual DAX in the working tree's TMDL (bundle: a declared `_build/` replay), including replacing `_Measures.tmdl` stubs. Never request an engine rerun: `--approved-dax` deletes and recreates the bundle.
 
 ## Inputs
 
@@ -58,7 +58,7 @@ Require the issued v2 brief; the exact run, unit, source and existing `.Semantic
 
 ## Output and handoff
 
-- The initial model check is diagnostic: repair the owned findings. At handoff `check_datamodel.py` exits 0 (after bundle edits, `check_migration_progress.py --tamper` too), and each remaining finding is an unresolved blocker with its owner.
+- The initial model check is diagnostic: repair the owned findings. At handoff `check_datamodel.py` exits 0 (after bundle edits, `check_migration_progress.py --tamper` too; `PACKAGE_DRIFT` alone is package state, not bundle drift), and each remaining finding is an unresolved blocker with its owner.
 - After edits, reopen, refresh, save through the host skill. Require `REFRESH: DATA_OK + PERSISTED`, real rows for every commissioned table, a warm `cache.abf`, and every non-trivial measure compared at real grain with `EVALUATE` against the Tableau value.
 - Seal AI last: `python scripts\set_ai_instructions.py --check --strict --model <model> --md <md>` exit 0 with `qnaEnabled: true`. Never `--adopt-existing`; never author synonyms.
 - Record build-stage limitations in `limitations_encountered` with `stage: "semantic_build"`.
