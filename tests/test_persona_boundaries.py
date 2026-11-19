@@ -50,6 +50,9 @@ PER_PERSONA = {
         "Receipt-bound final sign-off also requires the caller-held final hash H.",
         "`t2p check <package>` (read-only layered diagnostics, never COMPLETE)",
         "the `powerbi-desktop-debugging` skill",
+        "Matching numbers is not enough.",
+        "That is the only ACCEPTED list; never extend it.",
+        "3 same numbers but a clearly different look",
     ),
     "tableau-migrator": (
         "never add `-Update`",
@@ -58,6 +61,7 @@ PER_PERSONA = {
         "Only `python scripts\\check_unit.py <package> --scope all --receipt-sha256 <H>` establishes COMPLETE.",
         "retry the exact originating command and arguments",
         "Resumed Phase-2 work on an edited package does not rerun it",
+        "Only the human accepts; never auto-accept.",
     ),
     "dry-run-operator": (
         "stop for a human, even in autopilot",
@@ -75,6 +79,7 @@ PER_PERSONA = {
         'This overrides the skill\'s "Leave Power BI Desktop open".',
         REFUSAL_IS_NOT_A_GAP,
         "the `powerbi-desktop-debugging` skill",
+        "never accept it yourself.",
     ),
     "pbi-semantic-builder": (
         "never edit it",
@@ -90,6 +95,8 @@ PER_PERSONA = {
         "on a scope refusal, stop and ask the operator",
         REFUSAL_IS_NOT_A_GAP,
         "the `powerbi-desktop-debugging` skill",
+        "never accept it yourself.",
+        "A recorded limitation is only a proposal until the human approves it.",
     ),
 }
 

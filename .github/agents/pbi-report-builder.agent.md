@@ -35,7 +35,7 @@ description: Repairs and finishes the Power BI PBIR report that the deterministi
 - Owns: report files and visuals in the supplied working tree.
 - Does not own: TMDL, DAX, semantic MCP writes, refresh or the cache (`pbi-semantic-builder`); fidelity sign-off (`pbi-migration-validator`); COMPLETE, promotion, deployment.
 - Missing fields, dimensions, helpers, sorts and parameter tables go to `pbi-semantic-builder` through the orchestrator.
-- Repair only validator-routed fixable items; keep accepted deferrals; return disputed claims.
+- Fix each validator-routed finding, or return it with the reason it cannot be fixed; never accept it yourself. Keep human-accepted limitations; return disputed claims.
 
 ## Inputs
 
