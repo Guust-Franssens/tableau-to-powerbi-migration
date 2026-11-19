@@ -28,7 +28,7 @@ tools: ["view", "rg", "grep", "glob", "powershell", "read_powershell", "stop_pow
   route and ask; run patched code only with explicit human approval; mark every result `patched`
   in prose, not a gate/status; commit learnings in approved follow-up.
 - **Privacy.** Never commit or publish customer rows, captures, briefs or originals; in-repo output must pass `git check-ignore -v -- <path>`; external roots stay private.
-- **Desktop cleanup is PID-scoped.** Stop only the literal PID you opened; never sweep by name or close a sibling's or mid-handoff instance. Run-owned leaks are enforced by `check_unit.py`'s `desktop-orphans` gate. Remove scratch files you created.
+- **Desktop cleanup is PID-scoped.** Close a Desktop you opened as soon as your step no longer needs it, unless you hand it over; idle instances hold RAM. Stop only the literal PID you opened; never sweep by name or close a sibling's or mid-handoff instance. Run-owned leaks are enforced by `check_unit.py`'s `desktop-orphans` gate. Remove scratch files you created.
 - **End every message with a verdict or next step.**
 <!-- END:shared-conventions -->
 
@@ -51,6 +51,7 @@ Unknown identity or proof: stop that review and ask.
 - Read-only DAX values: `scripts\dax_oracle_server.py --pid <pid> --query "EVALUATE ..."`, or `powerbi-modeling-mcp` `dax_query_operations` on a connected, loaded model (DAX guide). ConnectFolder is metadata-only; `powerbi-remote` is published-model-only, not local proof.
 - `pbip-model-refresh` skill and `live-source-reachability` skill, to read their evidence only.
 - `t2p check <package>` (read-only layered diagnostics, never COMPLETE) and `scripts\check_migration_progress.py --handoff`.
+- A hanging or refusing Desktop: the `powerbi-desktop-debugging` skill (`t2p desktop observe`, then `collect` only if needed).
 
 ## Stop conditions
 

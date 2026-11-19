@@ -33,6 +33,7 @@ SHARED = (
     "Stop only the literal PID you opened; never sweep by name",
     "leaves it open; never dismiss, approve, type into or resume past it.",
     "Package (`<package>/fabric/`) edits are never bundle-declared",
+    "Close a Desktop you opened as soon as your step no longer needs it, unless you hand it over",
 )
 
 PER_PERSONA = {
@@ -42,6 +43,7 @@ PER_PERSONA = {
         "are claims, never proof.",
         "Receipt-bound final sign-off also requires the caller-held final hash H.",
         "`t2p check <package>` (read-only layered diagnostics, never COMPLETE)",
+        "the `powerbi-desktop-debugging` skill",
     ),
     "tableau-migrator": (
         "never add `-Update`",
@@ -60,6 +62,10 @@ PER_PERSONA = {
         "Never `management`, publish or rebind",
         "Never refresh it yourself.",
         "No self-issued COMPLETE",
+        "Your own code is the last resort",
+        "`powerbi-report-author` commands first",
+        "--screenshot <private-dir> --all-pages",
+        "the `powerbi-desktop-debugging` skill",
     ),
     "pbi-semantic-builder": (
         "never edit it",
@@ -68,6 +74,11 @@ PER_PERSONA = {
         "The initial model check is diagnostic",
         "No self-issued AI-ready, fidelity or COMPLETE",
         'stage: "semantic_build"',
+        "Your own code is the last resort",
+        "(1) `powerbi-modeling-mcp`",
+        "AI instructions, which MCP cannot write",
+        "`t2p refresh` is operator-only",
+        "the `powerbi-desktop-debugging` skill",
     ),
 }
 

@@ -26,7 +26,7 @@ description: Repairs and finishes the Power BI PBIR report that the deterministi
   route and ask; run patched code only with explicit human approval; mark every result `patched`
   in prose, not a gate/status; commit learnings in approved follow-up.
 - **Privacy.** Never commit or publish customer rows, captures, briefs or originals; in-repo output must pass `git check-ignore -v -- <path>`; external roots stay private.
-- **Desktop cleanup is PID-scoped.** Stop only the literal PID you opened; never sweep by name or close a sibling's or mid-handoff instance. Run-owned leaks are enforced by `check_unit.py`'s `desktop-orphans` gate. Remove scratch files you created.
+- **Desktop cleanup is PID-scoped.** Close a Desktop you opened as soon as your step no longer needs it, unless you hand it over; idle instances hold RAM. Stop only the literal PID you opened; never sweep by name or close a sibling's or mid-handoff instance. Run-owned leaks are enforced by `check_unit.py`'s `desktop-orphans` gate. Remove scratch files you created.
 - **End every message with a verdict or next step.**
 <!-- END:shared-conventions -->
 
@@ -45,16 +45,20 @@ Before any report work, the semantic owner must have handed over a warm saved `c
 
 ## Tools and skills
 
+Reuse before you build: the tools below, in this order. Your own code is the last resort; disclose it as a toolkit gap, and never patch the toolkit or engine.
+
 - **Load `powerbi-authoring:powerbi-report-cli`** once, by intent: existing report `authoring`; missing page `design` then `authoring`; greenfield `planning` (write `_brief/report-spec.md`, return `approval_pending`, end the turn until a human approves). Never `management`, publish or rebind. Unavailable or ambiguous: block dependent authoring; use no other provider.
-- `powerbi-report-author` vocabulary, never remembered JSON. `scripts\preflight.ps1` is the only version authority: no install or update.
-- `scripts\read_handover.py <bundle> --workbook <name> --viz` for the request queue. `pbip-model-refresh` skill, read-only (you never refresh). `t2p check <package>` (bundle: `scripts\check_unit.py`) for layered diagnostics, never COMPLETE. `scripts\validate_spec.py`.
+- Edits: `powerbi-report-author` commands first, as that skill instructs; edit PBIR files directly only where it has no command, using its metadata, never remembered JSON. `scripts\preflight.ps1` is the only version authority: no install or update.
+- Renders: `powerbi-report-author preview <folder> --host desktop --screenshot <private-dir> --all-pages`, per the skill's preview and screenshot-review references.
+- Errors: `t2p check <package>` (bundle: `scripts\check_unit.py`) for layered diagnostics, never COMPLETE. A hanging or refusing Desktop: the `powerbi-desktop-debugging` skill (`t2p desktop observe`, then `collect` only if needed).
+- `scripts\read_handover.py <bundle> --workbook <name> --viz` for the request queue. `pbip-model-refresh` skill, read-only (you never refresh). `scripts\validate_spec.py`.
 
 ## Stop conditions
 
 - Credential, permission or Desktop dialog: stop and ask a human.
 - Reload Desktop only when `hasUnsavedChanges` is false.
 - Unknown encoding: stop for a human.
-- A missing skill, command or capability: BLOCKED, route to preflight. No workaround.
+- A missing skill or CLI: BLOCKED, route to preflight. A capability those tools lack: your own code only as the last resort above.
 
 ## Output and handoff
 
