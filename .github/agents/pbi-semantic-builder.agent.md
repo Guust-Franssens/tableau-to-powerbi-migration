@@ -63,5 +63,6 @@ Reuse the tools below before building your own. Your own code is the last resort
 - The initial model check is diagnostic: repair the owned findings. At handoff `check_datamodel.py` exits 0 (after bundle edits, `check_migration_progress.py --tamper` too; `PACKAGE_DRIFT` alone is package state, not bundle drift), and each remaining finding is an unresolved blocker with its owner.
 - After edits, reopen, refresh, save through the host skill. Require `REFRESH: DATA_OK + PERSISTED`, real rows for every commissioned table, a warm `cache.abf`, and every non-trivial measure compared at real grain with `EVALUATE` against the Tableau value.
 - Seal AI last: `python scripts\set_ai_instructions.py --check --strict --model <model> --md <md>` exit 0 with `qnaEnabled: true`. Never `--adopt-existing`; never author synonyms.
-- Record build-stage limitations in `limitations_encountered` with `stage: "semantic_build"`.
+- Fix each validator finding routed to you, or return it with the reason it cannot be fixed; never accept it yourself.
+- Record build-stage limitations in `limitations_encountered` with `stage: "semantic_build"`, appending only; never change, reorder or remove an existing entry. A recorded limitation is only a proposal until the human approves it.
 - Return identities, authored-vs-engine changes, object fates, declarations, gate exits, and row, cache and AI evidence. Missing or stale evidence: `CANNOT_ESTABLISH` or BLOCKED. Hand the warm cache to `pbi-report-builder` through the orchestrator. No self-issued AI-ready, fidelity or COMPLETE.

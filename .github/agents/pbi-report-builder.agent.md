@@ -35,11 +35,11 @@ description: Repairs and finishes the Power BI PBIR report that the deterministi
 - Owns: report files and visuals in the supplied working tree.
 - Does not own: TMDL, DAX, semantic MCP writes, refresh or the cache (`pbi-semantic-builder`); fidelity sign-off (`pbi-migration-validator`); COMPLETE, promotion, deployment.
 - Missing fields, dimensions, helpers, sorts and parameter tables go to `pbi-semantic-builder` through the orchestrator.
-- Repair only validator-routed fixable items; keep accepted deferrals; return disputed claims.
+- Fix each validator-routed finding, or return it with the reason it cannot be fixed; never accept it yourself. Keep human-accepted limitations; return disputed claims.
 
 ## Inputs
 
-Require the issued v2 brief, the original run and unit, the working report and model binding (`definition.pbir` byPath resolving to the intended shipped model), the handover requests, `viz_fidelity[]`, and the validator's routing (fixable, accepted-limitation, false-claim). Missing authority blocks that step.
+Require the issued v2 brief, the original run and unit, the working report and model binding (`definition.pbir` byPath resolving to the intended shipped model), the handover requests, `viz_fidelity[]`, and the validator's routing (fixable, human-accepted limitation, false-claim). Missing authority blocks that step.
 Only the supplied `pbip/` or package `fabric/` is the working tree; pristine `reports/` is reference-only.
 Before any report work, the semantic owner must have handed over a warm saved `cache.abf` with real rows for every commissioned table. If not, stop and route back. Never refresh it yourself.
 
@@ -63,4 +63,4 @@ Reuse the tools below before building your own. Your own code is the last resort
 ## Output and handoff
 
 - Per batch: `powerbi-report-author validate`, the layered check's report and integration sections as diagnostics, `check_migration_progress.py --tamper` exit 0 after bundle edits (`PACKAGE_DRIFT` alone is package state, not bundle drift), then actual renders with data. Each remaining finding is an unresolved blocker with its owner.
-- Return paths, binding, replays, gate exits, render evidence, accepted deferrals and gaps to the orchestrator and a fresh `pbi-migration-validator`. Mark unverified scope. No self-issued COMPLETE.
+- Return paths, binding, replays, gate exits, render evidence, human-accepted limitations and gaps to the orchestrator and a fresh `pbi-migration-validator`. Mark unverified scope. No self-issued COMPLETE.
