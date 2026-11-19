@@ -167,7 +167,7 @@ wrong output field". A fresh-session rerun separated the two; §6.2 has the outc
 | `.github/pbi.kb/visual-cookbook.md` (10k) | External; referenced at point of use | Same |
 | `.github/skills/pbip-model-refresh/` (SKILL.md + `scripts/` + `tests/`) | Repo-local **skill bundle**, also published as a plugin | **Yes, two ways.** §6.1 measured a subagent invoking a repo-local skill **by name** and getting the body back, so `use the pbip-model-refresh skill` works; reading `.github/skills/pbip-model-refresh/SKILL.md` by path also works. Either is discretionary — the agent must choose to do it |
 | `.github/skills/powerbi-ai-readiness/` (SKILL.md + `scripts/` + `tests/`) | Repo-local **skill bundle**, also published as a plugin | Same. It absorbed `docs/ai-instructions-authoring-guide.md` (now a stub) and that persona's ~7.3 KB "Prep the model for AI" section — two copies of one recipe that had already diverged (§8), now one |
-| Per-agent Gotchas | `tableau-migrator` and `pbi-migration-validator` keep theirs inline; the two builders' moved into the bundles above (2026-07-31) | Inline = yes; bundled = only if invoked |
+| Per-agent Gotchas | None: the personas carry no `Gotchas` section since #733; the builders' moved into the bundles above (2026-07-31) | Bundled = only if invoked |
 
 An **explicit instruction to read a file** is a normal tool call and does reach a subagent — this is
 different from passive inheritance, and the repo already depends on it for ~44 KB. The documented
@@ -252,8 +252,8 @@ The hook's failure mode is the disqualifier: nothing errors, the conventions jus
 applying, and the first symptom is an agent doing the exact thing the block forbids (retrying a dead
 credential for two hours, editing a layer it does not own). Duplication that CI keeps in sync is the
 cheaper problem. **Rule: anything whose absence is silent and harmful stays inline; a hook may only
-*supplement*.** If the persona budget must come down, cut per-agent Gotchas that have gone stale —
-that is what orchestrator step 12 is for.
+*supplement*.** If the persona budget must come down, cut what has gone stale (the orchestrator's
+retrospective step 12 and the per-agent Gotchas were removed in #733).
 
 **That rule blocked the obvious next trim — until 2026-07-31, when the trim was done anyway. Here is
 why that is not a violation.** The `Gotchas` sections were ~36% of `pbi-report-builder` (16,788 chars)
@@ -298,7 +298,7 @@ Budget after the 2026-07-31 extraction — **all four fit** (`sync_agent_convent
 30,000 hard cap — precisely because the shared block is generated: an edit aimed at `AGENTS.md`
 propagates into every persona at once, so a persona sitting at 99% turns an unrelated one-word
 convention edit into a red build. New craft learnings still belong in the skill bundles
-(orchestrator step 12 routes them there), not back in a persona.
+(the retired orchestrator step 12 used to route them there), not back in a persona.
 
 ## 6. Experiments
 

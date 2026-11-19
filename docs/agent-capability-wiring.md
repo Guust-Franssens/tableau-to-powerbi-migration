@@ -20,7 +20,7 @@ These script rules ignore HTML comments but read fenced code, because agents rea
 | `BROWNFIELD DISCOVERY` | Customer migrations may already exist in non-canonical folders; the orchestrator must route discovered artifacts instead of restarting work. | `tableau-migrator` | `.github/agents/tableau-migrator.agent.md` | When `check_unit` prints `BROWNFIELD DISCOVERY`, treat it as read-only artifact discovery: it found engine output by content, not path, and the expected/found-instead block is the path forward before redoing work. |
 | `--scope` | Layer owners need scoped `check_unit` gates without mistaking a scoped pass for full sign-off. | all personas | `docs/INDEX.md` | first status and final gate; direct `check_*.py` gates only isolate one finding. |
 | `read_handover` | Builders need the compact residual-work queue instead of re-reading large engine handover JSON by hand. | model and report builders | `docs/INDEX.md` | `python scripts/read_handover.py <bundle> --workbook <name>` — residual work queue and engine-block reason. |
-| `desktop-orphans` | Run-owned Power BI Desktop processes must be cleaned up without killing sibling work. | all personas | `AGENTS.md` | leaks are enforced by `check_unit.py`'s `desktop-orphans` gate. |
+| `desktop-orphans` | Run-owned Power BI Desktop processes must be cleaned up without killing sibling work. | all personas | `AGENTS.md` | `desktop-orphans` gate audits only recorded PIDs, so it does not prove cleanup |
 
 ## Script capability inventory
 

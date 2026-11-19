@@ -20,28 +20,6 @@ After a machine-wide Power BI sign-in, rerun the skill's refresh for each live u
 
 Every other script is advanced or internal, outside the per-unit route; tiers live in the [script capability inventory](agent-capability-wiring.md#script-capability-inventory).
 
-## Retrospective targets
-
-At the end of a migration, route durable learnings to the smallest permanent home that will be read
-next time. Craft belongs in skills/docs/tests, not back in a persona unless the learning is
-orchestration-specific.
-
-| Learning about | Put it here |
-|---|---|
-| Every agent | `AGENTS.md` conventions block, then re-run the conventions sync (CI flags drift) |
-| Live-source reachability / credential stops | `.github/skills/live-source-reachability/SKILL.md` or `docs/data-source-credentials.md` |
-| Refresh / cache or AI readiness | `.github/skills/pbip-model-refresh/SKILL.md` / `.github/skills/powerbi-ai-readiness/SKILL.md` |
-| Orchestration or cross-agent process | `.github/agents/tableau-migrator.agent.md` `## Gotchas` |
-| Tableau formula → DAX | `docs/tableau-dax-translation-guide.md` |
-| A visual encoding that renders | `.github/pbi.kb/visual-cookbook.md` + `.github/pbi.kb/visuals/` |
-| Parser/tooling behaviour | the script itself plus a regression test |
-| Explicit migration engineering feedback | `.github/skills/migration-feedback/SKILL.md` — private evidence and public-safe payload, never publication |
-| Upstream engine behaviour | fresh empty-output run first; then upstream issue + credential-free reproducer |
-
-If you edit a skill bundle that is also published, rebuild the published plugin or preflight flags
-the drift. If a learning is one-off or already caught by a gate, say "nothing worth recording" rather
-than inventing durable knowledge.
-
 ## Inclusion rule
 
 Eligible files: tracked Markdown knowledge/navigation files, `.github/pbi.kb/**/*.json` visual fixtures. Each appears once below or in explicit exclusions; CI's navigation-index gate enforces this.

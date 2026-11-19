@@ -240,7 +240,7 @@ code unconditionally).
 All five personas must stay under the **22,000-char project target** and the **30,000-char hard cap**.
 `sync_agent_conventions.py --check` **fails the build** on a hard-cap overage
 (use `--allow-over-cap` only for a deliberate, temporary overage).
-The orchestrator's step-12 retrospective has the full routing table.
+Route new learnings to a skill, a doc or a test, not into a persona.
 Rationale and the residual risk this accepts:
 [`docs/agent-architecture.md`](docs/agent-architecture.md) §5.
 

@@ -221,15 +221,6 @@ def test_every_agent_carries_the_shared_conventions() -> None:
         assert "NEVER block silently on an external system" in text, f"{agent.name} lacks the retry cap"
 
 
-def test_orchestrator_has_a_retrospective_step() -> None:
-    """Each migration must make the next one cheaper - that only happens if it is a gated step."""
-    text = (REPO_ROOT / ".github" / "agents" / "tableau-migrator.agent.md").read_text(encoding="utf-8")
-    assert "Retrospective — MANDATORY" in text
-    # It must route learnings somewhere a subagent will actually read them, and stay within budget.
-    for anchor in ("sync_agent_conventions.py", "visual-cookbook.md", "30,000-char", "net-zero growth"):
-        assert anchor in text, f"retrospective step is missing its {anchor!r} guidance"
-
-
 def test_customer_data_is_gitignored_in_every_tree() -> None:
     """Extracted data and downloaded sources must be ignored at BOTH tree depths.
 

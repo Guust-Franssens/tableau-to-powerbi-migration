@@ -41,7 +41,7 @@ against the engine's repo. The harm is in the combination above, and it is prese
 
 ### Layer 1 — a convention in the synced block of `AGENTS.md`. **Advisory.**
 
-`scripts/sync_agent_conventions.py` generates the shared conventions into all four
+`scripts/sync_agent_conventions.py` generates the shared conventions into all five
 `.github/agents/*.agent.md`, so one edit reaches every persona. That is the cheapest possible reach,
 and it is worth doing — but it is guidance, not a gate.
 

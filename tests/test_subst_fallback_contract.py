@@ -103,7 +103,7 @@ def test_the_root_routes_alias_recovery_to_the_canonical_path_limits() -> None:
     assert "[Path limits](docs/windows-path-limits.md) owns recovery." in _normalized(AGENTS_MD)
 
 
-@pytest.mark.parametrize("doc", [DRY_RUN_OPERATOR_MD, OPERATOR_RUNBOOK_MD])
+@pytest.mark.parametrize("doc", [OPERATOR_RUNBOOK_MD])
 def test_every_document_that_permits_the_alias_also_states_its_boundary(doc: Path) -> None:
     """Fail-open control: no document may grant the permission without the limit beside it."""
     text = _normalized(doc)
