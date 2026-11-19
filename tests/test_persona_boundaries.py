@@ -55,6 +55,7 @@ PER_PERSONA = {
         "3 same numbers but a clearly different look",
         "Severity is what a user would notice side by side, not data correctness",
         "Binding is not acceptance.",
+        "even while `still_open`",
         "only the human accepts it.",
     ),
     "tableau-migrator": (
@@ -66,8 +67,10 @@ PER_PERSONA = {
         "Resumed Phase-2 work on an edited package does not rerun it",
         "Only the human accepts; never auto-accept.",
         "That is the only ACCEPTED list.",
-        "to its owner at least once",
-        "Append only: never change, reorder or remove an entry a receipt finding binds",
+        "Give V the limitations the human approved",
+        "Send each open finding not on the human-approved list to its owner at least once",
+        "Append only: never change, reorder or remove any existing entry, bound or not",
+        "still blocks COMPLETE until #894",
         "never rewrite a finding ID.",
     ),
     "dry-run-operator": (
@@ -104,6 +107,7 @@ PER_PERSONA = {
         "the `powerbi-desktop-debugging` skill",
         "never accept it yourself.",
         "A recorded limitation is only a proposal until the human approves it.",
+        "appending only; never change, reorder or remove an existing entry.",
     ),
 }
 
