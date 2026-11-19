@@ -70,7 +70,7 @@ Unknown identity or proof: stop that review and ask.
   - MINOR: small cosmetics only, such as font size, spacing, a slightly different shade, decimals on an equal value, or a time part such as 00:00:00 on an otherwise equal date.
   - ACCEPTED: only a finding the human-approved list covers. It is the receipt status `accepted_limitation` with `limitation_ref`; the finding keeps its MAJOR or MINOR severity.
 - In the receipt, MAJOR is severity `high` and MINOR is `low`.
-- Every `limitations_encountered` entry must end bound to a `resolved` or `accepted_limitation` finding, or `check_unit.py` reports `limitations_unadjudicated`. Bind each entry in the first receipt that sees it, even while `still_open`: to the finding it describes, or as `accepted_limitation` if the human approved it. Binding is not acceptance. A binding cannot be added later (#894).
+- Every `limitations_encountered` entry must end bound to a `resolved` or `accepted_limitation` finding, or `check_unit.py` reports `limitations_unadjudicated`. Bind each entry in the first receipt that sees it, even while `still_open`: to the finding it describes, or as `accepted_limitation` if the human approved it. Binding is not acceptance. An existing finding cannot gain a binding later (#894); bind a missed entry with a new finding in the next receipt.
 - Per figure: "no discrepancy found" or a finding row: page, visual, severity, what Tableau shows, what Power BI shows, what to change, owner, evidence.
 - Per page and dashboard: yes, no or cannot-establish, and a fidelity score from 1 to 5: 5 a user would see the same page, 3 same numbers but a clearly different look, 1 hardly recognisable.
 - A finding the owner could not fix stays open and goes back to the orchestrator; only the human accepts it.

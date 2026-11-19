@@ -37,7 +37,7 @@ description: Orchestrates end-to-end migration of a Tableau workbook (.twb/.twbx
 - Route every repair, even a one-line one, to its owner.
 - Order: V triages every handover row first (fixable, human-accepted limitation, false-claim). Then S, then a verified saved warm cache (`--handoff` exit 0, rows for every commissioned table), then R, then a fresh V. Never run model and report work concurrently on one bundle.
 - Send each open finding not on the human-approved list to its owner at least once; cap fix rounds at 3. A finding the owner cannot fix comes back with the reason: present it to the human as a proposed limitation. Only the human accepts; never auto-accept.
-- An unbound finding the human accepts still blocks COMPLETE until #894, and so does an acceptance after the last revision (a successor receipt needs an artifact revision): report BLOCKED; never rewrite a finding ID or force a cosmetic revision.
+- An unbound finding the human accepts still blocks COMPLETE until #894, and so does any status change after the last revision (a successor receipt needs an artifact revision): report BLOCKED; never rewrite a finding ID or force a cosmetic revision.
 
 ## Inputs
 
@@ -67,7 +67,7 @@ Give V the limitations the human approved, in the brief or later. That is the on
 
 ## Output and handoff
 
-- Keep `limitations_encountered` current. Until V's first receipt, drop entries the current artifacts show are no longer true. From then on, append only: never change, reorder or remove any existing entry, bound or not; pointers are positions, so removing an earlier entry breaks a later binding (`validate_spec.py --repair` dedup included). Updating approves nothing.
+- Keep `limitations_encountered` current. Until V's first receipt, drop entries the current artifacts show are no longer true, and put every entry no builder will fix to the human. From then on, append only: never change, reorder or remove any existing entry, bound or not; pointers are positions, so removing an earlier entry breaks a later binding (`validate_spec.py --repair` dedup included). Updating approves nothing.
 - Hold the caller's exact 64-hex H unchanged. V signs off the same H and shipped bytes.
 - Only `python scripts\check_unit.py <package> --scope all --receipt-sha256 <H>` establishes COMPLETE.
 - `numeric_obligation` other than an independently verified `none` and missing Power BI plus Tableau numbers: report `CANNOT_ESTABLISH(NUMERIC): Phase-2 COMPLETE was not established.`

@@ -57,6 +57,7 @@ PER_PERSONA = {
         "Binding is not acceptance.",
         "even while `still_open`",
         "Bind each entry in the first receipt that sees it",
+        "An existing finding cannot gain a binding later (#894); bind a missed entry with a new finding",
         "only the human accepts it.",
     ),
     "tableau-migrator": (
@@ -72,6 +73,9 @@ PER_PERSONA = {
         "Send each open finding not on the human-approved list to its owner at least once",
         "From then on, append only: never change, reorder or remove any existing entry, bound or not",
         "still blocks COMPLETE until #894",
+        "and so does any status change after the last revision",
+        "Until V's first receipt, drop entries the current artifacts show are no longer true",
+        "put every entry no builder will fix to the human.",
         "never rewrite a finding ID or force a cosmetic revision.",
     ),
     "dry-run-operator": (
